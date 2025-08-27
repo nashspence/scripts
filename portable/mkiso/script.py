@@ -1,22 +1,32 @@
 #!/usr/bin/env python3
-import argparse, os, sys, subprocess, time
+# mypy: ignore-errors
+import argparse
+import os
+import subprocess
+import sys
+import time
 from datetime import datetime, timezone
 
+
 # ---------- small helpers ----------
-def eprint(*a, **k): print(*a, **k, file=sys.stderr)
+def eprint(*a, **k):
+    print(*a, **k, file=sys.stderr)
+
 
 def utc_ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
+
 def fmt_bytes(n: int) -> str:
-    units = ["B","KB","MB","GB","TB"]
+    units = ["B", "KB", "MB", "GB", "TB"]
     f = float(n)
     for u in units:
         if f < 1024.0 or u == units[-1]:
             return f"{f:.1f} {u}" if u != "B" else f"{int(f)} {u}"
         f /= 1024.0
 
-def count_files_bytes(root: str) -> tuple[int,int]:
+
+def count_files_bytes(root: str) -> tuple[int, int]:
     n_files, n_bytes = 0, 0
     for dp, _, fns in os.walk(root):
         for f in fns:
@@ -29,6 +39,7 @@ def count_files_bytes(root: str) -> tuple[int,int]:
                 continue
     return n_files, n_bytes
 
+
 def resolve_out_path(out_dir: str, label: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{label}.iso")
@@ -36,9 +47,11 @@ def resolve_out_path(out_dir: str, label: str) -> str:
         i = 1
         while True:
             cand = os.path.join(out_dir, f"{label}_{i}.iso")
-            if not os.path.exists(cand): return cand
+            if not os.path.exists(cand):
+                return cand
             i += 1
     return path
+
 
 def resolve_out_file(out_dir: str, out_file: str) -> str:
     """
@@ -61,24 +74,40 @@ def resolve_out_file(out_dir: str, out_file: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
     return os.path.join(out_dir, out_file)
 
+
 def run_genisoimage(src_dir: str, label: str, out_path: str):
     cmd = ["genisoimage", "-quiet", "-o", out_path, "-V", label, "-udf", src_dir]
     eprint(f"+ {' '.join(cmd)}")
-    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.run(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+    )
     if proc.returncode != 0:
-        if proc.stderr: eprint(proc.stderr.strip())
+        if proc.stderr:
+            eprint(proc.stderr.strip())
         raise SystemExit(proc.returncode)
+
 
 # ---------- main ----------
 def main():
     ap = argparse.ArgumentParser(description=("Minimal ISO builder (dir → .iso)."))
-    ap.add_argument("--src-dir", default="/in", help="Directory to package (default: /in).")
-    ap.add_argument("--out-dir", default="/out", help="Directory to write <label>.iso into (default: /out).")
-    ap.add_argument("--label", default=None, help="Volume label; default = UTC ts %Y%m%dT%H%M%SZ.")
-    ap.add_argument("--out-file", default=None,
-                    help="Filename or path for the output .iso. "
-                         "If a bare filename is given, it is placed in --out-dir. "
-                         "Overrides auto-naming.")
+    ap.add_argument(
+        "--src-dir", default="/in", help="Directory to package (default: /in)."
+    )
+    ap.add_argument(
+        "--out-dir",
+        default="/out",
+        help="Directory to write <label>.iso into (default: /out).",
+    )
+    ap.add_argument(
+        "--label", default=None, help="Volume label; default = UTC ts %Y%m%dT%H%M%SZ."
+    )
+    ap.add_argument(
+        "--out-file",
+        default=None,
+        help="Filename or path for the output .iso. "
+        "If a bare filename is given, it is placed in --out-dir. "
+        "Overrides auto-naming.",
+    )
     args = ap.parse_args()
 
     start = time.time()
@@ -114,6 +143,7 @@ def main():
     dur = time.time() - start
     eprint(f"[mkiso] Success: wrote {fmt_bytes(size)} in {dur:.1f}s")
     eprint(f"[mkiso] ISO label: {label}")
+
 
 if __name__ == "__main__":
     main()
