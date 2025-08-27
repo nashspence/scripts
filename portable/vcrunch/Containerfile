@@ -1,0 +1,5 @@
+FROM python:3.12-alpine
+RUN apk add --no-cache ffmpeg coreutils
+WORKDIR /app
+COPY script.py /app/vcrunch
+ENTRYPOINT ["python", "/app/vcrunch"]

@@ -1,0 +1,43 @@
+#!/bin/zsh
+# pmachine-idle — periodic idle stopper (pure zsh)
+set -euo pipefail
+emulate -L zsh
+setopt err_return pipefail
+
+# Ensure brew + user bin are on PATH for launchd
+export PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+MACHINE="${MACHINE:-com.nashspence.pmachine.script}"
+IDLE_SECS="${IDLE_SECS:-5}"
+STATE_DIR="${STATE_DIR:-$HOME/Library/Application Support/pmachine}"
+STAMP="$STATE_DIR/last-activity"
+
+# If the machine name isn't known, nothing to do
+if ! podman machine inspect "$MACHINE" >/dev/null 2>&1; then
+  exit 0
+fi
+
+# If any containers are running, refresh the activity stamp and bail
+if [[ -n "$(podman ps -q 2>/dev/null)" ]]; then
+  mkdir -p "$STATE_DIR"
+  touch "$STAMP" || true
+  exit 0
+fi
+
+# If no stamp yet, create it once to avoid immediate stop after first boot
+if [[ ! -f "$STAMP" ]]; then
+  mkdir -p "$STATE_DIR"
+  touch "$STAMP" || true
+  exit 0
+fi
+
+# macOS stat(1): %m = epoch mtime
+integer last_mtime
+last_mtime=$(stat -f '%m' "$STAMP" 2>/dev/null || echo 0)
+integer now; now=$(date +%s)
+integer idle=$(( now - last_mtime ))
+
+if (( idle >= IDLE_SECS )); then
+  echo "$(date '+%F %T') pmachine-idle: stopping machine '$MACHINE' after ${idle}s idle"
+  podman machine stop "$MACHINE" >/dev/null 2>&1 || true
+fi

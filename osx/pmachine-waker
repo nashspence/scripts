@@ -1,0 +1,27 @@
+#!/bin/zsh
+# pmachine-waker — socket-activated per-connection waker (pure zsh)
+set -euo pipefail
+emulate -L zsh
+setopt err_return pipefail
+
+# launchd's PATH is minimal; make sure brew + user bin are on it
+export PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# Config via env or defaults
+MACHINE="${MACHINE:-com.nashspence.pmachine.script}"
+IDLE_SECS="${IDLE_SECS:-5}"
+STATE_DIR="${STATE_DIR:-$HOME/Library/Application Support/pmachine}"
+STAMP="$STATE_DIR/last-activity"
+
+# Record activity (this also doubles as a heartbeat you can stat)
+mkdir -p "$STATE_DIR"
+touch "$STAMP" || true
+
+# Helpful breadcrumb in launchd logs
+echo "$(date '+%F %T') pmachine-waker: starting machine '$MACHINE'"
+
+# Ensure the VM is running (quiet if already up)
+podman machine start "$MACHINE" >/dev/null 2>&1 || true
+
+# inetd nowait: launchd accepted() and passed the connected fd; we're done
+exit 0

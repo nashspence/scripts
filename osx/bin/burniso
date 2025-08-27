@@ -1,0 +1,121 @@
+#!/usr/bin/env zsh
+# Burn an ISO on macOS using hdiutil.
+# Defaults: -verbose -speed max -verifyburn
+
+# ---- shell safety ----
+set -e
+set -u
+set -o pipefail
+[[ -n "${DEBUG:-}" ]] && set -x
+
+# ---- deps ----
+for c in hdiutil; do
+  whence -p "$c" >/dev/null || { printf "%s missing\n" "$c" >&2; exit 1; }
+done
+
+print_usage() {
+  cat <<'EOF'
+Usage: burniso [options] [ISO_PATH]
+
+Burn an ISO image to optical media using hdiutil (macOS).
+
+Arguments:
+  ISO_PATH                Path to the .iso file. If omitted, a single line is read from stdin.
+
+Options (defaults shown in brackets):
+  -s, --speed N|max       Burn speed passed to hdiutil (-speed). [max]
+  -n, --no-verify         Disable post-burn verification (omit -verifyburn). [verify ON]
+  -t, --test              Test/simulate the burn (-testburn). [off]
+  -e, --eject             Eject media after burn (-eject). [default behavior]
+  -k, --no-eject          Do not eject after burn (-noeject).
+  -q, --quiet             Less output (omit -verbose).
+  -v, --verbose           More output (-verbose). [on]
+      --dry-run           Print the command that would run, then exit.
+  -h, --help              Show this help and exit.
+
+Examples:
+  burniso ~/Downloads/mydisc.iso
+  echo ~/Downloads/mydisc.iso | burniso
+  burniso --speed 4 --eject ~/Downloads/archive.iso
+  burniso --no-verify --dry-run ~/Downloads/large.iso
+
+Notes:
+- Defaults match: hdiutil burn -verbose -speed max -verifyburn <ISO>
+- Use --speed <integer> to cap speed if you get flaky burns.
+EOF
+}
+
+die() { print -u2 -- "$@"; exit 2; }
+
+# ---- defaults ----
+ISO=""
+SPEED="max"     # keep original default
+VERIFY=1        # keep original default (adds -verifyburn)
+TEST=0
+EJECT=""        # "", "eject", or "noeject"
+VERBOSE=1       # keep original default (adds -verbose)
+DRYRUN=0
+
+# ---- parse args ----
+args=("$@")
+while (( $# > 0 )); do
+  case "$1" in
+    -h|--help) print_usage; exit 0 ;;
+    -s|--speed)
+      shift || die "Missing value for --speed"
+      SPEED="${1:-}" ;;
+    -n|--no-verify|--noverify) VERIFY=0 ;;
+    -t|--test|--testburn)      TEST=1 ;;
+    -e|--eject)                EJECT="eject" ;;
+    -k|--no-eject|--noeject)   EJECT="noeject" ;;
+    -q|--quiet)                VERBOSE=0 ;;
+    -v|--verbose)              VERBOSE=1 ;;
+    --dry-run|--dryrun)        DRYRUN=1 ;;
+    --) shift; break ;;
+    -*)
+      die "Unknown option: $1\nTry --help for usage."
+      ;;
+    *)
+      # first non-flag is ISO path
+      ISO="${ISO:-$1}"
+      ;;
+  esac
+  shift
+done
+
+# Any remaining positional becomes ISO if not set already
+if [[ -z "$ISO" && $# -gt 0 ]]; then
+  ISO="$1"
+fi
+
+# If still empty, read one line from stdin (preserve spaces)
+if [[ -z "$ISO" ]]; then
+  IFS= read -r ISO || ISO=""
+fi
+
+# ---- validate args ----
+[[ -n "$ISO" ]] || die "No ISO provided.\nTry: burniso /path/to/file.iso  (or pipe the path via stdin)"
+[[ -r "$ISO" && -f "$ISO" ]] || die "ISO not found or not a regular readable file: $ISO"
+
+if [[ "$SPEED" != "max" && ! "$SPEED" =~ ^[0-9]+$ ]]; then
+  die "Invalid --speed: $SPEED (use an integer like 4, 8, 16, or 'max')"
+fi
+
+# ---- build command ----
+typeset -a cmd
+cmd=( hdiutil burn )
+(( VERBOSE )) && cmd+=( -verbose )
+cmd+=( -speed "$SPEED" )
+(( VERIFY )) && cmd+=( -verifyburn )
+(( TEST ))   && cmd+=( -testburn )
+[[ -n "$EJECT" ]] && cmd+=( "-$EJECT" )
+cmd+=( "$ISO" )
+
+# ---- run ----
+printf '+ ' ; printf '%q ' "${cmd[@]}" ; printf '\n'
+if (( DRYRUN )); then
+  exit 0
+fi
+
+# Execute; forward exit status
+"${cmd[@]}"

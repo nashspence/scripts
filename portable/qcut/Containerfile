@@ -1,0 +1,5 @@
+FROM python:3.12-alpine
+RUN apk add --no-cache ffmpeg libarchive-tools coreutils font-dejavu
+WORKDIR /app
+COPY script.py /app/qcut
+ENTRYPOINT ["python", "/app/qcut"]

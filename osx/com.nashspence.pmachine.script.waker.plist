@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.nashspence.pmachine.script.waker</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>${HOME}/bin/pmachine-waker</string>
+  </array>
+
+  <!-- launchd owns this socket; it spawns us when a client connects -->
+  <key>Sockets</key>
+  <dict>
+    <key>Control</key>
+    <dict>
+      <key>SockPathName</key><string>/tmp/pmachine.%UID%.sock</string>
+      <key>SockFamily</key><string>Unix</string>
+      <key>SockType</key><string>stream</string>
+      <key>SockMode</key><integer>384</integer> <!-- 0600 -->
+    </dict>
+  </dict>
+
+  <!-- inetd-style: Wait=false => launchd accepts() and passes the CONNECTED fd on stdio -->
+  <key>inetdCompatibility</key>
+  <dict>
+    <key>Wait</key><false/>
+  </dict>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MACHINE</key><string>com.nashspence.pmachine.script</string>
+    <key>IDLE_SECS</key><string>5</string>
+  </dict>
+
+  <key>KeepAlive</key><false/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>${HOME}/Library/Logs/com.nashspence.pmachine.script.waker.out.log</string>
+  <key>StandardErrorPath</key><string>${HOME}/Library/Logs/com.nashspence.pmachine.script.waker.err.log</string>
+</dict>
+</plist>
