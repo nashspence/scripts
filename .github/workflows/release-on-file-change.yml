@@ -4,6 +4,7 @@ on:
     branches: [ main ]
     paths:
       - 'portable/**/release.yaml'
+  workflow_dispatch:
 
 permissions:
   contents: write
