@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+svc="${1:?usage: image-ref <service>}"
+if [[ -f "portable/$svc/release.yaml" ]]; then
+  yq -r '.image + ":" + .version' "portable/$svc/release.yaml"
+else
+  yq -r ".services.\"$svc\" | .image + \":\" + .version" versions.yaml
+fi
