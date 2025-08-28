@@ -1,5 +1,39 @@
 # vcrunch
 
-## Scenario: transcode video to AV1
-* When I run vcrunch on an MP4 file and specify an output path
-* Then the output file is encoded as AV1
+## Scenario: encode with custom parameters
+* Given an MP4 file "<src>"
+* And an output directory "<out>"
+* When I pass --input "<src>"
+* And I pass --target-size "<size>"
+* And I pass --audio-bitrate "<audio>"
+* And I pass --safety-overhead "<overhead>"
+* And I pass --output-dir "<out>"
+* And I pass --manifest-name "<manifest>"
+* And I pass --name-suffix "<suffix>"
+* And I run vcrunch
+* Then vcrunch creates an AV1 file in "<out>"
+* And the file name ends with "<suffix>.mkv"
+* And "<manifest>" records "<src>" as done
+* And the encode respects the target size
+* And the encode respects the audio bitrate
+* And the encode respects the safety overhead
+
+## Scenario: skip already encoded videos
+* Given an MP4 file "<src>"
+* And "<src>" already encoded into "<out>" with name ending "<suffix>.mkv"
+* And a manifest "<manifest>" in "<out>" marking "<src>" as done
+* When I pass --input "<src>"
+* And I pass --output-dir "<out>"
+* And I pass --manifest-name "<manifest>"
+* And I pass --name-suffix "<suffix>"
+* And I run vcrunch
+* Then vcrunch skips "<src>"
+
+## Scenario: read inputs from a list and filter by glob
+* Given a list file "<list>" containing paths
+* And some paths match "<pattern>" and others do not
+* When I pass --paths-from "<list>"
+* And I pass --pattern "<pattern>"
+* And I run vcrunch
+* Then matching video files are transcoded
+* And non-matching paths are skipped
