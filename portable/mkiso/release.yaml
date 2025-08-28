@@ -1,5 +1,5 @@
 # single source of truth for this service
 image: docker.io/nashspence/scripts-mkiso
-version: v0.1.0
+version: v0.1.1
 labels:
   org.opencontainers.image.title: mkiso
