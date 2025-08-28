@@ -32,10 +32,14 @@ jobs:
           for SVC in ${{ steps.svc.outputs.list }}; do
             if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^portable/$SVC/" && \
                git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -vq "^portable/$SVC/release.yaml$"; then
-              OLD=$(git show origin/${{ github.base_ref }}:portable/$SVC/release.yaml | yq -r '.version' || echo "")
-              NEW=$(yq -r '.version' portable/$SVC/release.yaml || echo "")
-              if [[ -z "$OLD" || -z "$NEW" ]]; then
+              OLD=$(git show origin/${{ github.base_ref }}:portable/$SVC/release.yaml 2>/dev/null | yq -r '.version' 2>/dev/null || true)
+              NEW=$(yq -r '.version' portable/$SVC/release.yaml 2>/dev/null || true)
+              if [[ -z "$NEW" ]]; then
                 echo "Missing release.yaml for $SVC"; exit 1
+              fi
+              if [[ -z "$OLD" ]]; then
+                echo "No prior release.yaml for $SVC; skipping bump check"
+                continue
               fi
             OLD=$OLD NEW=$NEW python - <<'PY'
                 import os, sys
