@@ -100,9 +100,17 @@ if [[ -n "$release_yaml" && -z "${DR_NO_PULL:-}" ]]; then
   rel_ver="$(grep -E '^version:' "$release_yaml" 2>/dev/null | head -n1 | awk '{print $2}')"
   if [[ -n "$rel_img" && -n "$rel_ver" ]]; then
     rel_ref="${rel_img}:${rel_ver}"
-    if podman --connection "$DR_MACHINE" pull "$rel_ref" >/dev/null 2>&1; then
+    if pull_err="$(podman --connection "$DR_MACHINE" pull "$rel_ref" 2>&1 >/dev/null)"; then
       image="$rel_ref"
       build_needed=0
+    else
+      pull_rc=$?
+      if [[ "$pull_err" == *"manifest unknown"* || "$pull_err" == *"not found"* ]]; then
+        :
+      else
+        print -u2 "dr: failed to pull $rel_ref: $pull_err"
+        exit $pull_rc
+      fi
     fi
   fi
 fi
