@@ -1,5 +1,5 @@
 # mkiso
 
 ## Scenario: build an ISO image
-* Run `mkiso <input_dir> <output.iso>`
-* `<output.iso>` is created
+* When I run mkiso with an input directory and output file
+* Then the output file is created

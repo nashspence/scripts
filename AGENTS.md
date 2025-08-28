@@ -19,8 +19,7 @@ This file applies to the entire repository.
 
 Scripts are containerised for cross‑platform use with Podman. Host-specific helpers (e.g. in `osx/`) are only for tasks that do not containerise cleanly.
 
-Each script directory maintains a gauge-style `spec.md` with test scenarios. Use a single spec per platform-specific directory (e.g. `osx/spec.md`). If needed, keep script-specific terminology in a `glossary.md` alongside the spec.
-
+Each Podman script directory must include a `spec.md` written using modern Gauge conventions (`Scenario:` headings and `Given`/`When`/`Then` steps with parameter placeholders). Specs should contain the minimal scenarios necessary for complete coverage of the script's features. Use a single spec per platform-specific directory (e.g. `osx/spec.md`). If needed, keep script-specific terminology in a `glossary.md` alongside the spec.
 
 ## Unit tests
 - Place tests in a `tests/` directory adjacent to the code.
