@@ -180,7 +180,7 @@ make_name() {
   print -r -- "$out"
 }
 
-  local cf name abs wrapper
+  local cf name abs wrapper rel
   for cf in \
     "$FILES_DIR"/**/Containerfile(.N) "$FILES_DIR"/**/*.Containerfile(.N) "$FILES_DIR"/**/*.containerfile(.N) \
     "$FILES_DIR"/**/Dockerfile(.N)    "$FILES_DIR"/**/*.Dockerfile(.N)    "$FILES_DIR"/**/*.dockerfile(.N)
@@ -189,7 +189,18 @@ make_name() {
     name="$(make_name "$cf")"
     abs="${cf:A}"
     wrapper="${WRAPPERS_DIR}/${name}"
+    rel="${cf:h}/release.yaml"
+    rel="${rel:A}"
 
+    if [[ -f "$rel" ]]; then
+cat > "$wrapper" <<EOF
+#!/bin/zsh
+set -euo pipefail
+# Auto-generated wrapper. Invokes 'dr' against a specific build file.
+export DR_WRAPPER_NAME="${name}"
+exec dr "${abs}" "${rel}" "\$@"
+EOF
+    else
 cat > "$wrapper" <<EOF
 #!/bin/zsh
 set -euo pipefail
@@ -197,6 +208,7 @@ set -euo pipefail
 export DR_WRAPPER_NAME="${name}"
 exec dr "${abs}" "\$@"
 EOF
+    fi
 
     chmod +x "$wrapper"
 
