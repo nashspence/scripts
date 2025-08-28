@@ -39,8 +39,6 @@ repos:
     hooks:
       - id: gauge-format
         name: gauge format
-        entry: gauge
-        args: [format]
-        language: node
-        additional_dependencies: ["@getgauge/cli"]
+        entry: ./gauge-format.sh
+        language: system
         files: (^|/)spec\.md$
