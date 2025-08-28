@@ -19,8 +19,12 @@ jobs:
         id: svc
         run: |
           git fetch origin ${{ github.base_ref }} --depth=1
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | cut -d/ -f2 | sort -u | grep -E '^[a-zA-Z0-9_-]+$' || true)
-          echo "list=$CHANGED" >> $GITHUB_OUTPUT
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | cut -d/ -f2 \
+            | sort -u \
+            | grep -E '^[a-zA-Z0-9_-]+$' \
+            | tr '\n' ' ' || true)
+          echo "list=${CHANGED}" >> "$GITHUB_OUTPUT"
 
       - name: Verify bumps
         run: |
