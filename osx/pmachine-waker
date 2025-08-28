@@ -1,27 +1,79 @@
 #!/bin/zsh
-# pmachine-waker — socket-activated per-connection waker (pure zsh)
+# pmachine-waker — socket-activated; starts VM, holds while connected, stops if last client disconnects
+
 set -euo pipefail
 emulate -L zsh
-setopt err_return pipefail
+setopt err_return pipefail extended_glob
 
-# launchd's PATH is minimal; make sure brew + user bin are on it
 export PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-# Config via env or defaults
+# --- Config ---------------------------------------------------------------------
 MACHINE="${MACHINE:-com.nashspence.pmachine.script}"
-IDLE_SECS="${IDLE_SECS:-5}"
+
 STATE_DIR="${STATE_DIR:-$HOME/Library/Application Support/pmachine}"
-STAMP="$STATE_DIR/last-activity"
+HOLDS_DIR="$STATE_DIR/holds"              # one file per live connection (by PID)
+STOP_GRACE_SECS="${STOP_GRACE_SECS:-1}"   # small delay before quiesce check
+QUIESCE_MS="${QUIESCE_MS:-1500}"          # keep watching for new holds (back-to-back dr)
+WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-90}"
 
-# Record activity (this also doubles as a heartbeat you can stat)
-mkdir -p "$STATE_DIR"
-touch "$STAMP" || true
+log() { print -r -- "$(date '+%F %T') pmachine-waker[$$]: $*"; }
 
-# Helpful breadcrumb in launchd logs
-echo "$(date '+%F %T') pmachine-waker: starting machine '$MACHINE'"
+gc_holds() {
+  local f pid
+  for f in "$HOLDS_DIR"/*(.N); do
+    pid="${f:t}"
+    [[ "$pid" == <-> ]] || { rm -f -- "$f" 2>/dev/null || true; continue; }
+    kill -0 "$pid" 2>/dev/null || rm -f -- "$f" 2>/dev/null || true
+  done
+}
 
-# Ensure the VM is running (quiet if already up)
+count_holds() {
+  integer n=0; local _unused
+  for _unused in "$HOLDS_DIR"/*(.N); do (( n++ )); done
+  print -r -- "$n"
+}
+
+wait_podman_ready() {
+  local start now; start="$(date +%s)"
+  while :; do
+    if podman --connection "$MACHINE" info >/dev/null 2>&1; then return 0; fi
+    sleep 0.5
+    now="$(date +%s)"
+    (( now - start >= WAIT_TIMEOUT_SECS )) && { log "timeout waiting for podman '$MACHINE'"; return 1; }
+  done
+}
+
+# --- Main -----------------------------------------------------------------------
+mkdir -p "$HOLDS_DIR"
+gc_holds
+
+# Register a hold and remove it on exit
+print -r -- $$ > "$HOLDS_DIR/$$"
+cleanup_hold() { rm -f "$HOLDS_DIR/$$" 2>/dev/null || true; }
+trap 'cleanup_hold' EXIT TERM
+
+log "connection accepted; ensuring machine '$MACHINE' is running"
 podman machine start "$MACHINE" >/dev/null 2>&1 || true
+wait_podman_ready || true
 
-# inetd nowait: launchd accepted() and passed the connected fd; we're done
+# Block until client closes (connected socket on stdin)
+cat >/dev/null || true
+
+# Client disconnected — debounce, then quiesce-watch for a short window.
+cleanup_hold
+(( STOP_GRACE_SECS > 0 )) && sleep "$STOP_GRACE_SECS"
+
+gc_holds
+integer loops=$(( QUIESCE_MS / 100 ))
+integer i
+for (( i=0; i<loops; i++ )); do
+  if [[ "$(count_holds)" != "0" ]]; then
+    log "new connection arrived during quiesce; leaving machine running"
+    exit 0
+  fi
+  sleep 0.1
+done
+
+log "no connections after quiesce; stopping machine '$MACHINE'"
+podman machine stop "$MACHINE" >/dev/null 2>&1 || true
 exit 0

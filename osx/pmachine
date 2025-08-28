@@ -28,11 +28,8 @@ PODMAN_DISK="${PODMAN_DISK:-100}"
 
 # ---- Labels / plists -------------------------------------------------------------
 LABEL_WAKER="com.nashspence.pmachine.script.waker"
-LABEL_IDLE="com.nashspence.pmachine.script.idle"
 PLIST_WAKER_SRC="${SCRIPT_DIR}/${LABEL_WAKER}.plist"
-PLIST_IDLE_SRC="${SCRIPT_DIR}/${LABEL_IDLE}.plist"
 PLIST_WAKER_DST="${LA_DIR}/${LABEL_WAKER}.plist"
-PLIST_IDLE_DST="${LA_DIR}/${LABEL_IDLE}.plist"
 
 # ---- PATH block markers ----------------------------------------------------------
 PATH_BEGIN_MARK="# >>> pmachine PATH >>>"
@@ -231,21 +228,15 @@ install_all() {
 
   # 1) Copy helper scripts into ~/bin
   [[ -f "$SCRIPT_DIR/pmachine-waker" ]] || die "missing pmachine-waker next to this script"
-  [[ -f "$SCRIPT_DIR/pmachine-idle"  ]] || die "missing pmachine-idle next to this script"
   install -m 0755 "$SCRIPT_DIR/pmachine-waker" "$BIN/pmachine-waker"
-  install -m 0755 "$SCRIPT_DIR/pmachine-idle"  "$BIN/pmachine-idle"
 
   # 2) Prepare plists
   [[ -f "$PLIST_WAKER_SRC" ]] || die "missing $PLIST_WAKER_SRC"
-  [[ -f "$PLIST_IDLE_SRC"  ]] || die "missing $PLIST_IDLE_SRC"
   sed -e "s|%UID%|$UID_NUM|g" -e "s|\${HOME}|$HOME|g" "$PLIST_WAKER_SRC" > "$PLIST_WAKER_DST"
-  sed -e "s|%UID%|$UID_NUM|g" -e "s|\${HOME}|$HOME|g" "$PLIST_IDLE_SRC"  > "$PLIST_IDLE_DST"
 
   # 3) (Re)load LaunchAgents
   launchctl bootout   "gui/$UID_NUM" "$PLIST_WAKER_DST" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/$UID_NUM" "$PLIST_WAKER_DST"
-  launchctl bootout   "gui/$UID_NUM" "$PLIST_IDLE_DST"  >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$UID_NUM" "$PLIST_IDLE_DST"
 
   echo "Loaded LaunchAgents."
   echo "Socket: /tmp/pmachine.$UID_NUM.sock (owned by launchd)."
@@ -336,13 +327,13 @@ uninstall_all() {
     rm -rf "$WRAPPERS_DIR"
   fi
 
-  for label in "$LABEL_WAKER" "$LABEL_IDLE"; do
+  for label in "$LABEL_WAKER"; do
     plist="$LA_DIR/$label.plist"
     launchctl bootout "gui/$UID_NUM" "$plist" >/dev/null 2>&1 || true
     rm -f "$plist"
   done
 
-  rm -f "$BIN/pmachine-waker" "$BIN/pmachine-idle"
+  rm -f "$BIN/pmachine-waker"
 
   local sock="/tmp/pmachine.$UID_NUM.sock"
   [[ -S "$sock" ]] && rm -f "$sock" || true

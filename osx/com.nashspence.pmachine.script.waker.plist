@@ -31,7 +31,6 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>MACHINE</key><string>com.nashspence.pmachine.script</string>
-    <key>IDLE_SECS</key><string>5</string>
   </dict>
 
   <key>KeepAlive</key><false/>

@@ -1,59 +1,55 @@
 #!/bin/zsh
 # dr — build (Podman) and run a Containerfile/Dockerfile; pipe-friendly.
-# Uses a specific Podman machine/connection; never changes the default.
-# Images are tagged as: com.nashspence.pmachine.script.<wrapper>:<tag>
 
-set -e
-set -u
-set -o pipefail
+set -euo pipefail
 
 DR_MACHINE="${DR_MACHINE:-${MACHINE:-com.nashspence.pmachine.script}}"
 DR_IMAGE_PREFIX="${DR_IMAGE_PREFIX:-com.nashspence.pmachine.script.}"
 DR_TAG="${DR_TAG:-latest}"
 WAKER_LABEL="${WAKER_LABEL:-com.nashspence.pmachine.script.waker}"
 
-# Accept an explicit Containerfile only if the first arg is a file; otherwise default.
 file="Containerfile"
-if [[ -n "${1:-}" && -f "$1" ]]; then
-  file="$1"
-  shift
-fi
+if [[ -n "${1:-}" && -f "$1" ]]; then file="$1"; shift; fi
 [[ -f "$file" ]] || { print -u2 "dr: file not found: $file"; exit 1; }
 
-# --- Wake the VM (socket -> nc -> kickstart) ---
 SOCK="${PMACHINE_SOCK:-/tmp/pmachine.${UID}.sock}"
-wake_vm() {
-  local ok=0
-  if [[ -S "$SOCK" ]]; then
-    # 1) zsocket: connect, send one byte, close
-    if zmodload zsh/net/socket 2>/dev/null; then
-      integer __fd
-      if zsocket -u "$SOCK" -d __fd 2>/dev/null; then
-        print -n '\0' >&$__fd 2>/dev/null || true
-        exec {__fd}>&- 2>/dev/null || true
-        ok=1
-      fi
-    fi
-    # 2) nc -U fallback
-    if (( ! ok )) && command -v nc >/dev/null 2>&1; then
-      (echo -n | nc -U "$SOCK") >/dev/null 2>&1 && ok=1
-    fi
-  fi
-  # 3) kickstart fallback
-  if (( ! ok )); then
-    launchctl kickstart -kp "gui/$(id -u)/$WAKER_LABEL" >/dev/null 2>&1 || true
-  fi
-}
-wake_vm
 
-# --- Wait for the specified Podman connection to be ready ---
-wait_podman() {
-  local timeout="${DR_WAIT_SECS:-90}" start now
-  start="$(date +%s)"
-  while :; do
-    if podman --connection "$DR_MACHINE" info >/dev/null 2>&1; then
+typeset -gi DR_SOCK_FD=-1
+_close_sock_fd() { (( DR_SOCK_FD >= 0 )) && exec {DR_SOCK_FD}>&- 2>/dev/null || true; }
+# IMPORTANT: only close on EXIT (not on INT/TERM), so Ctrl-C doesn't drop the hold early.
+trap _close_sock_fd EXIT
+
+hold_socket_open() {
+  # Create socket (via waker) if needed
+  [[ -S "$SOCK" ]] || launchctl kickstart -kp "gui/$(id -u)/${WAKER_LABEL}" >/dev/null 2>&1 || true
+
+  # Open connected UNIX socket and duplicate as CLOEXEC so children can't inherit it.
+  if zmodload zsh/net/socket 2>/dev/null; then
+    # wait briefly for the socket to appear
+    local deadline=$((SECONDS + ${DR_SOCKET_WAIT_SECS:-3}))
+    while [[ ! -S "$SOCK" && $SECONDS -lt $deadline ]]; do sleep 0.1; done
+    if [[ -S "$SOCK" ]] && zsocket "$SOCK" 2>/dev/null; then
+      local rawfd="$REPLY"
+      if zmodload zsh/system 2>/dev/null && sysopen -r -o cloexec -u DR_SOCK_FD "/dev/fd/$rawfd" 2>/dev/null; then
+        exec {rawfd}>&- 2>/dev/null || true   # drop non-cloexec original
+      else
+        # fallback: keep original (children may inherit if we ever exec; we won't)
+        DR_SOCK_FD="$rawfd"
+      fi
       return 0
     fi
+  fi
+
+  # Last resort: just poke the agent (no hold). We still proceed.
+  launchctl kickstart -kp "gui/$(id -u)/${WAKER_LABEL}" >/dev/null 2>&1 || true
+  return 0
+}
+hold_socket_open
+
+wait_podman() {
+  local timeout="${DR_WAIT_SECS:-90}" start now; start="$(date +%s)"
+  while :; do
+    podman --connection "$DR_MACHINE" info >/dev/null 2>&1 && return 0
     sleep 0.5
     now="$(date +%s)"
     (( now - start >= timeout )) && { print -u2 "dr: timed out waiting for Podman '$DR_MACHINE'"; exit 2; }
@@ -61,16 +57,10 @@ wait_podman() {
 }
 wait_podman
 
-# --- Derive repo name from wrapper (preferred) or filename ---
-slugify() {
-  local s="${1:l}"
-  s="${s//[^a-z0-9._-]/-}"; s="${s##-}"; s="${s%%-}"
-  print -r -- "$s"
-}
+slugify(){ local s="${1:l}"; s="${s//[^a-z0-9._-]/-}"; s="${s##-}"; s="${s%%-}"; print -r -- "$s"; }
 wrapper="${DR_WRAPPER_NAME:-}"
 if [[ -z "$wrapper" ]]; then
-  dir="$(cd "$(dirname "$file")" && pwd)"
-  base="${file:t}"
+  dir="$(cd "$(dirname "$file")" && pwd)"; base="${file:t}"
   case "${base:l}" in
     containerfile|dockerfile) wrapper="${dir:t}" ;;
     *) wrapper="$base"
@@ -84,7 +74,6 @@ wrapper="$(slugify "$wrapper")"
 repo="$(slugify "${DR_IMAGE_PREFIX}${wrapper}")"
 image="${repo}:${DR_TAG}"
 
-# --- Build (with pull policy) ---
 pull_flag=()
 if [[ -z "${DR_NO_PULL:-}" ]]; then
   case "${DR_PULL_MODE:-yes}" in
@@ -96,7 +85,6 @@ fi
 dir="$(cd "$(dirname "$file")" && pwd)"
 podman --connection "$DR_MACHINE" build "${pull_flag[@]}" -f "$file" -t "$image" "$dir"
 
-# --- Run ---
 run_flags=(-i)
 if [[ -t 0 && -z "${DR_STDIN_PIPE:-}" ]]; then
   run_flags=(-it)
@@ -108,32 +96,25 @@ if [[ ! -t 1 && -z "${DR_NO_UNBUFFER:-}" ]]; then
   env_flags+=(-e PYTHONUNBUFFERED=1 -e PYTHONIOENCODING=UTF-8)
 fi
 
-# --- Collect per-run podman flags (before image) and optional container command (after --) ---
-typeset -a run_extra cmd_args
-run_extra=()
+typeset -a run_extra cmd_args; run_extra=()
 while (( $# )); do
-  if [[ "$1" == "--" ]]; then
-    shift
-    break
-  fi
-  run_extra+=("$1")
-  shift
+  if [[ "$1" == "--" ]]; then shift; break; fi
+  run_extra+=("$1"); shift
 done
 cmd_args=("$@")
 
-# Back-compat: if no `--` was provided and none of the args look like flags,
-# treat them as container args (old behavior).
 if (( ${#cmd_args[@]} == 0 )); then
   integer _anyflag=0
-  for _a in "${run_extra[@]}"; do
-    [[ "$_a" == -* ]] && { _anyflag=1; break; }
-  done
-  if (( !_anyflag )); then
-    cmd_args=("${run_extra[@]}")
-    run_extra=()
-  fi
+  for _a in "${run_extra[@]}"; do [[ "$_a" == -* ]] && { _anyflag=1; break; }; done
+  (( !_anyflag )) && { cmd_args=("${run_extra[@]}"); run_extra=(); }
 fi
 
-exec podman --connection "$DR_MACHINE" run --rm \
+# Do NOT exec; keep this shell alive to hold the socket FD.
+set +e
+podman --connection "$DR_MACHINE" run --rm \
   "${run_flags[@]}" "${env_flags[@]}" "${run_extra[@]}" \
   "$image" "${cmd_args[@]}"
+rc=$?
+set -e
+
+exit $rc
