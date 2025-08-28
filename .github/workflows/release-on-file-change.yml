@@ -19,11 +19,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - name: Find changed services
         id: out
+        env:
+          BASE: ${{ github.event.before }}
         run: |
-          CHANGED=$(git diff --name-only HEAD^ HEAD | grep -E 'portable/.+/release\.yaml' | cut -d/ -f2 | sort -u || true)
+          BASE=${BASE:-HEAD^}
+          CHANGED=$(git diff --name-only "$BASE" HEAD | grep -E 'portable/.+/release\.yaml' | cut -d/ -f2 || true)
+          for F in portable/*/release.yaml; do
+            S=$(cut -d/ -f2 <<<"$F")
+            V=$(grep '^version:' "$F" | awk '{print $2}')
+            if ! git rev-parse -q --verify "refs/tags/$S/$V" >/dev/null; then
+              CHANGED="$CHANGED $S"
+            fi
+          done
+          CHANGED=$(echo "$CHANGED" | tr ' ' '\n' | sort -u)
           printf '{"include":[' > m.json
           for S in $CHANGED; do
             printf '{"service":"%s"},' "$S" >> m.json
