@@ -1,8 +1,19 @@
 #!/bin/zsh
 # dr — build (Podman) and run a Containerfile/Dockerfile; pipe-friendly.
+# Verbose (stderr-only) logs about pull/build attempts, failures, and final image origin.
 
 set -euo pipefail
 
+# ----- logging (stderr only) -------------------------------------------------------------------
+_log_ts() { print -r -- "$(date '+%Y-%m-%d %H:%M:%S%z')"; }
+log()      { print -u2 -- "dr[$(_log_ts)]: $*"; }
+log_cmd()  { print -u2 -- "dr[$(_log_ts)]: ➜ $*"; }
+warn()     { print -u2 -- "dr[$(_log_ts)]: WARN: $*"; }
+fail()     { print -u2 -- "dr[$(_log_ts)]: ERROR: $*"; }
+
+TRAPERR() { local rc=$?; print -u2 -- "dr[$(_log_ts)]: ERROR: unhandled error (rc=$rc) near line $LINENO"; }
+
+# ----- config ----------------------------------------------------------------------------------
 DR_MACHINE="${DR_MACHINE:-${MACHINE:-com.nashspence.pmachine.script}}"
 DR_IMAGE_PREFIX="${DR_IMAGE_PREFIX:-com.nashspence.pmachine.script.}"
 DR_TAG="${DR_TAG:-latest}"
@@ -20,54 +31,84 @@ release_yaml=""
 if [[ -n "${1:-}" && -f "$1" && "${1:t}" == "release.yaml" ]]; then
   release_yaml="$1"; shift
 fi
-[[ -f "$file" ]] || { print -u2 "dr: file not found: $file"; exit 1; }
+[[ -f "$file" ]] || { fail "file not found: $file"; exit 1; }
 
 SOCK="${PMACHINE_SOCK:-/tmp/pmachine.${UID}.sock}"
 
+log "machine='${DR_MACHINE}'"
+log "file='${file}' release_yaml='${release_yaml:-<none>}'"
+log "socket='${SOCK}' waker='${WAKER_LABEL}'"
+
+# ----- hold the launchd socket for our entire lifetime ----------------------------------------
 typeset -gi DR_SOCK_FD=-1
 _close_sock_fd() { (( DR_SOCK_FD >= 0 )) && exec {DR_SOCK_FD}>&- 2>/dev/null || true; }
-# IMPORTANT: only close on EXIT (not on INT/TERM), so Ctrl-C doesn't drop the hold early.
-trap _close_sock_fd EXIT
+trap _close_sock_fd EXIT  # only on EXIT; not on INT/TERM so Ctrl-C doesn’t drop the hold early
 
 hold_socket_open() {
-  # Create socket (via waker) if needed
-  [[ -S "$SOCK" ]] || launchctl kickstart -kp "gui/$(id -u)/${WAKER_LABEL}" >/dev/null 2>&1 || true
+  log "ensuring wake agent socket exists (best-effort)"
+  [[ -S "$SOCK" ]] || launchctl kickstart -kp "gui/${UID}/${WAKER_LABEL}" >/dev/null 2>&1 || true
 
-  # Open connected UNIX socket and duplicate as CLOEXEC so children can't inherit it.
   if zmodload zsh/net/socket 2>/dev/null; then
-    # wait briefly for the socket to appear
     local deadline=$((SECONDS + ${DR_SOCKET_WAIT_SECS:-3}))
     while [[ ! -S "$SOCK" && $SECONDS -lt $deadline ]]; do sleep 0.1; done
+
+    log "attempting zsocket connect…"
     if [[ -S "$SOCK" ]] && zsocket "$SOCK" 2>/dev/null; then
-      local rawfd="$REPLY"
-      if zmodload zsh/system 2>/dev/null && sysopen -r -o cloexec -u DR_SOCK_FD "/dev/fd/$rawfd" 2>/dev/null; then
-        exec {rawfd}>&- 2>/dev/null || true   # drop non-cloexec original
-      else
-        # fallback: keep original (children may inherit if we ever exec; we won't)
-        DR_SOCK_FD="$rawfd"
+      DR_SOCK_FD=$REPLY
+      # Optional: set CLOEXEC directly on the original FD (no /dev/fd roundtrip).
+      if zmodload zsh/system 2>/dev/null; then
+        # best-effort; not fatal if unsupported
+        zsystem fdflags -s cloexec $DR_SOCK_FD 2>/dev/null || true
       fi
+      log "socket opened and held (fd=$DR_SOCK_FD)"
       return 0
     fi
   fi
 
-  # Last resort: just poke the agent (no hold). We still proceed.
-  launchctl kickstart -kp "gui/$(id -u)/${WAKER_LABEL}" >/dev/null 2>&1 || true
+  warn "couldn't open/hold socket; poking agent only"
+  launchctl kickstart -kp "gui/${UID}/${WAKER_LABEL}" >/dev/null 2>&1 || true
   return 0
 }
 hold_socket_open
 
+# ----- wait for podman connection --------------------------------------------------------------
 wait_podman() {
   local timeout="${DR_WAIT_SECS:-90}" start now; start="$(date +%s)"
+  log "waiting for podman connection '${DR_MACHINE}' (timeout ${timeout}s)"
   while :; do
-    podman --connection "$DR_MACHINE" info >/dev/null 2>&1 && return 0
+    if podman --connection "$DR_MACHINE" info >/dev/null 2>&1; then
+      log "podman connection '${DR_MACHINE}' is ready"
+      return 0
+    fi
     sleep 0.5
     now="$(date +%s)"
-    (( now - start >= timeout )) && { print -u2 "dr: timed out waiting for Podman '$DR_MACHINE'"; exit 2; }
+    (( now - start >= timeout )) && { fail "timed out waiting for Podman '${DR_MACHINE}'"; exit 2; }
   done
 }
 wait_podman
 
+# ----- helpers ---------------------------------------------------------------------------------
 slugify(){ local s="${1:l}"; s="${s//[^a-z0-9._-]/-}"; s="${s##-}"; s="${s%%-}"; print -r -- "$s"; }
+
+yaml_get_key() {
+  local key="$1" yfile="$2"
+  awk -v k="$key" '
+    $0 ~ "^[[:space:]]*"k":" {
+      sub("^[[:space:]]*"k":[[:space:]]*", "", $0)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+      gsub(/^"[[:space:]]*|"[[:space:]]*$/,"",$0)
+      gsub(/^'\''[[:space:]]*|'\''[[:space:]]*$/,"",$0)
+      print $0
+      exit 0
+    }' "$yfile" 2>/dev/null || true
+}
+
+is_not_found_err() {
+  local msg="${1:l}"
+  [[ "$msg" == *"manifest unknown"* || "$msg" == *"not found"* || "$msg" == *"no such image"* || "$msg" == *"unknown blob"* || "$msg" == *"error locating image"* ]]
+}
+
+# ----- derive image/tag ------------------------------------------------------------------------
 wrapper="${DR_WRAPPER_NAME:-}"
 if [[ -z "$wrapper" ]]; then
   dir="$(cd "$(dirname "$file")" && pwd)"; base="${file:t}"
@@ -84,6 +125,7 @@ wrapper="$(slugify "$wrapper")"
 repo="$(slugify "${DR_IMAGE_PREFIX}${wrapper}")"
 local_image="${repo}:${DR_TAG}"
 image="$local_image"
+log "resolved wrapper='${wrapper}', repo='${repo}', local_image='${local_image}'"
 
 pull_flag=()
 if [[ -z "${DR_NO_PULL:-}" ]]; then
@@ -92,64 +134,90 @@ if [[ -z "${DR_NO_PULL:-}" ]]; then
     never)  pull_flag=(--pull-never)  ;;
     *)      pull_flag=(--pull) ;;
   esac
+  log "build pull policy: ${pull_flag[*]}"
+else
+  log "DR_NO_PULL set: build will not pull base images"
 fi
+
 dir="$(cd "$(dirname "$file")" && pwd)"
+
+# ----- choose release image vs build -----------------------------------------------------------
 build_needed=1
+image_origin="local-build"
+release_note=""
+
 if [[ -n "$release_yaml" && -z "${DR_NO_PULL:-}" ]]; then
-  rel_img="$(grep -E '^image:' "$release_yaml" 2>/dev/null | head -n1 | awk '{print $2}')"
-  rel_ver="$(grep -E '^version:' "$release_yaml" 2>/dev/null | head -n1 | awk '{print $2}')"
+  log "parsing release.yaml: $release_yaml"
+  rel_img="$(yaml_get_key image "$release_yaml")"
+  rel_ver="$(yaml_get_key version "$release_yaml")"
   if [[ -n "$rel_img" && -n "$rel_ver" ]]; then
     rel_ref="${rel_img}:${rel_ver}"
-    if pull_err="$(podman --connection "$DR_MACHINE" pull "$rel_ref" 2>&1 >/dev/null)"; then
-      image="$rel_ref"
-      build_needed=0
+    release_note="release.yaml image=$rel_img version=$rel_ver"
+    log "attempting to pull release image: $rel_ref"
+    log_cmd podman --connection "$DR_MACHINE" pull "$rel_ref"
+    pull_err="$({ podman --connection "$DR_MACHINE" pull "$rel_ref" 1>/dev/null; } 2>&1)" || pull_rc=$? || pull_rc=$?
+    if [[ ${pull_rc:-0} -eq 0 ]]; then
+      log "pull succeeded: $rel_ref"
+      image="$rel_ref"; image_origin="pulled-from-release"; build_needed=0
     else
-      pull_rc=$?
-      if [[ "$pull_err" == *"manifest unknown"* || "$pull_err" == *"not found"* ]]; then
-        :
+      if is_not_found_err "$pull_err"; then
+        warn "release image not available ($rel_ref); will build instead"
       else
-        print -u2 "dr: failed to pull $rel_ref: $pull_err"
-        exit $pull_rc
+        fail "failed to pull $rel_ref (rc=${pull_rc:-1}). Details follow:"; print -u2 -- "$pull_err"; exit ${pull_rc:-1}
       fi
     fi
+  else
+    warn "release.yaml missing 'image:' and/or 'version:'; will build"
   fi
+elif [[ -n "$release_yaml" ]]; then
+  warn "DR_NO_PULL set; ignoring release.yaml pull"
 fi
 
+# ----- build (if needed) -----------------------------------------------------------------------
 if (( build_needed )); then
+  log "building image: tag='${local_image}' file='${file}' context='${dir}' flags='${(j: :)pull_flag}'"
+  log_cmd podman --connection "$DR_MACHINE" build "${pull_flag[@]}" -f "$file" -t "$local_image" "$dir"
+  set +e
   podman --connection "$DR_MACHINE" build "${pull_flag[@]}" -f "$file" -t "$local_image" "$dir"
-  image="$local_image"
+  build_rc=$?
+  set -e
+  if (( build_rc != 0 )); then fail "build failed (rc=$build_rc) for '${local_image}' from '${file}' (context '${dir}')"; exit $build_rc; fi
+  log "build succeeded: ${local_image}"
+  image="$local_image"; image_origin="built-locally"
 fi
 
+# ----- image metadata --------------------------------------------------------------------------
+inspect_fmt='{{.Id}}|{{.Created}}|{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}<none>{{end}}'
+img_id="<unknown>" img_created="<unknown>" img_digest="<unknown>"
+set +e; meta="$(podman --connection "$DR_MACHINE" image inspect --format "$inspect_fmt" "$image" 2>/dev/null)"; set -e
+if [[ -n "${meta:-}" ]]; then IFS='|' read -r img_id img_created img_digest <<<"$meta"; fi
+log "resolved run image: '${image}' (origin=${image_origin} ${release_note:+; $release_note})"
+log "image metadata: id=${img_id} created=${img_created} digest=${img_digest}"
+
+# ----- run -------------------------------------------------------------------------------------
 run_flags=(-i)
-if [[ -t 0 && -z "${DR_STDIN_PIPE:-}" ]]; then
-  run_flags=(-it)
-elif [[ -z "${DR_NO_TTY:-}" ]]; then
-  run_flags+=(-t)
-fi
+if [[ -t 0 && -z "${DR_STDIN_PIPE:-}" ]]; then run_flags=(-it)
+elif [[ -z "${DR_NO_TTY:-}" ]]; then run_flags+=(-t); fi
 env_flags=()
-if [[ ! -t 1 && -z "${DR_NO_UNBUFFER:-}" ]]; then
-  env_flags+=(-e PYTHONUNBUFFERED=1 -e PYTHONIOENCODING=UTF-8)
-fi
+if [[ ! -t 1 && -z "${DR_NO_UNBUFFER:-}" ]]; then env_flags+=(-e PYTHONUNBUFFERED=1 -e PYTHONIOENCODING=UTF-8); fi
 
 typeset -a run_extra cmd_args; run_extra=()
-while (( $# )); do
-  if [[ "$1" == "--" ]]; then shift; break; fi
-  run_extra+=("$1"); shift
-done
+while (( $# )); do if [[ "$1" == "--" ]]; then shift; break; fi; run_extra+=("$1"); shift; done
 cmd_args=("$@")
+if (( ${#cmd_args[@]} == 0 )); then integer _anyflag=0; for _a in "${run_extra[@]}"; do [[ "$_a" == -* ]] && { _anyflag=1; break; }; done; (( !_anyflag )) && { cmd_args=("${run_extra[@]}"); run_extra=(); }; fi
 
-if (( ${#cmd_args[@]} == 0 )); then
-  integer _anyflag=0
-  for _a in "${run_extra[@]}"; do [[ "$_a" == -* ]] && { _anyflag=1; break; }; done
-  (( !_anyflag )) && { cmd_args=("${run_extra[@]}"); run_extra=(); }
-fi
-
-# Do NOT exec; keep this shell alive to hold the socket FD.
+log "running container:"
+log "  connection: $DR_MACHINE"
+log "  image:      $image"
+log "  flags:      ${(j: :)run_flags} ${(j: :)env_flags} ${(j: :)run_extra}"
+log "  command:    ${(j: :)cmd_args}"
 set +e
+log_cmd podman --connection "$DR_MACHINE" run --rm "${run_flags[@]}" "${env_flags[@]}" "${run_extra[@]}" "$image" "${cmd_args[@]}"
 podman --connection "$DR_MACHINE" run --rm \
   "${run_flags[@]}" "${env_flags[@]}" "${run_extra[@]}" \
   "$image" "${cmd_args[@]}"
 rc=$?
 set -e
+if (( rc != 0 )); then fail "container exited with non-zero status (rc=$rc)"; else log "container exited successfully (rc=0)"; fi
 
 exit $rc
