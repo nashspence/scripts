@@ -1,5 +1,5 @@
 # stage
 
 ## Scenario: stage files into a manifest
-* Run `stage input_dir manifest.txt`
-* `manifest.txt` lists staged files
+* When I run stage with an input directory and manifest path
+* Then the manifest lists the staged files
