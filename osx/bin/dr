@@ -9,7 +9,17 @@ DR_TAG="${DR_TAG:-latest}"
 WAKER_LABEL="${WAKER_LABEL:-com.nashspence.pmachine.script.waker}"
 
 file="Containerfile"
-if [[ -n "${1:-}" && -f "$1" ]]; then file="$1"; shift; fi
+if [[ -n "${1:-}" ]]; then
+  if [[ -f "$1" && "${1:t}" != "release.yaml" ]]; then
+    file="$1"; shift
+  elif [[ -d "$1" ]]; then
+    file="$1/Containerfile"; shift
+  fi
+fi
+release_yaml=""
+if [[ -n "${1:-}" && -f "$1" && "${1:t}" == "release.yaml" ]]; then
+  release_yaml="$1"; shift
+fi
 [[ -f "$file" ]] || { print -u2 "dr: file not found: $file"; exit 1; }
 
 SOCK="${PMACHINE_SOCK:-/tmp/pmachine.${UID}.sock}"
@@ -72,7 +82,8 @@ if [[ -z "$wrapper" ]]; then
 fi
 wrapper="$(slugify "$wrapper")"
 repo="$(slugify "${DR_IMAGE_PREFIX}${wrapper}")"
-image="${repo}:${DR_TAG}"
+local_image="${repo}:${DR_TAG}"
+image="$local_image"
 
 pull_flag=()
 if [[ -z "${DR_NO_PULL:-}" ]]; then
@@ -83,7 +94,23 @@ if [[ -z "${DR_NO_PULL:-}" ]]; then
   esac
 fi
 dir="$(cd "$(dirname "$file")" && pwd)"
-podman --connection "$DR_MACHINE" build "${pull_flag[@]}" -f "$file" -t "$image" "$dir"
+build_needed=1
+if [[ -n "$release_yaml" && -z "${DR_NO_PULL:-}" ]]; then
+  rel_img="$(grep -E '^image:' "$release_yaml" 2>/dev/null | head -n1 | awk '{print $2}')"
+  rel_ver="$(grep -E '^version:' "$release_yaml" 2>/dev/null | head -n1 | awk '{print $2}')"
+  if [[ -n "$rel_img" && -n "$rel_ver" ]]; then
+    rel_ref="${rel_img}:${rel_ver}"
+    if podman --connection "$DR_MACHINE" pull "$rel_ref" >/dev/null 2>&1; then
+      image="$rel_ref"
+      build_needed=0
+    fi
+  fi
+fi
+
+if (( build_needed )); then
+  podman --connection "$DR_MACHINE" build "${pull_flag[@]}" -f "$file" -t "$local_image" "$dir"
+  image="$local_image"
+fi
 
 run_flags=(-i)
 if [[ -t 0 && -z "${DR_STDIN_PIPE:-}" ]]; then
