@@ -17,6 +17,8 @@ jobs:
       matrix: ${{ steps.out.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - name: Find changed services
         id: out
         run: |
