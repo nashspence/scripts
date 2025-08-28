@@ -21,3 +21,7 @@ Scripts are containerised for cross‑platform use with Podman. Host-specific he
 
 Each script directory maintains a gauge-style `spec.md` with test scenarios. Use a single spec per platform-specific directory (e.g. `osx/spec.md`). If needed, keep script-specific terminology in a `glossary.md` alongside the spec.
 
+
+## Unit tests
+- Place tests in a `tests/` directory adjacent to the code.
+- Mock external commands and filesystem interactions; unit tests should exercise only the code under test.
