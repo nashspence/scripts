@@ -46,6 +46,6 @@ jobs:
                     print(f"Version not bumped: {new} <= {old}")
                     sys.exit(1)
                 print(f"OK: {new} > {old}")
-            PY
+          PY
             fi
           done
