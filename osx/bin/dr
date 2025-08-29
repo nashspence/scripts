@@ -34,6 +34,9 @@ fi
 typeset -gi DR_SOCK_FD=-1
 _close_sock_fd() { (( DR_SOCK_FD >= 0 )) && exec {DR_SOCK_FD}>&- 2>/dev/null || true; }
 trap _close_sock_fd EXIT
+trap '_close_sock_fd; exit 143' TERM   # 143 = 128 + SIGTERM(15)
+trap '_close_sock_fd; exit 129' HUP    # 129 = 128 + SIGHUP(1)
+trap '_close_sock_fd; exit 130' INT   # 130 = 128 + SIGINT(2)
 hold_socket_open() {
   [[ -S "$SOCK" ]] || launchctl kickstart -kp "gui/${UID}/${WAKER_LABEL}" >/dev/null 2>&1 || true
   if zmodload zsh/net/socket 2>/dev/null; then
