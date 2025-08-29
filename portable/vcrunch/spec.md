@@ -37,3 +37,24 @@
 * And I run vcrunch
 * Then matching video files are transcoded
 * And non-matching paths are skipped
+
+## Scenario: copy files when inputs fit target size
+* Given an MP4 file "<src>"
+* And an output directory "<out>"
+* When I pass --input "<src>"
+* And I pass --target-size "<size>"
+* And I pass --output-dir "<out>"
+* And I run vcrunch
+* Then "<src>" is copied to "<out>"
+* And ".job.json" records "<src>" as done
+
+## Scenario: move files when inputs fit target size
+* Given an MP4 file "<src>"
+* And an output directory "<out>"
+* When I pass --input "<src>"
+* And I pass --target-size "<size>"
+* And I pass --output-dir "<out>"
+* And I pass --move-if-fit
+* And I run vcrunch
+* Then "<src>" is moved to "<out>"
+* And ".job.json" records "<src>" as done

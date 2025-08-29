@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -220,6 +221,11 @@ def main():
         default=DEFAULT_SUFFIX,
         help="Suffix before extension for encoded files.",
     )
+    ap.add_argument(
+        "--move-if-fit",
+        action="store_true",
+        help="Move files instead of copying when inputs fit within target size without re-encoding.",
+    )
 
     args = ap.parse_args()
 
@@ -260,6 +266,41 @@ def main():
         "Note: No staging or deleting will occur. Assets are only accounted for sizing; they are not copied."
     )
 
+    target_bytes = parse_size(args.target_size)
+    total_input_bytes = 0
+    for src in all_files:
+        try:
+            total_input_bytes += os.path.getsize(src)
+        except FileNotFoundError:
+            pass
+
+    if total_input_bytes <= target_bytes:
+        action = "Moving" if args.move_if_fit else "Copying"
+        eprint(
+            f"Inputs fit within target size ({total_input_bytes:,} <= {target_bytes:,}); {action.lower()} without re-encoding."
+        )
+        manifest["items"] = {}
+        for src in all_files:
+            st = os.stat(src)
+            dest = os.path.join(args.output_dir, os.path.basename(src))
+            if args.move_if_fit:
+                shutil.move(src, dest)
+            else:
+                shutil.copy2(src, dest)
+            if pathlib.Path(src).suffix.lower() in VIDEO_EXTS:
+                key = src_key(os.path.abspath(src), st)
+                manifest["items"][key] = {
+                    "type": "video",
+                    "src": src,
+                    "output": os.path.basename(src),
+                    "status": "done",
+                    "finished_at": now_utc_iso(),
+                }
+        save_manifest(manifest, manifest_path)
+        eprint("=== encode_videos: done (no re-encoding needed) ===")
+        eprint(f"Manifest retained: {manifest_path}")
+        return
+
     # Account assets directly from inputs (no copying)
     asset_bytes = 0
     for src in assets:
@@ -269,7 +310,6 @@ def main():
             pass
 
     # Compute bitrate budget for videos
-    target_bytes = parse_size(args.target_size)
     audio_bps = kbps_to_bps(args.audio_bitrate)
 
     total_duration = 0.0

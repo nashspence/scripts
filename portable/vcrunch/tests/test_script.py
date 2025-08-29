@@ -1,23 +1,26 @@
-import io
-import sys
-from pathlib import Path
+"""Tests for vcrunch script."""
 
+# mypy: ignore-errors
+
+import io
 import json
+import sys
 import types
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-import portable.vcrunch.script as script
+import portable.vcrunch.script as script  # noqa: E402
 
 
 def test_parse_size():
     assert script.parse_size("1") == 1
     assert script.parse_size("1k") == 1024
-    assert script.parse_size("1.5m") == int(1.5 * 1024 ** 2)
-    assert script.parse_size("2g") == 2 * 1024 ** 3
-    assert script.parse_size("3t") == 3 * 1024 ** 4
+    assert script.parse_size("1.5m") == int(1.5 * 1024**2)
+    assert script.parse_size("2g") == 2 * 1024**3
+    assert script.parse_size("3t") == 3 * 1024**4
     assert script.parse_size("1KiB") == 1024
 
 
@@ -60,7 +63,9 @@ def test_ffprobe_duration(monkeypatch):
 def test_is_valid_media(monkeypatch):
     monkeypatch.setattr(script, "ffprobe_duration", lambda p: 1.0)
     assert script.is_valid_media("file")
-    monkeypatch.setattr(script, "ffprobe_duration", lambda p: (_ for _ in ()).throw(Exception()))
+    monkeypatch.setattr(
+        script, "ffprobe_duration", lambda p: (_ for _ in ()).throw(Exception())
+    )
     assert script.is_valid_media("file") is False
 
 
@@ -127,7 +132,11 @@ def test_now_utc_iso_format():
 def test_load_manifest_new(monkeypatch, tmp_path):
     monkeypatch.setattr(script, "now_utc_iso", lambda: "TS")
     path = tmp_path / "m.json"
-    assert script.load_manifest(str(path)) == {"version": 1, "updated": "TS", "items": {}}
+    assert script.load_manifest(str(path)) == {
+        "version": 1,
+        "updated": "TS",
+        "items": {},
+    }
 
 
 def test_load_manifest_existing(monkeypatch, tmp_path):
@@ -141,7 +150,11 @@ def test_load_manifest_invalid(monkeypatch, tmp_path):
     monkeypatch.setattr(script, "now_utc_iso", lambda: "TS")
     path = tmp_path / "m.json"
     path.write_text("not json")
-    assert script.load_manifest(str(path)) == {"version": 1, "updated": "TS", "items": {}}
+    assert script.load_manifest(str(path)) == {
+        "version": 1,
+        "updated": "TS",
+        "items": {},
+    }
 
 
 def test_save_manifest(monkeypatch, tmp_path):
@@ -167,3 +180,59 @@ def test_all_videos_done(monkeypatch):
     manifest["items"]["1"]["status"] = "pending"
     assert script.all_videos_done(manifest, "/out") is False
     assert script.all_videos_done({"items": {}}, "/out") is False
+
+
+def test_copy_if_fits(monkeypatch, tmp_path):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "a.mp4").write_text("a")
+    (src_dir / "b.txt").write_text("b")
+    out_dir = tmp_path / "out"
+    argv = [
+        "script.py",
+        "--input",
+        str(src_dir),
+        "--target-size",
+        "1M",
+        "--output-dir",
+        str(out_dir),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(
+        script,
+        "ffprobe_duration",
+        lambda p: (_ for _ in ()).throw(Exception("ffprobe")),
+    )
+    monkeypatch.setattr(
+        script, "run", lambda cmd: (_ for _ in ()).throw(Exception("run"))
+    )
+    script.main()
+    assert (out_dir / "a.mp4").exists()
+    assert (out_dir / "b.txt").exists()
+    assert (src_dir / "a.mp4").exists()
+    manifest = json.loads((out_dir / ".job.json").read_text())
+    assert len(manifest["items"]) == 1
+    rec = next(iter(manifest["items"].values()))
+    assert rec["status"] == "done"
+
+
+def test_move_if_fits(monkeypatch, tmp_path):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    video = src_dir / "a.mp4"
+    video.write_text("a")
+    out_dir = tmp_path / "out"
+    argv = [
+        "script.py",
+        "--input",
+        str(src_dir),
+        "--target-size",
+        "1M",
+        "--output-dir",
+        str(out_dir),
+        "--move-if-fit",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    script.main()
+    assert not video.exists()
+    assert (out_dir / "a.mp4").exists()
