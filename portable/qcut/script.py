@@ -444,7 +444,7 @@ def main():
             d = fi["duration"]
             part = d / qi if qi > 0 else 0.0
             for slot in range(1, qi + 1):
-                Lm = len_slots_min[idx - 1] if (idx - 1) < len_slots_min else args.min
+                Lm = len_slots_min[idx - 1] if (idx - 1) < slot_count else args.min
                 L = float(Lm * 60)
                 ps = (slot - 1) * part
                 mo = max(0.0, part - L)
