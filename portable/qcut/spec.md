@@ -7,3 +7,4 @@
 * And I pass --autoedit-dir "<out>"
 * And I run qcut
 * Then qcut writes the final video to "<out>"
+* And the final video shows timestamp overlays
