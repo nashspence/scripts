@@ -28,7 +28,7 @@ def log(msg: str):  # timestamped progress logs
 
 VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".m4v", ".MP4", ".MKV", ".MOV", ".M4V")
 DEFAULT_FONT = "/usr/share/fonts/TTF/DejaVuSansMono.ttf"  # present in container
-# strftime pattern for drawtext; escape colons so ffmpeg option parser doesn't split them
+# Colons in the format must be escaped for the %{...} macro parser.
 DATE_FMT_FOR_OVERLAY = r"%m/%d/%Y %H\:%M\:%S"
 FFCONCAT_HEADER = "ffconcat version 1.0\n"
 MANIFEST_NAME = ".job.json"
@@ -225,17 +225,14 @@ def quotas_like_zsh(durations_sec: list[float], slot_count: int, min_seconds: in
     return q
 
 
-def drawtext_strftime_filter(fontfile: str, basetime_us: int) -> str:
-    """
-    Build a drawtext filter using expansion=strftime and basetime (µs).
-    Shows absolute local time derived from basetime + frame pts.
-    """
-    text_val = f"'%{{localtime\\:{DATE_FMT_FOR_OVERLAY}}}'"
+def build_drawtext_pts(fontfile: str, epoch_int: int) -> str:
+    # Use strftime expansion with a stable basetime (µs) anchored to the clip's epoch.
+    basetime_us = int(epoch_int) * 1_000_000
     return (
         f"drawtext=fontfile={fontfile}"
         f":expansion=strftime:basetime={basetime_us}"
         f":fontcolor=white:fontsize=h/40:box=1:boxcolor=black@1:boxborderw=6"
-        f":text={text_val}:x=24:y=24"
+        f":text='%m/%d/%Y %H\\:%M\\:%S':x=24:y=24"
     )
 
 
@@ -278,7 +275,7 @@ def new_manifest(src_dir: str, files_with_stats: list[dict], out_dir: str) -> di
             "files": files_with_stats,  # [{path,size,mtime}]
         },
         "plan": {},
-        "clips": {},  # index -> {out, src, start, length, epoch, basetime_us, status}
+        "clips": {},  # index -> {out, src, start, length, epoch, status}
         "final": {"status": "pending", "out_path": None, "finished_at": None},
     }
 
@@ -485,8 +482,7 @@ def main():
                 hi = max(0.0, d - L)
                 if rs > hi:
                     rs = hi
-                # basetime in microseconds = (base_epoch + start_offset) * 1e6
-                basetime_us = int(round((fi["base_epoch"] + rs) * 1_000_000))
+                epoch_int = int(fi["base_epoch"] + int(rs))
                 out_clip = os.path.join(work_dir, f"clip{idx:03d}.mkv")
                 clips[str(idx)] = {
                     "index": idx,
@@ -494,8 +490,7 @@ def main():
                     "src": fi["path"],
                     "start": float(f"{rs:.6f}"),
                     "length": float(f"{L:.6f}"),
-                    "epoch": int(fi["base_epoch"] + int(rs)),  # retained for visibility
-                    "basetime_us": basetime_us,
+                    "epoch": epoch_int,
                     "out": out_clip,
                     "status": "pending",
                 }
@@ -545,8 +540,9 @@ def main():
         src = clip["src"]
         start = clip["start"]
         L = clip["length"]
-        basetime_us = int(clip.get("basetime_us", 0))
-        draw = drawtext_strftime_filter(m["plan"]["fontfile"], basetime_us)
+        epoch_int = int(clip["epoch"])
+
+        draw = build_drawtext_pts(m["plan"]["fontfile"], epoch_int)
 
         has_a = has_audio_stream(src)
         if has_a:
