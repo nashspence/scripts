@@ -27,7 +27,8 @@ def log(msg: str):  # timestamped progress logs
 
 VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".m4v", ".MP4", ".MKV", ".MOV", ".M4V")
 DEFAULT_FONT = "/usr/share/fonts/TTF/DejaVuSansMono.ttf"  # present in container
-DATE_FMT_FOR_OVERLAY = r"%m/%d/%Y %H\:%M\:%S"  # escaped colons for drawtext
+# escaped spaces/colons for drawtext filter
+DATE_FMT_FOR_OVERLAY = r"%m/%d/%Y\ %H\:%M\:%S"
 FFCONCAT_HEADER = "ffconcat version 1.0\n"
 MANIFEST_NAME = ".job.json"
 
