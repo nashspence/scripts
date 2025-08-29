@@ -2,6 +2,7 @@
 # mypy: ignore-errors
 import argparse
 import json
+import math
 import os
 import random
 import re
@@ -27,8 +28,8 @@ def log(msg: str):  # timestamped progress logs
 
 VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".m4v", ".MP4", ".MKV", ".MOV", ".M4V")
 DEFAULT_FONT = "/usr/share/fonts/TTF/DejaVuSansMono.ttf"  # present in container
-# escaped spaces/colons for drawtext filter
-DATE_FMT_FOR_OVERLAY = r"%m/%d/%Y\ %H\:%M\:%S"
+# strftime pattern for drawtext; escape colons so ffmpeg option parser doesn't split them
+DATE_FMT_FOR_OVERLAY = r"%m/%d/%Y %H\:%M\:%S"
 FFCONCAT_HEADER = "ffconcat version 1.0\n"
 MANIFEST_NAME = ".job.json"
 
@@ -148,12 +149,13 @@ def base_epoch_for_file(path: str) -> int:
         return int(time.time())
 
 
-# ------------------------- math like your zsh -------------------------
-def build_len_slots(target_min: int, min_slot: int, max_slot: int) -> list[int]:
-    remain = target_min
-    slots = []
-    while remain >= min_slot:
-        r = random.randint(min_slot, max_slot)
+# ------------------------- planning helpers (SECONDS units) -------------------------
+def build_len_slots(target_sec: int, min_slot_sec: int, max_slot_sec: int) -> list[int]:
+    """Build integer-second slot lengths with the same logic as the zsh version."""
+    remain = int(target_sec)
+    slots: list[int] = []
+    while remain >= min_slot_sec:
+        r = random.randint(min_slot_sec, max_slot_sec)
         if r > remain:
             r = remain
         slots.append(r)
@@ -166,45 +168,75 @@ def build_len_slots(target_min: int, min_slot: int, max_slot: int) -> list[int]:
     return slots
 
 
-# SAFE quota allocator (no infinite loop)
-def quotas(durations: list[float], slot_count: int, min_min: int) -> list[int]:
-    n = len(durations)
+def _round_half_up(x: float) -> int:
+    """AWK printf(\"%.0f\") style rounding for positive numbers."""
+    if x <= 0:
+        return 0
+    return int(math.floor(x + 0.5))
+
+
+def quotas_like_zsh(durations_sec: list[float], slot_count: int, min_seconds: int) -> list[int]:
+    """
+    Match the zsh planning:
+      q_i = round( (d_i / sum_d) * slot_count )  [round half up]
+      if q_i == 0 and floor(d_i) >= MIN_SECONDS: q_i = 1
+      while sum(q) != slot_count:
+        for i in files:
+          if sum<slot_count: q_i += 1
+          elif q_i > 1: q_i -= 1
+    """
+    n = len(durations_sec)
     if n == 0 or slot_count <= 0:
         return [0] * n
 
-    weights = [max(0.0, d) for d in durations]
-    total = sum(weights)
+    total = sum(max(0.0, d) for d in durations_sec)
     if total <= 0:
         return [0] * n
 
-    # Ideal fractional shares
-    ideals = [(d / total) * slot_count for d in weights]
-    q = [int(x) for x in ideals]  # floors; sum(q) <= slot_count
-    remain = slot_count - sum(q)
+    q = []
+    for d in durations_sec:
+        share = (d / total) * slot_count
+        q.append(_round_half_up(share))
 
-    # Distribute leftovers to largest fractional remainders
-    order = sorted(range(n), key=lambda i: ideals[i] - q[i], reverse=True)
-    idx = 0
-    while remain > 0:
-        q[order[idx]] += 1
-        remain -= 1
-        idx = (idx + 1) % n
+    # Enforce at least one slot for sufficiently long files
+    min_seconds = max(0, int(min_seconds))
+    for i, d in enumerate(durations_sec):
+        if q[i] == 0 and int(d) >= min_seconds:
+            q[i] = 1
 
-    # Enforce "at least 1" for files with duration >= min_min by stealing from bins with >1
-    must_have = [i for i, d in enumerate(durations) if int(d) >= min_min and q[i] == 0]
-    for i in must_have:
-        donor = max((j for j in range(n) if q[j] > 1), key=lambda j: q[j], default=None)
-        if donor is None:
-            break  # can't satisfy without exceeding slot_count
-        q[donor] -= 1
-        q[i] += 1
+    s = sum(q)
+    if s == slot_count:
+        return q
+
+    # Round-robin correction like the zsh loop
+    guard = 0
+    while s != slot_count and guard < 100000:
+        for i in range(n):
+            if s == slot_count:
+                break
+            if s < slot_count:
+                q[i] += 1
+                s += 1
+            elif q[i] > 1:
+                q[i] -= 1
+                s -= 1
+        guard += 1
 
     return q
 
 
-def drawtext_text_value(epoch_int: int) -> str:
-    # %{pts\:localtime\:EPOCH\:%m/%d/%Y\ %H\:%M\:%S}
-    return f"%{{pts\\:localtime\\:{epoch_int}\\:{DATE_FMT_FOR_OVERLAY}}}"
+def drawtext_strftime_filter(fontfile: str, basetime_us: int) -> str:
+    """
+    Build a drawtext filter using expansion=strftime and basetime (µs).
+    Shows absolute local time derived from basetime + frame pts.
+    """
+    text_val = f"'%{{localtime\\:{DATE_FMT_FOR_OVERLAY}}}'"
+    return (
+        f"drawtext=fontfile={fontfile}"
+        f":expansion=strftime:basetime={basetime_us}"
+        f":fontcolor=white:fontsize=h/40:box=1:boxcolor=black@1:boxborderw=6"
+        f":text={text_val}:x=24:y=24"
+    )
 
 
 # ------------------------- manifest helpers -------------------------
@@ -246,7 +278,7 @@ def new_manifest(src_dir: str, files_with_stats: list[dict], out_dir: str) -> di
             "files": files_with_stats,  # [{path,size,mtime}]
         },
         "plan": {},
-        "clips": {},  # index -> {out, src, start, length, epoch, status}
+        "clips": {},  # index -> {out, src, start, length, epoch, basetime_us, status}
         "final": {"status": "pending", "out_path": None, "finished_at": None},
     }
 
@@ -297,23 +329,24 @@ def main():
         default="/in",
         help="Directory containing source video files (default: /in).",
     )
+    # Match zsh semantics: TARGET/MIN/MAX are in SECONDS.
     ap.add_argument(
         "--target",
         type=int,
-        default=int(os.getenv("TARGET", "300")),
-        help="Target minutes total (default 300).",
+        default=int(os.getenv("TARGET", "300")),  # 5 minutes
+        help="Target SECONDS total (default 300 = 5 minutes).",
     )
     ap.add_argument(
         "--min",
         type=int,
         default=int(os.getenv("MIN", "6")),
-        help="Minimum clip minutes (default 6).",
+        help="Minimum clip length in SECONDS (default 6).",
     )
     ap.add_argument(
         "--max",
         type=int,
         default=int(os.getenv("MAX", "9")),
-        help="Maximum clip minutes (default 9).",
+        help="Maximum clip length in SECONDS (default 9).",
     )
     ap.add_argument("--svt-preset", type=int, default=int(os.getenv("SVT_PRESET", "5")))
     ap.add_argument("--svt-crf", type=int, default=int(os.getenv("SVT_CRF", "30")))
@@ -344,7 +377,7 @@ def main():
     os.makedirs(work_dir, exist_ok=True)
     m = load_manifest(args.autoedit_dir)
 
-    # ------------------------- NEW: Early exit if already completed -------------------------
+    # ------------------------- Early exit if already completed -------------------------
     if m and m.get("final", {}).get("status") == "done":
         outp = m["final"].get("out_path")
         finished_at = m["final"].get("finished_at") or "unknown time"
@@ -382,41 +415,39 @@ def main():
         sys.exit(1)
 
     log(f"Probing durations for {len(files)} file(s)…")
-    durations = [ffprobe_duration(p) for p in files]
+    durations = [ffprobe_duration(p) for p in files]  # seconds
     if not any(d > 0 for d in durations):
         eprint("[autoedit] ERROR: cannot read durations")
         sys.exit(1)
-    combined = sum(durations)
+    combined = sum(durations)  # seconds
 
     # Build or load the plan
     if not m.get("plan"):
-        target_min = (
-            args.target if combined >= args.target * 60 else int(combined // 60)
-        )
-        len_slots_min = build_len_slots(target_min, args.min, args.max)
-        if not len_slots_min:
-            eprint("[autoedit] ERROR: target minutes below --min; nothing to do.")
-            sys.exit(1)
+        # Cap TARGET to available total (seconds)
+        target_sec = args.target if combined >= args.target else int(combined)
 
-        slot_count = len(len_slots_min)
+        # Build slot lengths in SECONDS (zsh-compatible)
+        len_slots_sec = build_len_slots(target_sec, args.min, args.max)
+        if not len_slots_sec:
+            # If target < min, make a single short slot exactly equal to target
+            len_slots_sec = [target_sec]
+
+        slot_count = len(len_slots_sec)
         if slot_count < len(files):
             log(
                 f"WARNING: slot_count ({slot_count}) < number of files ({len(files)}). "
                 "Some files may receive 0 quota."
             )
 
-        q = quotas(durations, slot_count, args.min)
-        if sum(q) != slot_count:
-            log(
-                f"WARNING: quota sum {sum(q)} != slot_count {slot_count}; continuing with computed q."
-            )
+        # Quotas with zsh-equivalent rounding + correction (MIN is in seconds)
+        q = quotas_like_zsh(durations, slot_count, args.min)
 
         base_epochs = [base_epoch_for_file(p) for p in files]
 
         plan = {
-            "target": target_min,
-            "min": args.min,
-            "max": args.max,
+            "target_sec": target_sec,
+            "min_sec": args.min,
+            "max_sec": args.max,
             "svt_preset": args.svt_preset,
             "svt_crf": args.svt_crf,
             "svt_gop": args.svt_gop,
@@ -424,7 +455,7 @@ def main():
             "tp": args.tp,
             "lufs_clip": args.lufs_clip,
             "fontfile": args.fontfile,
-            "len_slots_min": len_slots_min,
+            "len_slots_sec": len_slots_sec,
             "files": [
                 {
                     "path": files[i],
@@ -445,8 +476,8 @@ def main():
             d = fi["duration"]
             part = d / qi if qi > 0 else 0.0
             for slot in range(1, qi + 1):
-                Lm = len_slots_min[idx - 1] if (idx - 1) < slot_count else args.min
-                L = float(Lm * 60)
+                Ls = len_slots_sec[idx - 1] if (idx - 1) < slot_count else args.min
+                L = float(Ls)  # seconds
                 ps = (slot - 1) * part
                 mo = max(0.0, part - L)
                 off = random.random() * mo if mo > 0 else 0.0
@@ -454,7 +485,8 @@ def main():
                 hi = max(0.0, d - L)
                 if rs > hi:
                     rs = hi
-                epoch_int = int(fi["base_epoch"] + int(rs))
+                # basetime in microseconds = (base_epoch + start_offset) * 1e6
+                basetime_us = int(round((fi["base_epoch"] + rs) * 1_000_000))
                 out_clip = os.path.join(work_dir, f"clip{idx:03d}.mkv")
                 clips[str(idx)] = {
                     "index": idx,
@@ -462,7 +494,8 @@ def main():
                     "src": fi["path"],
                     "start": float(f"{rs:.6f}"),
                     "length": float(f"{L:.6f}"),
-                    "epoch": epoch_int,
+                    "epoch": int(fi["base_epoch"] + int(rs)),  # retained for visibility
+                    "basetime_us": basetime_us,
                     "out": out_clip,
                     "status": "pending",
                 }
@@ -473,14 +506,18 @@ def main():
 
         # Plan visibility logs
         log(
-            f"Plan: target={target_min} min, slots={len_slots_min} (count={len(len_slots_min)}), files={len(files)}"
+            f"Plan: target={target_sec} s (~{target_sec/60:.1f} min), "
+            f"slots={len_slots_sec} (count={len(len_slots_sec)}), files={len(files)}"
         )
         for i, fi in enumerate(plan["files"]):
             log(
                 f"  file[{i}] quota={fi['quota']} duration={fi['duration']:.1f}s name={os.path.basename(fi['path'])}"
             )
 
-        log(f"Plan created: {len(m['clips'])} clips, target {plan['target']} min")
+        log(
+            f"Plan created: {len(m['clips'])} clips, "
+            f"target {plan['target_sec']} s (~{plan['target_sec']/60:.1f} min)"
+        )
     else:
         log(f"Plan loaded: {len(m['clips'])} clips")
 
@@ -508,22 +545,18 @@ def main():
         src = clip["src"]
         start = clip["start"]
         L = clip["length"]
-        epoch_int = clip["epoch"]
-        text_val = drawtext_text_value(epoch_int)
-        draw = (
-            f"drawtext=fontfile={m['plan']['fontfile']}"
-            f":fontcolor=white:fontsize=h/40:box=1:boxcolor=black@1:boxborderw=6"
-            f":text={text_val}:x=24:y=24"
-        )
+        basetime_us = int(clip.get("basetime_us", 0))
+        draw = drawtext_strftime_filter(m["plan"]["fontfile"], basetime_us)
+
         has_a = has_audio_stream(src)
         if has_a:
             afilt = f"highpass=f=120,loudnorm=I={m['plan']['lufs_clip']}:TP={m['plan']['tp']}:LRA=11:linear=true,aresample=async=1:first_pts=0"
             fcomplex = f"[0:v]{draw}[v];[0:a]{afilt}[a]"
-            map_seq = ["-map", "[v]", "-map", "[a]"]
+            map_seq = ["-map", "[v]", "-map", "[a]", "-map", "0:s?"]
         else:
             # synthesize stereo silent audio for concat uniformity
             fcomplex = f"[0:v]{draw}[v];anullsrc=r=48000:cl=stereo,atrim=duration={L:.6f},aresample=async=1:first_pts=0[a]"
-            map_seq = ["-map", "[v]", "-map", "[a]"]
+            map_seq = ["-map", "[v]", "-map", "[a]", "-map", "0:s?"]
 
         os.makedirs(os.path.dirname(out_clip), exist_ok=True)
         cmd = (
@@ -542,14 +575,6 @@ def main():
                 src,
                 "-fps_mode",
                 "passthrough",
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:s?",
-                "-map",
-                "0:d?",
-                "-map",
-                "0:t?",
                 "-filter_complex",
                 fcomplex,
             ]
@@ -570,10 +595,6 @@ def main():
                 "-b:a",
                 m["plan"]["opus_br"],
                 "-c:s",
-                "copy",
-                "-c:d",
-                "copy",
-                "-c:t",
                 "copy",
                 "-map_metadata",
                 "0",
@@ -655,10 +676,6 @@ def main():
         "0:a?",
         "-map",
         "0:s?",
-        "-map",
-        "0:d?",
-        "-map",
-        "0:t?",
         "-c",
         "copy",
         "-cues_to_front",
