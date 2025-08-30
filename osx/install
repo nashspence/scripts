@@ -25,22 +25,34 @@ TEMPLATES_DIR="${SCRIPT_DIR}/templates"
 WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
 WRAPPER_RELEASE_TEMPLATE="${TEMPLATES_DIR}/wrapper-release.zsh"
 SHORTCUTS_TEMPLATE="${TEMPLATES_DIR}/shortcuts_path.zsh"
+LAUNCHER_TEMPLATE="${TEMPLATES_DIR}/launcher.sh"
+INFO_PLIST_TEMPLATE="${TEMPLATES_DIR}/info.plist"
+LAUNCH_AGENT_TEMPLATE="${TEMPLATES_DIR}/launch-agent.plist"
 
-MACHINE="${MACHINE:-com.nashspence.pmachine.script}"
+MACHINE="${MACHINE:-com.nashspence.scripts}"
 PODMAN_CPUS="${PODMAN_CPUS:-10}"
 PODMAN_MEM="${PODMAN_MEM:-18432}"
 PODMAN_DISK="${PODMAN_DISK:-100}"
 
-# ---- Labels / plists -------------------------------------------------------------
-LABEL_WAKER="com.nashspence.pmachine.script.waker"
-PLIST_WAKER_SRC="${SCRIPT_DIR}/${LABEL_WAKER}.plist"
-PLIST_WAKER_DST="${LA_DIR}/${LABEL_WAKER}.plist"
+# ---- Helper bundle / LaunchAgent -------------------------------------------------
+APP_NAME="Podman Scripts Agent"
+BUNDLE_ID="com.nashspence.scripts"
+AGENT_LABEL="${BUNDLE_ID}.agent"
+BASE_DIR="$HOME/Library/Application Support/Nash Spence/Podman Scripts"
+APP_DIR="$BASE_DIR/${APP_NAME}.app"
+CONTENTS="$APP_DIR/Contents"
+MACOS_DIR="$CONTENTS/MacOS"
+RES_DIR="$CONTENTS/Resources"
+INFO_PLIST="$CONTENTS/Info.plist"
+LAUNCHER="$MACOS_DIR/launcher"
+MAIN_SCRIPT="$RES_DIR/podman-scripts-machine-agent"
+PLIST_PATH="${LA_DIR}/${AGENT_LABEL}.plist"
 
 # ---- PATH block markers ----------------------------------------------------------
-PATH_BEGIN_MARK="# >>> pmachine PATH >>>"
-PATH_END_MARK="# <<< pmachine PATH <<<"
+PATH_BEGIN_MARK="# >>> podman-scripts PATH >>>"
+PATH_END_MARK="# <<< podman-scripts PATH <<<"
 PATH_EXPORT_LINE='export PATH="$HOME/bin:$PATH"'
-SHORTCUTS_SNIPPET="$HOME/.config/pmachine/shortcuts_path.zsh"
+SHORTCUTS_SNIPPET="$HOME/.config/podman-scripts/shortcuts_path.zsh"
 
 # ---- Helpers ---------------------------------------------------------------------
 die() { print -u2 -- "ERROR: $*"; exit 1; }
@@ -125,6 +137,44 @@ remove_podman_machine() {
       podman machine rm -f "$MACHINE" >/dev/null 2>&1 || true
     fi
   fi
+}
+
+mk_app_bundle() {
+  mkdir -p "$MACOS_DIR" "$RES_DIR"
+
+  install -m 0755 "$LAUNCHER_TEMPLATE" "$LAUNCHER"
+
+  sed -e "s|%BUNDLE_ID%|${BUNDLE_ID//&/\\&}|g" \
+      -e "s|%APP_NAME%|${APP_NAME//&/\\&}|g" \
+      "$INFO_PLIST_TEMPLATE" > "$INFO_PLIST"
+  chmod 644 "$INFO_PLIST"
+
+  install -m 0755 "$SCRIPT_DIR/podman-scripts-machine-agent" "$MAIN_SCRIPT"
+  codesign -s - --force --deep "$APP_DIR" 2>/dev/null || true
+}
+
+mk_agent_plist() {
+  mkdir -p "$LA_DIR"
+  local sock_path="/tmp/com.nashspence.scripts.${UID_NUM}.sock"
+  sed -e "s|%AGENT_LABEL%|${AGENT_LABEL//&/\\&}|g" \
+      -e "s|%LAUNCHER%|${LAUNCHER//&/\\&}|g" \
+      -e "s|%BUNDLE_ID%|${BUNDLE_ID//&/\\&}|g" \
+      -e "s|%SOCK_PATH%|${sock_path//&/\\&}|g" \
+      -e "s|%MACHINE%|${MACHINE//&/\\&}|g" \
+      -e "s|%LOG_OUT%|${HOME//&/\\&}/Library/Logs/${BUNDLE_ID}.out.log|g" \
+      -e "s|%LOG_ERR%|${HOME//&/\\&}/Library/Logs/${BUNDLE_ID}.err.log|g" \
+      "$LAUNCH_AGENT_TEMPLATE" > "$PLIST_PATH"
+  chmod 644 "$PLIST_PATH"
+}
+
+load_agent() {
+  launchctl bootout gui/$UID_NUM "$PLIST_PATH" >/dev/null 2>&1 || true
+  launchctl bootstrap gui/$UID_NUM "$PLIST_PATH"
+  launchctl kickstart -k gui/$UID_NUM/${AGENT_LABEL} 2>/dev/null || true
+}
+
+unload_agent() {
+  launchctl bootout gui/$UID_NUM "$PLIST_PATH" >/dev/null 2>&1 || true
 }
 
 link_into_bin() {
@@ -224,8 +274,11 @@ install_all() {
   [[ -f "$SHORTCUTS_TEMPLATE" ]] || die "missing template: $SHORTCUTS_TEMPLATE"
   [[ -f "$WRAPPER_TEMPLATE" ]] || die "missing template: $WRAPPER_TEMPLATE"
   [[ -f "$WRAPPER_RELEASE_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASE_TEMPLATE"
+  [[ -f "$LAUNCHER_TEMPLATE" ]] || die "missing template: $LAUNCHER_TEMPLATE"
+  [[ -f "$INFO_PLIST_TEMPLATE" ]] || die "missing template: $INFO_PLIST_TEMPLATE"
+  [[ -f "$LAUNCH_AGENT_TEMPLATE" ]] || die "missing template: $LAUNCH_AGENT_TEMPLATE"
 
-  mkdir -p "$BIN" "$LA_DIR"
+  mkdir -p "$BIN" "$LA_DIR" "$BASE_DIR"
 
   # 0) Ensure ~/bin in PATH + Shortcuts snippet
   add_path_block "$HOME/.zprofile"
@@ -237,25 +290,17 @@ install_all() {
   ensure_podman
   ensure_podman_machine
 
-  # 1) Copy helper scripts into ~/bin
-  [[ -f "$SCRIPT_DIR/pmachine-waker" ]] || die "missing pmachine-waker next to this script"
-  install -m 0755 "$SCRIPT_DIR/pmachine-waker" "$BIN/pmachine-waker"
+  # 1) Install helper app bundle and LaunchAgent
+  mk_app_bundle
+  mk_agent_plist
+  load_agent
+  echo "Loaded LaunchAgent."
+  echo "Socket: /tmp/com.nashspence.scripts.$UID_NUM.sock (owned by launchd)."
 
-  # 2) Prepare plists
-  [[ -f "$PLIST_WAKER_SRC" ]] || die "missing $PLIST_WAKER_SRC"
-  sed -e "s|%UID%|$UID_NUM|g" -e "s|\${HOME}|$HOME|g" "$PLIST_WAKER_SRC" > "$PLIST_WAKER_DST"
-
-  # 3) (Re)load LaunchAgents
-  launchctl bootout   "gui/$UID_NUM" "$PLIST_WAKER_DST" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$UID_NUM" "$PLIST_WAKER_DST"
-
-  echo "Loaded LaunchAgents."
-  echo "Socket: /tmp/pmachine.$UID_NUM.sock (owned by launchd)."
-
-  # 4) Generate wrappers
+  # 2) Generate wrappers
   generate_wrappers
 
-  # 5) Install symlinks (wrappers + tools) tracked by manifest
+  # 3) Install symlinks (wrappers + tools) tracked by manifest
   echo "Installing wrappers from: $WRAPPERS_DIR"
   echo "Installing tools from:    $OSXBIN_DIR"
   echo "Target bin dir:           $BIN"
@@ -363,15 +408,12 @@ uninstall_all() {
     rm -rf "$WRAPPERS_DIR"
   fi
 
-  for label in "$LABEL_WAKER"; do
-    plist="$LA_DIR/$label.plist"
-    launchctl bootout "gui/$UID_NUM" "$plist" >/dev/null 2>&1 || true
-    rm -f "$plist"
-  done
+  unload_agent
+  rm -f "$PLIST_PATH"
+  rm -rf "$APP_DIR"
+  rmdir "$BASE_DIR" 2>/dev/null || true
 
-  rm -f "$BIN/pmachine-waker"
-
-  local sock="/tmp/pmachine.$UID_NUM.sock"
+  local sock="/tmp/com.nashspence.scripts.$UID_NUM.sock"
   [[ -S "$sock" ]] && rm -f "$sock" || true
 
   if [[ -f "$SHORTCUTS_SNIPPET" ]]; then

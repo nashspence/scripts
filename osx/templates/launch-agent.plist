@@ -2,12 +2,17 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.nashspence.pmachine.script.waker</string>
+  <key>Label</key><string>%AGENT_LABEL%</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/zsh</string>
-    <string>${HOME}/bin/pmachine-waker</string>
+    <string>%LAUNCHER%</string>
+  </array>
+
+  <!-- Attribute Background Items to the helper app -->
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>%BUNDLE_ID%</string>
   </array>
 
   <!-- launchd owns this socket; it spawns us when a client connects -->
@@ -15,10 +20,10 @@
   <dict>
     <key>Control</key>
     <dict>
-      <key>SockPathName</key><string>/tmp/pmachine.%UID%.sock</string>
+      <key>SockPathName</key><string>%SOCK_PATH%</string>
       <key>SockFamily</key><string>Unix</string>
       <key>SockType</key><string>stream</string>
-      <key>SockMode</key><integer>384</integer> <!-- 0600 -->
+      <key>SockMode</key><integer>384</integer>
     </dict>
   </dict>
 
@@ -30,12 +35,12 @@
 
   <key>EnvironmentVariables</key>
   <dict>
-    <key>MACHINE</key><string>com.nashspence.pmachine.script</string>
+    <key>MACHINE</key><string>%MACHINE%</string>
   </dict>
 
   <key>KeepAlive</key><false/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>${HOME}/Library/Logs/com.nashspence.pmachine.script.waker.out.log</string>
-  <key>StandardErrorPath</key><string>${HOME}/Library/Logs/com.nashspence.pmachine.script.waker.err.log</string>
+  <key>StandardOutPath</key><string>%LOG_OUT%</string>
+  <key>StandardErrorPath</key><string>%LOG_ERR%</string>
 </dict>
 </plist>

@@ -4,9 +4,10 @@
 * When I run install
 * Then Homebrew is installed
 * And Podman is installed
-* And the pmachine Podman machine exists
+* And the com.nashspence.scripts Podman machine exists
 * And wrappers and tools are linked into ~/bin
-* And pmachine-waker launch agent is loaded
+* And the Podman Scripts Agent helper app is installed
+* And the Podman Scripts Agent launch agent is loaded
 * And ~/bin is added to the shell PATH
 * And a Shortcuts PATH snippet is created
 
@@ -21,12 +22,12 @@
 * And ~/bin is removed from the shell PATH
 
 ## Scenario: wake the Podman machine on demand
-* Given pmachine-waker is running
+* Given the Podman Scripts Agent is running
 * When I touch the Podman socket
 * Then the machine starts
 
 ## Scenario: stop an idle Podman machine
-* When I run pmachine-idle with a timeout
+* When I run scripts-idle with a timeout
 * Then the machine stops after that timeout
 
 ## Scenario: burn an ISO image
