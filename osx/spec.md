@@ -20,10 +20,10 @@
 * Then the image is written to media with hdiutil
 
 ## Scenario: build and run a Containerfile
-* When I run dr with a directory path
+* When I run run-podman-script with a directory path
 * Then the container builds and runs without affecting the default machine
 
 ## Scenario: run a released container image
 * Given a release.yaml describing a released image
-* When I run dr with a directory path and release.yaml
+* When I run run-podman-script with a directory path and release.yaml
 * Then the released container runs without building
