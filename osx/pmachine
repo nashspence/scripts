@@ -18,7 +18,7 @@ WRAPPERS_DIR="${WRAPPERS_DIR:-${REPO_DIR}/.wrappers}"
 FILES_DIR="${FILES_DIR:-$REPO_DIR}"
 LA_DIR="$HOME/Library/LaunchAgents"
 UID_NUM="$(id -u)"
-OSXBIN_DIR="${SCRIPT_DIR}/bin"   # REQUIRED (must contain 'dr')
+OSXBIN_DIR="${SCRIPT_DIR}/bin"   # REQUIRED (must contain 'run-podman-script')
 MANIFEST="${WRAPPERS_DIR}/.symlinks-manifest"
 
 MACHINE="${MACHINE:-com.nashspence.pmachine.script}"
@@ -196,17 +196,17 @@ make_name() {
 cat > "$wrapper" <<EOF
 #!/bin/zsh
 set -euo pipefail
-# Auto-generated wrapper. Invokes 'dr' against a specific build file.
+# Auto-generated wrapper. Invokes 'run-podman-script' against a specific build file.
 export DR_WRAPPER_NAME="${name}"
-exec dr "${abs}" "${rel}" "\$@"
+exec run-podman-script "${abs}" "${rel}" "\$@"
 EOF
     else
 cat > "$wrapper" <<EOF
 #!/bin/zsh
 set -euo pipefail
-# Auto-generated wrapper. Invokes 'dr' against a specific build file.
+# Auto-generated wrapper. Invokes 'run-podman-script' against a specific build file.
 export DR_WRAPPER_NAME="${name}"
-exec dr "${abs}" "\$@"
+exec run-podman-script "${abs}" "\$@"
 EOF
     fi
 
@@ -221,10 +221,10 @@ EOF
 }
 
 install_all() {
-  # Require OSXBIN_DIR and dr
-  [[ -d "$OSXBIN_DIR" ]] || die "required directory missing: $OSXBIN_DIR (must contain 'dr')"
-  [[ -f "$OSXBIN_DIR/dr" ]] || die "required tool missing: $OSXBIN_DIR/dr"
-  chmod +x "$OSXBIN_DIR/dr" 2>/dev/null || true
+  # Require OSXBIN_DIR and run-podman-script
+  [[ -d "$OSXBIN_DIR" ]] || die "required directory missing: $OSXBIN_DIR (must contain 'run-podman-script')"
+  [[ -f "$OSXBIN_DIR/run-podman-script" ]] || die "required tool missing: $OSXBIN_DIR/run-podman-script"
+  chmod +x "$OSXBIN_DIR/run-podman-script" 2>/dev/null || true
 
   mkdir -p "$BIN" "$LA_DIR"
 
@@ -315,8 +315,8 @@ install_all() {
   echo "Wrote manifest: $MANIFEST"
 
   case ":$PATH:" in
-    *":$BIN:"*) echo "'dr' is installed at $BIN/dr and is already in your PATH for this shell." ;;
-    *) echo "'dr' is installed at $BIN/dr, but your current shell won't see it until you open a new session."
+    *":$BIN:"*) echo "'run-podman-script' is installed at $BIN/run-podman-script and is already in your PATH for this shell." ;;
+    *) echo "'run-podman-script' is installed at $BIN/run-podman-script, but your current shell won't see it until you open a new session."
        echo "  For this shell only, run: export PATH=\"\$HOME/bin:\$PATH\"" ;;
   esac
 

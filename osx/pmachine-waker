@@ -13,7 +13,7 @@ MACHINE="${MACHINE:-com.nashspence.pmachine.script}"
 STATE_DIR="${STATE_DIR:-$HOME/Library/Application Support/pmachine}"
 HOLDS_DIR="$STATE_DIR/holds"              # one file per live connection (by PID)
 STOP_GRACE_SECS="${STOP_GRACE_SECS:-1}"   # small delay before quiesce check
-QUIESCE_MS="${QUIESCE_MS:-1500}"          # keep watching for new holds (back-to-back dr)
+QUIESCE_MS="${QUIESCE_MS:-1500}"          # keep watching for new holds (back-to-back run-podman-script)
 WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-90}"
 
 log() { print -r -- "$(date '+%F %T') pmachine-waker[$$]: $*"; }

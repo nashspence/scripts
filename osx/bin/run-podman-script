@@ -1,5 +1,5 @@
 #!/bin/zsh
-# dr — build (Podman) and run a Containerfile/Dockerfile; pipe-friendly.
+# run-podman-script — build (Podman) and run a Containerfile/Dockerfile; pipe-friendly.
 # Logs (stderr only): (1) waiting for connection, (2) chosen image + why, (3) exact run command.
 
 set -euo pipefail
