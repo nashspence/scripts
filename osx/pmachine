@@ -277,13 +277,38 @@ install_all() {
     done < <(sed -e $'s/\\\\t/\t/g' "$MANIFEST")
   fi
 
+  # Link generated wrappers (regular executable files only)
   local w
-  for w in "$WRAPPERS_DIR"/*(xN); do
+  for w in "$WRAPPERS_DIR"/*(.xN); do
     link_into_bin "$w"
   done
-  for w in "$OSXBIN_DIR"/*(xN); do
+
+  # Link top-level tools from OSXBIN_DIR, but never the lib dir
+  for w in "$OSXBIN_DIR"/*(.xN); do
+    [[ "${w:t}" == "lib" ]] && continue
     link_into_bin "$w"
   done
+
+  # 5b) Install libraries: make $BIN/lib a real dir, then link files from $OSXBIN_DIR/lib
+  if [[ -d "$OSXBIN_DIR/lib" ]]; then
+    # If a previous bad install left $BIN/lib as a symlink, remove it
+    if [[ -L "$BIN/lib" ]]; then
+      echo "  ~ removing old symlink at $BIN/lib"
+      rm -f "$BIN/lib"
+    fi
+    mkdir -p "$BIN/lib"
+
+    local f rel dest
+    # Link all regular files recursively, preserving subdirs
+    for f in "$OSXBIN_DIR"/lib/**/*(.N); do
+      rel="${f#${OSXBIN_DIR}/lib/}"
+      dest="$BIN/lib/$rel"
+      mkdir -p "${dest:h}"
+      ln -sf "$f" "$dest"
+      printf '%s\t%s\n' "$dest" "$f" >> "$tmp_manifest"
+      echo "  + linked lib/${rel}"
+    done
+  fi
 
   mv -f "$tmp_manifest" "$MANIFEST"
   trap - EXIT

@@ -1,0 +1,13 @@
+#!/bin/zsh
+set -euo pipefail
+
+LOG="$1"
+
+mkdir -p "${LOG:h}"
+: > "$LOG"
+
+osascript >/dev/null <<EOF
+tell application "Terminal"
+  do script "tail -n +1 -F '$LOG'"
+end tell
+EOF

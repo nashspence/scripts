@@ -1,0 +1,43 @@
+#!/bin/zsh
+set -euo pipefail
+
+source "$HOME/.config/pmachine/shortcuts_path.zsh"
+source "$HOME/bin/lib/proc_supervisor.zsh"
+
+INPUT="${1:-}"
+if [[ -z "$INPUT" ]]; then
+  print -u2 -- "no input file path provided"
+  exit 2
+fi
+
+NOW=$(date +%Y%m%dT%H%M%S)
+OUT="$HOME/Pipelines/Archive Videos/$NOW"
+mkdir -p "$OUT"
+
+export DR_NO_TTY=1
+LOG="$OUT/log.txt"
+termtail "$LOG" &
+exec >>"$LOG" 2>&1
+
+proc_init "$LOG"
+proc_traps
+
+STAGE_OUT="$OUT/stage"
+VCRUNCH_OUT="$OUT/vcrunch"
+MKISO_OUT="$OUT/mkiso"
+QCUT_OUT="$OUT/qcut"
+mkdir -p "$STAGE_OUT" "$VCRUNCH_OUT" "$MKISO_OUT" "$QCUT_OUT"
+
+caffeinate -dims -w $$ &
+
+proc_run   "stage"   -v "${INPUT}:/in"      -v "${STAGE_OUT}:/out"          || exit $?
+proc_run   "vcrunch" -v "${STAGE_OUT}:/in"  -v "${VCRUNCH_OUT}:/out"        || exit $?
+
+mkiso_pid="$(proc_run_bg "mkiso" -v "${VCRUNCH_OUT}:/in" -v "${MKISO_OUT}:/out" -- --out-file "$NOW.iso")"
+qcut_pid="$(proc_run_bg "qcut"   -v "${STAGE_OUT}:/in"   -v "${QCUT_OUT}:/out")"
+
+proc_wait "$mkiso_pid" || { rc=$?; proc_kill_and_wait "$qcut_pid"; exit $rc; }
+proc_run burniso -v "${MKISO_OUT}/${NOW}.iso" || { rc=$?; proc_kill_and_wait "$qcut_pid"; exit $rc; }
+
+proc_wait "$qcut_pid" || exit $?
+exit 0
