@@ -1,12 +1,14 @@
 # zsh process supervisor (source this)
-typeset -ga PIDS
+emulate -L zsh
+setopt err_return pipefail
+
+typeset -ga PIDS=()
 
 proc_init() { PIDS=(); }
 
 _proc_forget() {
-  local target="$1" x
-  typeset -a keep=()
-  for x in "${PIDS[@]}"; do [[ "$x" == "$target" ]] || keep+=("$x"); done
+  local t="$1" x; typeset -a keep=()
+  for x in "${PIDS[@]}"; do [[ "$x" == "$t" ]] || keep+=("$x"); done
   PIDS=("${keep[@]}")
 }
 
@@ -40,11 +42,13 @@ proc_run() {
   return $rc
 }
 
+# usage: proc_run_bg <outvar> <cmd> [args...]
 proc_run_bg() {
+  local __outvar="$1"; shift
   "$@" &
   local pid=$!
   PIDS+=("$pid")
-  print -r -- "$pid"
+  eval "$__outvar=$pid"
 }
 
 proc_wait() {
