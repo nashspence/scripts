@@ -44,7 +44,7 @@ CONTENTS="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS/MacOS"
 RES_DIR="$CONTENTS/Resources"
 INFO_PLIST="$CONTENTS/Info.plist"
-LAUNCHER="$MACOS_DIR/launcher"
+LAUNCHER="$MACOS_DIR/Podman Scripts Agent"
 MAIN_SCRIPT="$RES_DIR/podman-scripts-machine-agent"
 PLIST_PATH="${LA_DIR}/${AGENT_LABEL}.plist"
 
