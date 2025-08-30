@@ -14,11 +14,6 @@ NOW=$(date +%Y%m%dT%H%M%S)
 OUT="$HOME/Pipelines/Archive Videos/$NOW"
 mkdir -p "$OUT"
 
-export DR_NO_TTY=1
-LOG="$OUT/log.txt"
-termtail "$LOG" &
-exec >>"$LOG" 2>&1
-
 proc_init "$LOG"
 proc_traps
 
