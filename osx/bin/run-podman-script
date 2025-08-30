@@ -9,11 +9,11 @@ log()  { print -u2 -- "$*"; }
 fail() { print -u2 -- "ERROR: $*"; }
 
 # ----- config ----------------------------------------------------------------------------------
-DR_MACHINE="${DR_MACHINE:-${MACHINE:-com.nashspence.pmachine.script}}"
-DR_IMAGE_PREFIX="${DR_IMAGE_PREFIX:-com.nashspence.pmachine.script.}"
+DR_MACHINE="${DR_MACHINE:-${MACHINE:-com.nashspence.scripts}}"
+DR_IMAGE_PREFIX="${DR_IMAGE_PREFIX:-com.nashspence.scripts.}"
 DR_TAG="${DR_TAG:-latest}"
-WAKER_LABEL="${WAKER_LABEL:-com.nashspence.pmachine.script.waker}"
-SOCK="${PMACHINE_SOCK:-/tmp/pmachine.${UID}.sock}"
+WAKER_LABEL="${WAKER_LABEL:-com.nashspence.scripts.agent}"
+SOCK="${PODMAN_SCRIPTS_SOCK:-/tmp/com.nashspence.scripts.${UID}.sock}"
 
 # input: file/dir and optional release.yaml
 file="Containerfile"

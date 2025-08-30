@@ -1,5 +1,5 @@
 #!/bin/zsh
-# pmachine-waker — socket-activated; starts VM, holds while connected, stops if last client disconnects
+# podman-scripts-machine-agent — socket-activated; starts VM, holds while connected, stops if last client disconnects
 
 set -euo pipefail
 emulate -L zsh
@@ -8,15 +8,15 @@ setopt err_return pipefail extended_glob
 export PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # --- Config ---------------------------------------------------------------------
-MACHINE="${MACHINE:-com.nashspence.pmachine.script}"
+MACHINE="${MACHINE:-com.nashspence.scripts}"
 
-STATE_DIR="${STATE_DIR:-$HOME/Library/Application Support/pmachine}"
+STATE_DIR="${STATE_DIR:-$HOME/Library/Application Support/Nash Spence/Podman Scripts/agent}"
 HOLDS_DIR="$STATE_DIR/holds"              # one file per live connection (by PID)
 STOP_GRACE_SECS="${STOP_GRACE_SECS:-1}"   # small delay before quiesce check
 QUIESCE_MS="${QUIESCE_MS:-1500}"          # keep watching for new holds (back-to-back run-podman-script)
 WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-90}"
 
-log() { print -r -- "$(date '+%F %T') pmachine-waker[$$]: $*"; }
+log() { print -r -- "$(date '+%F %T') podman-scripts-machine-agent[$$]: $*"; }
 
 gc_holds() {
   local f pid

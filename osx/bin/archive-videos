@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 
-source "$HOME/.config/pmachine/shortcuts_path.zsh"
+source "$HOME/.config/podman-scripts/shortcuts_path.zsh"
 source "$HOME/bin/lib/proc_supervisor.zsh"
 
 INPUT="${1:-}"
