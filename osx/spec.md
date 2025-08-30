@@ -1,10 +1,24 @@
 # osx scripts
 
-## Scenario: manage Podman machine wrappers
-* When I run pmachine
-* Then wrappers are installed
-* When I run pmachine --uninstall
-* Then wrappers are removed
+## Scenario: install the Podman machine environment
+* When I run install
+* Then Homebrew is installed
+* And Podman is installed
+* And the pmachine Podman machine exists
+* And wrappers and tools are linked into ~/bin
+* And pmachine-waker launch agent is loaded
+* And ~/bin is added to the shell PATH
+* And a Shortcuts PATH snippet is created
+
+## Scenario: uninstall the Podman machine environment
+* Given install has been run
+* When I pass "--uninstall"
+* And I run install
+* Then wrappers and tools are removed from ~/bin
+* And the launch agent is removed
+* And the Shortcuts PATH snippet is removed
+* And the Podman machine is removed
+* And ~/bin is removed from the shell PATH
 
 ## Scenario: wake the Podman machine on demand
 * Given pmachine-waker is running

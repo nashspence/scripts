@@ -1,8 +1,8 @@
 #!/bin/zsh
-# pmachine: install / uninstall activation + wrapper tooling + brew/podman/machine (pure zsh)
+# install: install / uninstall activation + wrapper tooling + brew/podman/machine (pure zsh)
 # Usage:
-#   ./pmachine                 # Install everything (activation + wrappers + links + brew/podman/machine)
-#   ./pmachine --uninstall     # Remove EVERYTHING this script installed (incl. Podman machine)
+#   ./install                 # Install everything (activation + wrappers + links + brew/podman/machine)
+#   ./install --uninstall     # Remove EVERYTHING this script installed (incl. Podman machine)
 
 set -euo pipefail
 emulate -L zsh
@@ -20,6 +20,11 @@ LA_DIR="$HOME/Library/LaunchAgents"
 UID_NUM="$(id -u)"
 OSXBIN_DIR="${SCRIPT_DIR}/bin"   # REQUIRED (must contain 'run-podman-script')
 MANIFEST="${WRAPPERS_DIR}/.symlinks-manifest"
+
+TEMPLATES_DIR="${SCRIPT_DIR}/templates"
+WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
+WRAPPER_RELEASE_TEMPLATE="${TEMPLATES_DIR}/wrapper-release.zsh"
+SHORTCUTS_TEMPLATE="${TEMPLATES_DIR}/shortcuts_path.zsh"
 
 MACHINE="${MACHINE:-com.nashspence.pmachine.script}"
 PODMAN_CPUS="${PODMAN_CPUS:-10}"
@@ -62,10 +67,7 @@ remove_path_block() {
 
 ensure_shortcuts_snippet() {
   mkdir -p "${SHORTCUTS_SNIPPET:h}"
-  cat > "$SHORTCUTS_SNIPPET" <<'EOS'
-# PATH for macOS Shortcuts "Run Shell Script"
-export PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-EOS
+  cp "$SHORTCUTS_TEMPLATE" "$SHORTCUTS_SNIPPET"
   echo "Created Shortcuts PATH snippet: $SHORTCUTS_SNIPPET"
   echo "  In Shortcuts 'Run Shell Script', add as first line:"
   echo "    source \"$SHORTCUTS_SNIPPET\""
@@ -192,24 +194,17 @@ make_name() {
     rel="${cf:h}/release.yaml"
     rel="${rel:A}"
 
+    local tpl
     if [[ -f "$rel" ]]; then
-cat > "$wrapper" <<EOF
-#!/bin/zsh
-set -euo pipefail
-# Auto-generated wrapper. Invokes 'run-podman-script' against a specific build file.
-export DR_WRAPPER_NAME="${name}"
-exec run-podman-script "${abs}" "${rel}" "\$@"
-EOF
+      tpl="$WRAPPER_RELEASE_TEMPLATE"
     else
-cat > "$wrapper" <<EOF
-#!/bin/zsh
-set -euo pipefail
-# Auto-generated wrapper. Invokes 'run-podman-script' against a specific build file.
-export DR_WRAPPER_NAME="${name}"
-exec run-podman-script "${abs}" "\$@"
-EOF
+      tpl="$WRAPPER_TEMPLATE"
     fi
 
+    sed -e "s|%NAME%|${name//&/\\&}|g" \
+        -e "s|%ABS%|${abs//&/\\&}|g" \
+        -e "s|%REL%|${rel//&/\\&}|g" \
+        "$tpl" > "$wrapper"
     chmod +x "$wrapper"
 
     printf '%s\t%s\n' "$name" "$abs" >> "$index_file"
@@ -225,6 +220,10 @@ install_all() {
   [[ -d "$OSXBIN_DIR" ]] || die "required directory missing: $OSXBIN_DIR (must contain 'run-podman-script')"
   [[ -f "$OSXBIN_DIR/run-podman-script" ]] || die "required tool missing: $OSXBIN_DIR/run-podman-script"
   chmod +x "$OSXBIN_DIR/run-podman-script" 2>/dev/null || true
+
+  [[ -f "$SHORTCUTS_TEMPLATE" ]] || die "missing template: $SHORTCUTS_TEMPLATE"
+  [[ -f "$WRAPPER_TEMPLATE" ]] || die "missing template: $WRAPPER_TEMPLATE"
+  [[ -f "$WRAPPER_RELEASE_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASE_TEMPLATE"
 
   mkdir -p "$BIN" "$LA_DIR"
 
