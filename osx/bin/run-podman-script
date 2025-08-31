@@ -33,23 +33,15 @@ fi
 # ----- hold the launchd socket for our entire lifetime (silent best-effort) --------------------
 typeset -gi DR_SOCK_FD=-1
 _close_sock_fd() { (( DR_SOCK_FD >= 0 )) && exec {DR_SOCK_FD}>&- 2>/dev/null || true; }
-trap _close_sock_fd EXIT
-trap '_close_sock_fd; exit 143' TERM   # 143 = 128 + SIGTERM(15)
-trap '_close_sock_fd; exit 129' HUP    # 129 = 128 + SIGHUP(1)
-trap '_close_sock_fd; exit 130' INT   # 130 = 128 + SIGINT(2)
-hold_socket_open() {
-  [[ -S "$SOCK" ]] || launchctl kickstart -kp "gui/${UID}/${WAKER_LABEL}" >/dev/null 2>&1 || true
-  if zmodload zsh/net/socket 2>/dev/null; then
-    local deadline=$((SECONDS + ${DR_SOCKET_WAIT_SECS:-3}))
-    while [[ ! -S "$SOCK" && $SECONDS -lt $deadline ]]; do sleep 0.1; done
-    if [[ -S "$SOCK" ]] && zsocket "$SOCK" 2>/dev/null; then
-      DR_SOCK_FD=$REPLY
-      if zmodload zsh/system 2>/dev/null; then zsystem fdflags -s cloexec $DR_SOCK_FD 2>/dev/null || true; fi
-    fi
+trap _close_sock_fd EXIT   # covers early exits / exec failure paths
+
+# when you create the socket FD:
+if zmodload zsh/net/socket 2>/dev/null && zsocket "$SOCK" 2>/dev/null; then
+  DR_SOCK_FD=$REPLY
+  if zmodload zsh/system 2>/dev/null; then
+    zsystem fdflags -s cloexec $DR_SOCK_FD 2>/dev/null || true
   fi
-  launchctl kickstart -kp "gui/${UID}/${WAKER_LABEL}" >/dev/null 2>&1 || true
-}
-hold_socket_open
+fi
 
 # ----- wait for podman connection (1) ----------------------------------------------------------
 wait_podman() {
@@ -170,7 +162,7 @@ log "${(j: :)${(q)fullcmd}}"
 
 # Execute
 set +e
-"${fullcmd[@]}"
+exec "${fullcmd[@]}"
 rc=$?
 set -e
 exit $rc
