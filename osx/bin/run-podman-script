@@ -160,6 +160,26 @@ log "${image_reason} -> using ${image}"
 fullcmd=(podman --connection "$DR_MACHINE" run --rm "${run_flags[@]}" "${env_flags[@]}" "${run_extra[@]}" "$image" "${cmd_args[@]}")
 log "${(j: :)${(q)fullcmd}}"
 
-# Execute
+# ----- execute with signal translation (INT then KILL) ----------------------------------------
+setopt TRAPS_ASYNC        # run traps even while waiting
+typeset -gi _child=0
+
+_term_forwarder() {
+  # prevent reentry
+  trap - TERM INT HUP
+  if (( _child > 0 )); then
+    /bin/kill -s INT  "$_child" 2>/dev/null || true
+    sleep ${DR_TERM_GRACE:-0.3}
+    /bin/kill -s KILL "$_child" 2>/dev/null || true
+  fi
+  exit 143
+}
+
+trap _term_forwarder TERM HUP
+trap _term_forwarder INT   # keep Ctrl-C behavior consistent
+
 set +e
-exec "${fullcmd[@]}"
+"${fullcmd[@]}" & _child=$!
+wait "$_child"; rc=$?
+set -e
+exit $rc
