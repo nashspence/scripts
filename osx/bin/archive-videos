@@ -1,5 +1,6 @@
 #!/bin/zsh
 set -euo pipefail
+setopt TRAPS_ASYNC   # run traps promptly even while a foreground cmd is running
 
 source "$HOME/.config/podman-scripts/shortcuts_path.zsh"
 
@@ -17,10 +18,19 @@ MKISO_OUT="$OUT/mkiso"
 QCUT_OUT="$OUT/qcut"
 mkdir -p "$STAGE_OUT" "$VCRUNCH_OUT" "$MKISO_OUT" "$QCUT_OUT"
 
+# Graceful podman-friendly shutdown on SIGTERM (143); give children a chance to exit cleanly
+trap '
+  trap - TERM
+  pkill -INT -P $$ 2>/dev/null || true
+  sleep 0.3
+  pkill -KILL -P $$ 2>/dev/null || true
+  exit 143
+' TERM
+
 # Keep the Mac awake while we run; this exits automatically when $$ exits.
 caffeinate -dims -w $$ &
 
-# Sequential steps (errexit handles failures)
+# Sequential steps
 stage   -v "${INPUT}:/in"     -v "${STAGE_OUT}:/out"
 vcrunch -v "${STAGE_OUT}:/in" -v "${VCRUNCH_OUT}:/out"
 

@@ -163,6 +163,3 @@ log "${(j: :)${(q)fullcmd}}"
 # Execute
 set +e
 exec "${fullcmd[@]}"
-rc=$?
-set -e
-exit $rc
