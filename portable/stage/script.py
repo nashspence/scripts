@@ -20,6 +20,22 @@ def eprint(*a, **k):
     print(*a, **k, file=sys.stderr)
 
 
+def log_created(path: str):
+    eprint(f"created {path}")
+
+
+def log_deleted(path: str):
+    eprint(f"deleted {path}")
+
+
+def warn(msg: str):
+    eprint(f"warn: {msg}")
+
+
+def error(msg: str):
+    eprint(f"error: {msg}")
+
+
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -108,7 +124,6 @@ def copy_atomic_infinite_retry(src: str, dst: str, use_hash: bool, algo: str):
         attempt += 1
         tmp = dst + ".part"
         try:
-            eprint(f"Copying: {src} -> {dst} (attempt {attempt})")
             with open(src, "rb") as fsrc, open(tmp, "wb") as fdst:
                 shutil.copyfileobj(fsrc, fdst, HASH_BUF)
                 fdst.flush()
@@ -121,9 +136,9 @@ def copy_atomic_infinite_retry(src: str, dst: str, use_hash: bool, algo: str):
             fsync_path(dst)
             if verify_copy_srcsize(os.stat(src).st_size, dst, use_hash, algo, src):
                 return
-            eprint("Verification failed; retrying...")
+            warn(f"verification failed; retrying {src} -> {dst}")
         except Exception as ex:
-            eprint(f"Copy error: {ex}. Retrying...")
+            warn(f"copy error for {src} -> {dst}: {ex}; retrying")
         finally:
             try:
                 os.remove(tmp)
@@ -138,12 +153,12 @@ def delete_with_retry(path: str):
         attempt += 1
         try:
             os.remove(path)
-            eprint(f"Deleted source: {path}")
+            log_deleted(path)
             return
         except FileNotFoundError:
             return
         except Exception as ex:
-            eprint(f"Warn: delete failed (attempt {attempt}) for {path}: {ex}")
+            warn(f"delete failed (attempt {attempt}) for {path}: {ex}")
             time.sleep(min(60, 2 ** min(10, attempt)))
 
 
@@ -281,13 +296,7 @@ def main():
 
     # ----- EARLY EXIT if manifest already indicates successful completion -----
     if manifest_indicates_completed(manifest):
-        eprint(
-            "=== stage_generic: manifest indicates job already complete; nothing to do. ==="
-        )
-        completed_at = manifest.get("completed_at")
-        if completed_at:
-            eprint(f"Completed at: {completed_at}")
-        eprint(f"Manifest retained: {manifest_path}")
+        warn("manifest indicates job already complete; nothing to do")
         return
 
     roots = []
@@ -310,18 +319,8 @@ def main():
             file_entries.append((apath, os.path.abspath(root)))
 
     if not file_entries:
-        eprint("No input files found.")
+        error("no input files found")
         sys.exit(1)
-
-    eprint("=== stage_generic: start ===")
-    eprint(f"Dest dir -> {args.dest_dir}")
-    eprint("Mode: MIRROR subdirectories (exclude root) [only mode]")
-    eprint(
-        f"Delete sources after verified copy: {'YES' if not args.keep_sources else 'NO'}"
-    )
-    eprint(f"Hash verify: {'OFF (size-only)' if args.skip_hash else args.hash}")
-    eprint("Resume manifest: AUTO (existing manifest will be resumed if not complete)")
-    eprint(f"Total inputs: {len(file_entries)}")
 
     # Plan destinations. If manifest already has a recorded dst for this (src_key), reuse it exactly.
     used_relpaths = set()
@@ -353,7 +352,6 @@ def main():
         return
 
     copied = 0
-    total = len(planned)
     for src, dst, key, st in planned:
         rec = manifest["items"].get(key, {"src": src, "dst": dst, "status": "pending"})
         rec.update(
@@ -389,9 +387,7 @@ def main():
             algo=args.hash,
             src_path_for_hash=src,
         ):
-            eprint(
-                f"ERROR: could not verify copy for {src} -> {dst}. Will retry on next run."
-            )
+            error(f"could not verify copy for {src} -> {dst}; will retry on next run")
             rec.update({"status": "pending"})
             manifest["items"][key] = rec
             save_manifest(manifest, manifest_path)
@@ -401,6 +397,7 @@ def main():
         manifest["items"][key] = rec
         save_manifest(manifest, manifest_path)
         copied += 1
+        log_created(dst)
 
         if not args.keep_sources:
             delete_with_retry(src)
@@ -421,18 +418,12 @@ def main():
             success = False
             break
 
-    eprint("=== stage_generic: done ===")
-    eprint(f"Files copied (this run): {copied} / {total}")
-
     if success:
         manifest["complete"] = True
         manifest["completed_at"] = now_utc_iso()
         save_manifest(manifest, manifest_path)
-        eprint(
-            f"All items complete. Manifest marked complete and retained: {manifest_path}"
-        )
     else:
-        eprint(f"Manifest retained for auto-resume next run: {manifest_path}")
+        warn(f"manifest retained for auto-resume next run: {manifest_path}")
 
 
 if __name__ == "__main__":
