@@ -24,6 +24,7 @@ MANIFEST="${WRAPPERS_DIR}/.symlinks-manifest"
 TEMPLATES_DIR="${SCRIPT_DIR}/templates"
 WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
 WRAPPER_RELEASE_TEMPLATE="${TEMPLATES_DIR}/wrapper-release.zsh"
+WRAPPER_RELEASEONLY_TEMPLATE="${TEMPLATES_DIR}/wrapper-release-only.zsh"
 SHORTCUTS_TEMPLATE="${TEMPLATES_DIR}/shortcuts_path.zsh"
 LAUNCHER_TEMPLATE="${TEMPLATES_DIR}/launcher.zsh"
 INFO_PLIST_TEMPLATE="${TEMPLATES_DIR}/info.plist"
@@ -204,8 +205,8 @@ make_name() {
   local stem slug out i=2
 
   case "${base:l}" in
-    containerfile|dockerfile)
-      # Canonical filename: use the directory as the service name
+    containerfile|dockerfile|release.yaml)
+      # Canonical filenames: use the directory as the service name
       stem="$dir"
       ;;
     *)
@@ -261,6 +262,28 @@ make_name() {
     echo "  + ${name} -> ${abs}"
   done
 
+  # release.yaml-only directories (no Containerfile)
+  local relf
+  for relf in "$FILES_DIR"/portable/**/release.yaml(.N); do
+    [[ -f "$relf" ]] || continue
+    local dir
+    dir="${relf:h}"
+    if [[ -f "$dir/Containerfile" || -f "$dir"/*.Containerfile(.N) || -f "$dir"/*.containerfile(.N) \
+          || -f "$dir/Dockerfile" || -f "$dir"/*.Dockerfile(.N) || -f "$dir"/*.dockerfile(.N) ]]; then
+      continue
+    fi
+    name="$(make_name "$relf")"
+    abs="${relf:A}"
+    wrapper="${WRAPPERS_DIR}/${name}"
+    sed -e "s|%NAME%|${name//&/\\&}|g" \
+        -e "s|%ABS%|${abs//&/\\&}|g" \
+        "$WRAPPER_RELEASEONLY_TEMPLATE" > "$wrapper"
+    chmod +x "$wrapper"
+
+    printf '%s\t%s\n' "$name" "$abs" >> "$index_file"
+    echo "  + ${name} -> ${abs}"
+  done
+
   echo "Wrote index: $index_file"
   echo "Done generating wrappers."
 }
@@ -274,6 +297,7 @@ install_all() {
   [[ -f "$SHORTCUTS_TEMPLATE" ]] || die "missing template: $SHORTCUTS_TEMPLATE"
   [[ -f "$WRAPPER_TEMPLATE" ]] || die "missing template: $WRAPPER_TEMPLATE"
   [[ -f "$WRAPPER_RELEASE_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASE_TEMPLATE"
+  [[ -f "$WRAPPER_RELEASEONLY_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASEONLY_TEMPLATE"
   [[ -f "$LAUNCHER_TEMPLATE" ]] || die "missing template: $LAUNCHER_TEMPLATE"
   [[ -f "$INFO_PLIST_TEMPLATE" ]] || die "missing template: $INFO_PLIST_TEMPLATE"
   [[ -f "$LAUNCH_AGENT_TEMPLATE" ]] || die "missing template: $LAUNCH_AGENT_TEMPLATE"
