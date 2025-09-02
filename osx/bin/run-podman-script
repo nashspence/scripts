@@ -15,20 +15,50 @@ DR_TAG="${DR_TAG:-latest}"
 WAKER_LABEL="${WAKER_LABEL:-com.nashspence.scripts.agent}"
 SOCK="${PODMAN_SCRIPTS_SOCK:-/tmp/com.nashspence.scripts.${UID}.sock}"
 
-# input: file/dir and optional release.yaml
-file="Containerfile"
-if [[ -n "${1:-}" ]]; then
-  if [[ -f "$1" && "${1:t}" != "release.yaml" ]]; then
-    file="$1"; shift
-  elif [[ -d "$1" ]]; then
-    file="$1/Containerfile"; shift
-  fi
-fi
+# input flags
+file=""
 release_yaml=""
-if [[ -n "${1:-}" && -f "$1" && "${1:t}" == "release.yaml" ]]; then
-  release_yaml="$1"; shift
+
+typeset -a run_extra cmd_args
+run_extra=()
+while (( $# )); do
+  case "$1" in
+    -f|--file)
+      file="$2"; shift 2 ;;
+    -r|--release)
+      release_yaml="$2"; shift 2 ;;
+    --)
+      shift; break ;;
+    *)
+      run_extra+=("$1"); shift ;;
+  esac
+done
+cmd_args=("$@")
+if (( ${#cmd_args[@]} == 0 )); then
+  integer _anyflag=0
+  for _a in "${run_extra[@]}"; do [[ "$_a" == -* ]] && { _anyflag=1; break; }; done
+  (( !_anyflag )) && { cmd_args=("${run_extra[@]}"); run_extra=(); }
 fi
-[[ -f "$file" ]] || { fail "file not found: $file"; exit 1; }
+
+if [[ -z "$file" && -z "$release_yaml" ]]; then
+  fail "missing --file or --release"; exit 1
+fi
+
+if [[ -n "$file" && -d "$file" ]]; then
+  file="$file/Containerfile"
+fi
+
+if [[ -n "$file" && ! -f "$file" ]]; then
+  fail "file not found: $file"; exit 1
+fi
+
+if [[ -n "$release_yaml" && ! -f "$release_yaml" ]]; then
+  fail "file not found: $release_yaml"; exit 1
+fi
+
+if [[ -z "$file" && -n "$release_yaml" ]]; then
+  file="$release_yaml"
+fi
 
 # ----- hold the launchd socket for our entire lifetime (silent best-effort) --------------------
 typeset -gi DR_SOCK_FD=-1
@@ -82,7 +112,7 @@ wrapper="${DR_WRAPPER_NAME:-}"
 if [[ -z "$wrapper" ]]; then
   dir="$(cd "$(dirname "$file")" && pwd)"; base="${file:t}"
   case "${base:l}" in
-    containerfile|dockerfile) wrapper="${dir:t}" ;;
+    containerfile|dockerfile|release.yaml) wrapper="${dir:t}" ;;
     *) wrapper="$base"
        wrapper="${wrapper%.Containerfile}"; wrapper="${wrapper%.containerfile}"
        wrapper="${wrapper%.Dockerfile}";    wrapper="${wrapper%.dockerfile}"
@@ -106,7 +136,12 @@ fi
 dir="$(cd "$(dirname "$file")" && pwd)"
 
 # ----- choose release image vs build -----------------------------------------------------------
-build_needed=1
+has_containerfile=1
+if [[ "$file" == "$release_yaml" ]]; then
+  has_containerfile=0
+fi
+
+build_needed=$has_containerfile
 image_reason="built locally from '${file}'"
 if [[ -n "$release_yaml" && -z "${DR_NO_PULL:-}" ]]; then
   rel_img="$(yaml_get_key image "$release_yaml")"
@@ -122,7 +157,11 @@ if [[ -n "$release_yaml" && -z "${DR_NO_PULL:-}" ]]; then
       image_reason="release available"
     else
       if is_not_found_err "$pull_err"; then
-        build_needed=1
+        if (( has_containerfile )); then
+          build_needed=1
+        else
+          fail "failed to pull ${rel_ref} (rc=${pull_rc})"; print -u2 -- "$pull_err"; exit $pull_rc
+        fi
       else
         fail "failed to pull ${rel_ref} (rc=${pull_rc}). Details follow:"; print -u2 -- "$pull_err"; exit $pull_rc
       fi
@@ -131,13 +170,17 @@ if [[ -n "$release_yaml" && -z "${DR_NO_PULL:-}" ]]; then
 fi
 
 if (( build_needed )); then
-  set +e
-  podman --connection "$DR_MACHINE" build "${pull_flag[@]}" -f "$file" -t "$local_image" "$dir"
-  build_rc=$?
-  set -e
-  if (( build_rc != 0 )); then fail "build failed (rc=$build_rc) for '${local_image}' from '${file}' (context '${dir}')"; exit $build_rc; fi
-  image="$local_image"
-  image_reason="built locally from '${file}'"
+  if (( has_containerfile )); then
+    set +e
+    podman --connection "$DR_MACHINE" build "${pull_flag[@]}" -f "$file" -t "$local_image" "$dir"
+    build_rc=$?
+    set -e
+    if (( build_rc != 0 )); then fail "build failed (rc=$build_rc) for '${local_image}' from '${file}' (context '${dir}')"; exit $build_rc; fi
+    image="$local_image"
+    image_reason="built locally from '${file}'"
+  else
+    fail "no release image available and no Containerfile to build"; exit 1
+  fi
 fi
 
 # ----- run -------------------------------------------------------------------------------------
@@ -148,10 +191,7 @@ elif [[ -z "${DR_NO_TTY:-}" ]]; then run_flags+=(-t); fi
 env_flags=()
 if [[ ! -t 1 && -z "${DR_NO_UNBUFFER:-}" ]]; then env_flags+=(-e PYTHONUNBUFFERED=1 -e PYTHONIOENCODING=UTF-8); fi
 
-typeset -a run_extra cmd_args; run_extra=()
-while (( $# )); do if [[ "$1" == "--" ]]; then shift; break; fi; run_extra+=("$1"); shift; done
-cmd_args=("$@")
-if (( ${#cmd_args[@]} == 0 )); then integer _anyflag=0; for _a in "${run_extra[@]}"; do [[ "$_a" == -* ]] && { _anyflag=1; break; }; done; (( !_anyflag )) && { cmd_args=("${run_extra[@]}"); run_extra=(); }; fi
+# run flags and command arguments have been parsed above
 
 # (2) minimal image description
 log "${image_reason} -> using ${image}"

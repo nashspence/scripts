@@ -16,7 +16,7 @@ This file applies to the entire repository.
    pytest -m integration
    ```
 4. GitHub Actions CI runs `pre-commit run --all-files`, `pytest`, and `pytest -m integration` on all supported platforms.
-5. For portable services, update `spec.md`.
+5. For portable services with a `Containerfile`, update `spec.md`. Directories containing only a `release.yaml` do not require a spec.
 
 Scripts are containerised for cross‑platform use with Podman. Host-specific helpers (e.g. in `osx/`) are only for tasks that do not containerise cleanly.
 
