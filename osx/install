@@ -133,6 +133,7 @@ main() {
     if ! podman machine inspect "$MACHINE" >/dev/null 2>&1; then
       echo "Creating Podman machine '$MACHINE' (cpus=$PODMAN_CPUS, mem=${PODMAN_MEM}MB, disk=${PODMAN_DISK}GB)…"
       podman machine init \
+        -v /Users:/Users -v /Volumes:/Volumes \
         --cpus "$PODMAN_CPUS" \
         --memory "$PODMAN_MEM" \
         --disk-size "$PODMAN_DISK" \
