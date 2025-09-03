@@ -1,33 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>%AGENT_LABEL%</string>
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.nashspence.podman-machine</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>%LAUNCHER%</string>
+    <string>%REPO_DIR%/osx/launch-agents/podman-machine/Scripts - Podman Machine</string>
   </array>
 
-  <!-- Attribute Background Items to the helper app -->
   <key>AssociatedBundleIdentifiers</key>
   <array>
-    <string>%BUNDLE_ID%</string>
+    <string>com.nashspence.podman-machine</string>
   </array>
 
-  <!-- launchd owns this socket; it spawns us when a client connects -->
   <key>Sockets</key>
   <dict>
     <key>Control</key>
     <dict>
-      <key>SockPathName</key><string>%SOCK_PATH%</string>
+      <key>SockPathName</key><string>/tmp/com.nashspence.podman-machine.%UID_NUM%.sock</string>
       <key>SockFamily</key><string>Unix</string>
       <key>SockType</key><string>stream</string>
       <key>SockMode</key><integer>384</integer>
     </dict>
   </dict>
 
-  <!-- inetd-style: Wait=false => launchd accepts() and passes the CONNECTED fd on stdio -->
   <key>inetdCompatibility</key>
   <dict>
     <key>Wait</key><false/>
@@ -40,7 +36,6 @@
 
   <key>KeepAlive</key><false/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>%LOG_OUT%</string>
-  <key>StandardErrorPath</key><string>%LOG_ERR%</string>
-</dict>
-</plist>
+  <key>StandardOutPath</key><string>/Users/%UID%/Library/Logs/com.nashspence.podman-machine.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/%UID%/Library/Logs/com.nashspence.podman-machine.err.log</string>
+</dict></plist>

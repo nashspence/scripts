@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# podman-scripts-machine-agent — socket-activated; starts VM, holds while connected, stops if last client disconnects
+# podman-machine-agent — socket-activated; starts VM, holds while connected, stops if last client disconnects
 
 set -e
 set -u
@@ -22,13 +22,13 @@ main() {
   # --- Config ----------------------------------------------------------------
   local MACHINE="${MACHINE:-com.nashspence.scripts}"
 
-  local STATE_DIR="${STATE_DIR:-$HOME/Library/Application Support/Nash Spence/Podman Scripts/agent}"
+  local STATE_DIR="${STATE_DIR:-${0:A:h}/agent}"
   local HOLDS_DIR="$STATE_DIR/holds"          # one file per live connection (by PID)
   local STOP_GRACE_SECS="${STOP_GRACE_SECS:-1}"
   local QUIESCE_MS="${QUIESCE_MS:-1500}"      # watch briefly for back-to-back clients
   local WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-90}"
 
-  log() { print -r -- "$(date '+%F %T') podman-scripts-machine-agent[$$]: $*"; }
+  log() { print -r -- "$(date '+%F %T') podman-machine-agent[$$]: $*"; }
 
   gc_holds() {
     emulate -L zsh

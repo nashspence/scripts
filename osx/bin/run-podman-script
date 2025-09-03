@@ -26,8 +26,8 @@ main() {
   local DR_MACHINE="${DR_MACHINE:-${MACHINE:-com.nashspence.scripts}}"
   local DR_IMAGE_PREFIX="${DR_IMAGE_PREFIX:-com.nashspence.scripts.}"
   local DR_TAG="${DR_TAG:-latest}"
-  local WAKER_LABEL="${WAKER_LABEL:-com.nashspence.scripts.agent}"
-  local SOCK="${PODMAN_SCRIPTS_SOCK:-/tmp/com.nashspence.scripts.${UID}.sock}"
+  local WAKER_LABEL="${WAKER_LABEL:-com.nashspence.podman-machine}"
+  local SOCK="${PODMAN_MACHINE_SOCK:-/tmp/com.nashspence.podman-machine.${UID}.sock}"
 
 # input flags
 file=""

@@ -6,8 +6,8 @@
 * And Podman is installed
 * And the com.nashspence.scripts Podman machine exists
 * And wrappers and tools are linked into ~/bin
-* And the Podman Scripts Agent helper app is installed
-* And the Podman Scripts Agent launch agent is loaded
+* And the Podman Machine launch agent is loaded
+* And the On Mount launch agent is loaded
 * And ~/bin is added to the shell PATH
 * And a Shortcuts PATH snippet is created
 
@@ -16,13 +16,14 @@
 * When I pass "--uninstall"
 * And I run install
 * Then wrappers and tools are removed from ~/bin
-* And the launch agent is removed
+* And the Podman Machine launch agent is removed
+* And the On Mount launch agent is removed
 * And the Shortcuts PATH snippet is removed
 * And the Podman machine is removed
 * And ~/bin is removed from the shell PATH
 
 ## Scenario: wake the Podman machine on demand
-* Given the Podman Scripts Agent is running
+* Given the Podman Machine agent is running
 * When I touch the Podman socket
 * Then the machine starts
 
