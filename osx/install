@@ -29,33 +29,25 @@ main() {
   typeset -g OSXBIN_DIR="${SCRIPT_DIR}/bin"   # must contain run-podman-script
   typeset -g MANIFEST="${WRAPPERS_DIR}/.symlinks-manifest"
 
-  typeset -gr TEMPLATES_DIR="${SCRIPT_DIR}/templates"
-  typeset -gr WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
-  typeset -gr WRAPPER_RELEASE_TEMPLATE="${TEMPLATES_DIR}/wrapper-release.zsh"
-  typeset -gr WRAPPER_RELEASEONLY_TEMPLATE="${TEMPLATES_DIR}/wrapper-release-only.zsh"
-  typeset -gr SHORTCUTS_TEMPLATE="${TEMPLATES_DIR}/shortcuts_path.zsh"
-  typeset -gr LAUNCHER_TEMPLATE="${TEMPLATES_DIR}/launcher.zsh"
-  typeset -gr INFO_PLIST_TEMPLATE="${TEMPLATES_DIR}/info.plist"
-  typeset -gr LAUNCH_AGENT_TEMPLATE="${TEMPLATES_DIR}/launch-agent.plist"
+    typeset -gr TEMPLATES_DIR="${SCRIPT_DIR}/templates"
+    typeset -gr WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
+    typeset -gr WRAPPER_RELEASE_TEMPLATE="${TEMPLATES_DIR}/wrapper-release.zsh"
+    typeset -gr WRAPPER_RELEASEONLY_TEMPLATE="${TEMPLATES_DIR}/wrapper-release-only.zsh"
+    typeset -gr SHORTCUTS_TEMPLATE="${TEMPLATES_DIR}/shortcuts_path.zsh"
 
   typeset -g MACHINE="${MACHINE:-com.nashspence.scripts}"
   typeset -g PODMAN_CPUS="${PODMAN_CPUS:-10}"
   typeset -g PODMAN_MEM="${PODMAN_MEM:-18432}"
   typeset -g PODMAN_DISK="${PODMAN_DISK:-100}"
 
-  # ---- Helper bundle / LaunchAgent -----------------------------------------
-  typeset -gr APP_NAME="Podman Scripts Agent"
-  typeset -gr BUNDLE_ID="com.nashspence.scripts"
-  typeset -gr AGENT_LABEL="${BUNDLE_ID}.agent"
-  typeset -gr BASE_DIR="$HOME/Library/Application Support/Nash Spence/Podman Scripts"
-  typeset -gr APP_DIR="$BASE_DIR/${APP_NAME}.app"
-  typeset -gr CONTENTS="$APP_DIR/Contents"
-  typeset -gr MACOS_DIR="$CONTENTS/MacOS"
-  typeset -gr RES_DIR="$CONTENTS/Resources"
-  typeset -gr INFO_PLIST="$CONTENTS/Info.plist"
-  typeset -gr LAUNCHER="$MACOS_DIR/Podman Scripts Agent"
-  typeset -gr MAIN_SCRIPT="$RES_DIR/podman-scripts-machine-agent"
-  typeset -gr PLIST_PATH="${LA_DIR}/${AGENT_LABEL}.plist"
+    # ---- Launch agent configuration -----------------------------------------
+    typeset -gr UID_NAME="$(id -un)"
+    typeset -gr LAUNCH_AGENTS_DIR="${SCRIPT_DIR}/launch-agents"
+    typeset -a LAUNCH_AGENT_DIRS=()
+    for dir in "${LAUNCH_AGENTS_DIR}"/*; do
+      [[ -d "$dir" ]] || continue
+      LAUNCH_AGENT_DIRS+=("$dir")
+    done
 
   # ---- PATH block markers ---------------------------------------------------
   typeset -gr PATH_BEGIN_MARK="# >>> podman-scripts PATH >>>"
@@ -153,40 +145,65 @@ main() {
     fi
   }
 
-  mk_app_bundle() {
-    mkdir -p "$MACOS_DIR" "$RES_DIR"
-    install -m 0755 "$LAUNCHER_TEMPLATE" "$LAUNCHER"
-    sed -e "s|%BUNDLE_ID%|${BUNDLE_ID//&/\\&}|g" \
-        -e "s|%APP_NAME%|${APP_NAME//&/\\&}|g" \
-        "$INFO_PLIST_TEMPLATE" > "$INFO_PLIST"
-    chmod 644 "$INFO_PLIST"
-    install -m 0755 "$SCRIPT_DIR/podman-scripts-machine-agent" "$MAIN_SCRIPT"
-    # codesign may be absent on CI; best-effort
-    command -v codesign >/dev/null 2>&1 && codesign -s - --force --deep "$APP_DIR" 2>/dev/null || true
-  }
+  typeset -A LAUNCH_AGENT_RESOURCES=(
+    [com.nashspence.on-mount]="state.tsv"
+    [com.nashspence.podman-machine]="agent"
+  )
 
-  mk_agent_plist() {
+  install_launch_agent() {
+    local dir="$1" plist_src label plist
+    plist_src=("$dir"/*.plist(N))
+    label="${plist_src[1]:t:r}"
+    plist="$LA_DIR/${label}.plist"
+
     mkdir -p "$LA_DIR"
-    local sock_path="/tmp/com.nashspence.scripts.${UID_NUM}.sock"
-    sed -e "s|%AGENT_LABEL%|${AGENT_LABEL//&/\\&}|g" \
-        -e "s|%LAUNCHER%|${LAUNCHER//&/\\&}|g" \
-        -e "s|%BUNDLE_ID%|${BUNDLE_ID//&/\\&}|g" \
-        -e "s|%SOCK_PATH%|${sock_path//&/\\&}|g" \
+
+    sed -e "s|%UID%|${UID_NAME//&/\\&}|g" \
+        -e "s|%UID_NUM%|${UID_NUM//&/\\&}|g" \
         -e "s|%MACHINE%|${MACHINE//&/\\&}|g" \
-        -e "s|%LOG_OUT%|${HOME//&/\\&}/Library/Logs/${BUNDLE_ID}.out.log|g" \
-        -e "s|%LOG_ERR%|${HOME//&/\\&}/Library/Logs/${BUNDLE_ID}.err.log|g" \
-        "$LAUNCH_AGENT_TEMPLATE" > "$PLIST_PATH"
-    chmod 644 "$PLIST_PATH"
+        -e "s|%REPO_DIR%|${REPO_DIR//&/\\&}|g" \
+        "${plist_src[1]}" > "$plist"
+    chmod 644 "$plist"
+
+    launchctl bootout "gui/$UID_NUM" "$plist" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$UID_NUM" "$plist"
+    launchctl kickstart -k "gui/$UID_NUM/$label" 2>/dev/null || true
+
+    echo "Loaded ${label} LaunchAgent."
   }
 
-  load_agent() {
-    launchctl bootout   "gui/$UID_NUM" "$PLIST_PATH" >/dev/null 2>&1 || true
-    launchctl bootstrap "gui/$UID_NUM" "$PLIST_PATH"
-    launchctl kickstart -k "gui/$UID_NUM/${AGENT_LABEL}" 2>/dev/null || true
+
+  uninstall_launch_agent() {
+    local dir="$1" plist_src label plist resources
+    plist_src=("$dir"/*.plist(N))
+    label="${plist_src[1]:t:r}"
+    plist="$LA_DIR/${label}.plist"
+
+    launchctl bootout "gui/$UID_NUM" "$plist" >/dev/null 2>&1 || true
+    rm -f "$plist"
+
+    resources="${LAUNCH_AGENT_RESOURCES[$label]:-}"
+    if [[ -n "$resources" ]]; then
+      local r
+      for r in ${(s: :)resources}; do
+        rm -rf "$dir/$r" 2>/dev/null || true
+      done
+    fi
   }
 
-  unload_agent() {
-    launchctl bootout "gui/$UID_NUM" "$PLIST_PATH" >/dev/null 2>&1 || true
+
+  install_launch_agents() {
+    local dir
+    for dir in "${LAUNCH_AGENT_DIRS[@]}"; do
+      install_launch_agent "$dir"
+    done
+  }
+
+  uninstall_launch_agents() {
+    local dir
+    for dir in "${LAUNCH_AGENT_DIRS[@]}"; do
+      uninstall_launch_agent "$dir"
+    done
   }
 
   # link helper uses global tmp_manifest set during install_all
@@ -307,11 +324,21 @@ main() {
   [[ -f "$WRAPPER_TEMPLATE" ]] || die "missing template: $WRAPPER_TEMPLATE"
   [[ -f "$WRAPPER_RELEASE_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASE_TEMPLATE"
   [[ -f "$WRAPPER_RELEASEONLY_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASEONLY_TEMPLATE"
-  [[ -f "$LAUNCHER_TEMPLATE" ]] || die "missing template: $LAUNCHER_TEMPLATE"
-  [[ -f "$INFO_PLIST_TEMPLATE" ]] || die "missing template: $INFO_PLIST_TEMPLATE"
-  [[ -f "$LAUNCH_AGENT_TEMPLATE" ]] || die "missing template: $LAUNCH_AGENT_TEMPLATE"
+    [[ -d "$LAUNCH_AGENTS_DIR" ]] || die "missing directory: $LAUNCH_AGENTS_DIR"
+    local dir plist has_file f
+    for dir in "${LAUNCH_AGENT_DIRS[@]}"; do
+      plist=("$dir"/*.plist(N))
+      [[ -f "${plist[1]}" ]] || die "missing plist in: $dir"
+      has_file=0
+      for f in "$dir"/*(N); do
+        [[ "$f" == *.plist ]] && continue
+        has_file=1; break
+      done
+      (( has_file )) || die "missing agent file in: $dir"
+    done
 
-    mkdir -p "$BIN" "$LA_DIR" "$BASE_DIR"
+
+      mkdir -p "$BIN" "$LA_DIR"
 
     # 0) Ensure ~/bin in PATH + Shortcuts snippet
     add_path_block "$HOME/.zprofile"
@@ -323,12 +350,8 @@ main() {
     ensure_podman
     ensure_podman_machine
 
-    # 1) App bundle + LaunchAgent
-    mk_app_bundle
-    mk_agent_plist
-    load_agent
-    echo "Loaded LaunchAgent."
-    echo "Socket: /tmp/com.nashspence.scripts.$UID_NUM.sock (owned by launchd)."
+    # 1) LaunchAgents
+    install_launch_agents
 
     # 2) Generate wrappers
     generate_wrappers
@@ -440,12 +463,9 @@ main() {
       rm -rf "$WRAPPERS_DIR"
     fi
 
-    unload_agent
-    rm -f "$PLIST_PATH"
-    rm -rf "$APP_DIR"
-    rmdir "$BASE_DIR" 2>/dev/null || true
+    uninstall_launch_agents
 
-    local sock="/tmp/com.nashspence.scripts.$UID_NUM.sock"
+    local sock="/tmp/com.nashspence.podman-machine.$UID_NUM.sock"
     [[ -S "$sock" ]] && rm -f "$sock" || true
 
     if [[ -f "$SHORTCUTS_SNIPPET" ]]; then

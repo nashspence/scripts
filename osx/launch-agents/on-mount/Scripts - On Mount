@@ -1,0 +1,43 @@
+#!/bin/zsh
+set -eu
+
+shortcut="On Mount"
+marker=".com.nashspence.on-mount.id"
+recent=20
+
+base="$(cd "$(dirname "$0")" && pwd)"
+state="${base}/state.tsv"
+lock="${HOME}/Library/Caches/com.nashspence.on-mount.lock"
+
+umask 077
+mkdir -p "${base}"
+
+# single-run lock
+if ! mkdir "${lock}" 2>/dev/null; then exit 0; fi
+trap 'rmdir "${lock}"' EXIT
+
+# quiet no-op if Shortcut missing
+if ! /usr/bin/shortcuts list 2>/dev/null | /usr/bin/grep -Fqx "${shortcut}"; then
+  exit 0
+fi
+
+: > "${state}" 2>/dev/null || true
+now=$(/bin/date +%s)
+
+for vol in /Volumes/*(N/); do
+  [[ -d $vol ]] || continue
+  file="${vol%/}/${marker}"
+  [[ -f $file ]] || continue
+
+  btime=$(/usr/bin/stat -f %B -- "$vol" 2>/dev/null || echo 0)
+  (( btime > 0 )) || continue
+  (( now - btime <= recent )) || continue
+
+  key="${vol#/Volumes/}\t${btime}"
+  if /usr/bin/grep -Fqx -- "$key" "$state"; then continue; fi
+
+  /usr/bin/printf '%s' "$([ -f "$file" ] && /bin/cat -- "$file" 2>/dev/null || echo '')" \
+    | /usr/bin/shortcuts run "$shortcut" -i - >/dev/null 2>&1 || true
+
+  print -r -- "$key" >> "$state"
+done
