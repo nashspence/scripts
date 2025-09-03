@@ -29,14 +29,14 @@ main() {
   typeset -g OSXBIN_DIR="${SCRIPT_DIR}/bin"   # must contain run-podman-script
   typeset -g MANIFEST="${WRAPPERS_DIR}/.symlinks-manifest"
 
-TEMPLATES_DIR="${SCRIPT_DIR}/templates"
-WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
-WRAPPER_RELEASE_TEMPLATE="${TEMPLATES_DIR}/wrapper-release.zsh"
-WRAPPER_RELEASEONLY_TEMPLATE="${TEMPLATES_DIR}/wrapper-release-only.zsh"
-SHORTCUTS_TEMPLATE="${TEMPLATES_DIR}/shortcuts_path.zsh"
-LAUNCHER_TEMPLATE="${TEMPLATES_DIR}/launcher.zsh"
-INFO_PLIST_TEMPLATE="${TEMPLATES_DIR}/info.plist"
-LAUNCH_AGENT_TEMPLATE="${TEMPLATES_DIR}/launch-agent.plist"
+  typeset -gr TEMPLATES_DIR="${SCRIPT_DIR}/templates"
+  typeset -gr WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
+  typeset -gr WRAPPER_RELEASE_TEMPLATE="${TEMPLATES_DIR}/wrapper-release.zsh"
+  typeset -gr WRAPPER_RELEASEONLY_TEMPLATE="${TEMPLATES_DIR}/wrapper-release-only.zsh"
+  typeset -gr SHORTCUTS_TEMPLATE="${TEMPLATES_DIR}/shortcuts_path.zsh"
+  typeset -gr LAUNCHER_TEMPLATE="${TEMPLATES_DIR}/launcher.zsh"
+  typeset -gr INFO_PLIST_TEMPLATE="${TEMPLATES_DIR}/info.plist"
+  typeset -gr LAUNCH_AGENT_TEMPLATE="${TEMPLATES_DIR}/launch-agent.plist"
 
   typeset -g MACHINE="${MACHINE:-com.nashspence.scripts}"
   typeset -g PODMAN_CPUS="${PODMAN_CPUS:-10}"
