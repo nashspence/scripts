@@ -25,7 +25,7 @@ main() {
   typeset -g FILES_DIR="${FILES_DIR:-$REPO_DIR}"
   typeset -gr LA_DIR="$HOME/Library/LaunchAgents"
   typeset -gr UID_NUM="$(id -u)"
-  typeset -g OSXBIN_DIR="${SCRIPT_DIR}/bin"   # must contain run-podman-script
+    typeset -g OSXBIN_DIR="${SCRIPT_DIR}/bin"   # must contain podman-script-machine
 
     typeset -gr TEMPLATES_DIR="${SCRIPT_DIR}/templates"
     typeset -gr WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
@@ -292,10 +292,10 @@ main() {
   }
 
   install_all() {
-    # require OSXBIN_DIR and run-podman-script
-    [[ -d "$OSXBIN_DIR" ]] || die "required directory missing: $OSXBIN_DIR (must contain 'run-podman-script')"
-    [[ -f "$OSXBIN_DIR/run-podman-script" ]] || die "required tool missing: $OSXBIN_DIR/run-podman-script"
-    chmod +x "$OSXBIN_DIR/run-podman-script" 2>/dev/null || true
+    # require OSXBIN_DIR and podman-script-machine
+    [[ -d "$OSXBIN_DIR" ]] || die "required directory missing: $OSXBIN_DIR (must contain 'podman-script-machine')"
+    [[ -f "$OSXBIN_DIR/podman-script-machine" ]] || die "required tool missing: $OSXBIN_DIR/podman-script-machine"
+    chmod +x "$OSXBIN_DIR/podman-script-machine" 2>/dev/null || true
 
   [[ -f "$WRAPPER_TEMPLATE" ]] || die "missing template: $WRAPPER_TEMPLATE"
   [[ -f "$WRAPPER_RELEASE_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASE_TEMPLATE"

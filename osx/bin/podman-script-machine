@@ -1,6 +1,7 @@
 #!/usr/bin/env zsh
-# run-podman-script — build (Podman) and run a Containerfile/Dockerfile; pipe-friendly.
-# Logs (stderr only): (1) waiting for connection, (2) chosen image + why, (3) exact run command.
+# podman-script-machine — run Podman subcommands against a machine; builds and
+# runs Containerfiles for the `run` subcommand. Pipe-friendly. Logs (stderr
+# only): (1) waiting for connection, (2) chosen image + why, (3) exact command.
 
 set -e
 set -u
@@ -29,50 +30,67 @@ main() {
   local WAKER_LABEL="${WAKER_LABEL:-com.nashspence.podman-machine}"
   local SOCK="${PODMAN_MACHINE_SOCK:-/tmp/com.nashspence.podman-machine.${UID}.sock}"
 
-# input flags
-file=""
-release_yaml=""
+  # ----- podman subcommand ---------------------------------------------------
+  local subcmd="run"
+  if (( $# > 0 )) && [[ "$1" != -* ]]; then
+    subcmd="$1"
+    shift
+  fi
 
-typeset -a run_extra cmd_args
-run_extra=()
-while (( $# )); do
-  case "$1" in
-    -f|--file)
-      file="$2"; shift 2 ;;
-    -r|--release)
-      release_yaml="$2"; shift 2 ;;
-    --)
-      shift; break ;;
-    *)
-      run_extra+=("$1"); shift ;;
-  esac
-done
-cmd_args=("$@")
-if (( ${#cmd_args[@]} == 0 )); then
-  integer _anyflag=0
-  for _a in "${run_extra[@]}"; do [[ "$_a" == -* ]] && { _anyflag=1; break; }; done
-  (( !_anyflag )) && { cmd_args=("${run_extra[@]}"); run_extra=(); }
-fi
+  # ----- run subcommand flags ------------------------------------------------
+  if [[ "$subcmd" == run ]]; then
+    file=""
+    release_yaml=""
 
-if [[ -z "$file" && -z "$release_yaml" ]]; then
-  fail "missing --file or --release"; exit 1
-fi
+    typeset -a raw_args run_extra cmd_args
+    raw_args=("$@")
+    run_extra=()
+    while (( $# )); do
+      case "$1" in
+        -f|--file)
+          file="$2"; shift 2 ;;
+        -r|--release)
+          release_yaml="$2"; shift 2 ;;
+        --)
+          shift; break ;;
+        *)
+          run_extra+=("$1"); shift ;;
+      esac
+    done
+    cmd_args=("$@")
+    if (( ${#cmd_args[@]} == 0 )); then
+      integer _anyflag=0
+      for _a in "${run_extra[@]}"; do [[ "$_a" == -* ]] && { _anyflag=1; break; }; done
+      (( !_anyflag )) && { cmd_args=("${run_extra[@]}"); run_extra=(); }
+    fi
 
-if [[ -n "$file" && -d "$file" ]]; then
-  file="$file/Containerfile"
-fi
+    if [[ -z "$file" && -z "$release_yaml" ]]; then
+      local -a fullcmd
+      fullcmd=(podman --connection "$DR_MACHINE" run "${raw_args[@]}")
+      log "${(j: :)${(q)fullcmd}}"
+      local rc=0
+      set +e
+      "${fullcmd[@]}"; rc=$?
+      set -e
+      exit $rc
+    fi
 
-if [[ -n "$file" && ! -f "$file" ]]; then
-  fail "file not found: $file"; exit 1
-fi
+    if [[ -n "$file" && -d "$file" ]]; then
+      file="$file/Containerfile"
+    fi
 
-if [[ -n "$release_yaml" && ! -f "$release_yaml" ]]; then
-  fail "file not found: $release_yaml"; exit 1
-fi
+    if [[ -n "$file" && ! -f "$file" ]]; then
+      fail "file not found: $file"; exit 1
+    fi
 
-if [[ -z "$file" && -n "$release_yaml" ]]; then
-  file="$release_yaml"
-fi
+    if [[ -n "$release_yaml" && ! -f "$release_yaml" ]]; then
+      fail "file not found: $release_yaml"; exit 1
+    fi
+
+    if [[ -z "$file" && -n "$release_yaml" ]]; then
+      file="$release_yaml"
+    fi
+  fi
 
   # ----- hold the launchd socket for our entire lifetime ---------------------
   typeset -gi DR_SOCK_FD=-1
@@ -133,6 +151,17 @@ fi
 
   # ----- wait for podman connection (1) -------------------------------------
   wait_podman
+
+  if [[ "$subcmd" != run ]]; then
+    local -a fullcmd
+    fullcmd=(podman --connection "$DR_MACHINE" "$subcmd" "$@")
+    log "${(j: :)${(q)fullcmd}}"
+    local rc=0
+    set +e
+    "${fullcmd[@]}"; rc=$?
+    set -e
+    exit $rc
+  fi
 
   # ----- derive image/tag ---------------------------------------------------
   wrapper="${DR_WRAPPER_NAME:-}"
