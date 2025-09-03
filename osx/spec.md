@@ -5,22 +5,18 @@
 * Then Homebrew is installed
 * And Podman is installed
 * And the com.nashspence.scripts Podman machine exists
-* And wrappers and tools are linked into ~/bin
+* And wrapper and tool directories are added to the shell PATH
 * And the Podman Machine launch agent is loaded
 * And the On Mount launch agent is loaded
-* And ~/bin is added to the shell PATH
-* And a Shortcuts PATH snippet is created
 
 ## Scenario: uninstall the Podman machine environment
 * Given install has been run
 * When I pass "--uninstall"
 * And I run install
-* Then wrappers and tools are removed from ~/bin
+* Then wrapper and tool directories are removed from the shell PATH
 * And the Podman Machine launch agent is removed
 * And the On Mount launch agent is removed
-* And the Shortcuts PATH snippet is removed
 * And the Podman machine is removed
-* And ~/bin is removed from the shell PATH
 
 ## Scenario: wake the Podman machine on demand
 * Given the Podman Machine agent is running
