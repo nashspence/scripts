@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 # install: install / uninstall activation + wrapper tooling + brew/podman/machine (pure zsh)
 # Usage:
-#   ./install                 # Install everything (activation + wrappers + links + brew/podman/machine)
+#   ./install                 # Install everything (activation + wrappers + PATH + brew/podman/machine)
 #   ./install --uninstall     # Remove EVERYTHING this script installed (incl. Podman machine)
 
 set -e
@@ -20,20 +20,17 @@ main() {
   typeset -gr SCRIPT_PATH="${(%):-%N}"
   typeset -gr SCRIPT_DIR="${SCRIPT_PATH:A:h}"
 
-  typeset -g BIN="${BIN:-$HOME/bin}"
   typeset -g REPO_DIR="${REPO_DIR:-${SCRIPT_DIR:h}}"
   typeset -g WRAPPERS_DIR="${WRAPPERS_DIR:-${REPO_DIR}/.wrappers}"
   typeset -g FILES_DIR="${FILES_DIR:-$REPO_DIR}"
   typeset -gr LA_DIR="$HOME/Library/LaunchAgents"
   typeset -gr UID_NUM="$(id -u)"
   typeset -g OSXBIN_DIR="${SCRIPT_DIR}/bin"   # must contain run-podman-script
-  typeset -g MANIFEST="${WRAPPERS_DIR}/.symlinks-manifest"
 
     typeset -gr TEMPLATES_DIR="${SCRIPT_DIR}/templates"
     typeset -gr WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
     typeset -gr WRAPPER_RELEASE_TEMPLATE="${TEMPLATES_DIR}/wrapper-release.zsh"
     typeset -gr WRAPPER_RELEASEONLY_TEMPLATE="${TEMPLATES_DIR}/wrapper-release-only.zsh"
-    typeset -gr SHORTCUTS_TEMPLATE="${TEMPLATES_DIR}/shortcuts_path.zsh"
 
   typeset -g MACHINE="${MACHINE:-com.nashspence.scripts}"
   typeset -g PODMAN_CPUS="${PODMAN_CPUS:-10}"
@@ -52,11 +49,7 @@ main() {
   # ---- PATH block markers ---------------------------------------------------
   typeset -gr PATH_BEGIN_MARK="# >>> podman-scripts PATH >>>"
   typeset -gr PATH_END_MARK="# <<< podman-scripts PATH <<<"
-  typeset -gr PATH_EXPORT_LINE='export PATH="$HOME/bin:$PATH"'
-  typeset -gr SHORTCUTS_SNIPPET="$HOME/.config/podman-scripts/shortcuts_path.zsh"
-
-  # ---- Globals used by helpers ---------------------------------------------
-  typeset -g tmp_manifest=""
+  typeset -gr PATH_EXPORT_LINE="export PATH=\"${WRAPPERS_DIR}:${OSXBIN_DIR}:\$PATH\""
 
   # ---- Helpers --------------------------------------------------------------
   die() { print -u2 -- "ERROR: $*"; exit 1; }
@@ -80,14 +73,6 @@ main() {
     [[ -f "$file" ]] || return 0
     # BSD sed in-place with explicit backup suffix ''.
     sed -E -i '' "/$(printf '%s' "$PATH_BEGIN_MARK" | sed 's/[^^]/[&]/g; s/\^/\\^/g')/,/$(printf '%s' "$PATH_END_MARK" | sed 's/[^^]/[&]/g; s/\^/\\^/g')/d" "$file" || true
-  }
-
-  ensure_shortcuts_snippet() {
-    mkdir -p "${SHORTCUTS_SNIPPET:h}"
-    cp "$SHORTCUTS_TEMPLATE" "$SHORTCUTS_SNIPPET"
-    echo "Created Shortcuts PATH snippet: $SHORTCUTS_SNIPPET"
-    echo "  In Shortcuts 'Run Shell Script', add as first line:"
-    echo "    source \"$SHORTCUTS_SNIPPET\""
   }
 
   ensure_brew() {
@@ -206,15 +191,7 @@ main() {
     done
   }
 
-  # link helper uses global tmp_manifest set during install_all
-  link_into_bin() {
-    local src="$1" base link
-    base="${src:t}"
-    link="$BIN/$base"
-    ln -sf "$src" "$link"
-    printf '%s\t%s\n' "$link" "$src" >> "$tmp_manifest"
-    echo "  + linked $base"
-  }
+
 
   generate_wrappers() {
     echo "Repo:            $REPO_DIR"
@@ -320,7 +297,6 @@ main() {
     [[ -f "$OSXBIN_DIR/run-podman-script" ]] || die "required tool missing: $OSXBIN_DIR/run-podman-script"
     chmod +x "$OSXBIN_DIR/run-podman-script" 2>/dev/null || true
 
-  [[ -f "$SHORTCUTS_TEMPLATE" ]] || die "missing template: $SHORTCUTS_TEMPLATE"
   [[ -f "$WRAPPER_TEMPLATE" ]] || die "missing template: $WRAPPER_TEMPLATE"
   [[ -f "$WRAPPER_RELEASE_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASE_TEMPLATE"
   [[ -f "$WRAPPER_RELEASEONLY_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASEONLY_TEMPLATE"
@@ -337,13 +313,11 @@ main() {
       (( has_file )) || die "missing agent file in: $dir"
     done
 
+    mkdir -p "$LA_DIR"
 
-      mkdir -p "$BIN" "$LA_DIR"
-
-    # 0) Ensure ~/bin in PATH + Shortcuts snippet
+    # 0) Ensure PATH blocks
     add_path_block "$HOME/.zprofile"
     add_path_block "$HOME/.zshrc"
-    ensure_shortcuts_snippet
 
     # 0.5) Ensure brew & podman & machine
     ensure_brew
@@ -356,107 +330,11 @@ main() {
     # 2) Generate wrappers
     generate_wrappers
 
-    # 3) Install symlinks (wrappers + tools) tracked by manifest
-    echo "Installing wrappers from: $WRAPPERS_DIR"
-    echo "Installing tools from:    $OSXBIN_DIR"
-    echo "Target bin dir:           $BIN"
-
-    typeset -g tmp_manifest
-    tmp_manifest="$(mktemp "${MANIFEST}.XXXXXX")"
-    trap 'rm -f "$tmp_manifest"' EXIT
-
-    if [[ -f "$MANIFEST" ]]; then
-      while IFS=$'\t' read -r link target; do
-        [[ -n "$link" ]] || continue
-        if [[ -L "$link" ]]; then
-          local cur; cur="$(readlink "$link")"
-          if [[ "$cur" == "$WRAPPERS_DIR"* || "$cur" == "$OSXBIN_DIR"* || ! -e "$cur" ]]; then
-            rm -f "$link"
-            echo "  - removed old $link"
-          fi
-        fi
-      done < <(sed -e $'s/\\\\t/\t/g' "$MANIFEST")
-    fi
-
-    # Link generated wrappers (regular executable files only)
-    local w
-    for w in "$WRAPPERS_DIR"/*(.xN); do
-      link_into_bin "$w"
-    done
-
-    # Link top-level tools from OSXBIN_DIR, but never the lib dir
-    for w in "$OSXBIN_DIR"/*(.xN); do
-      [[ "${w:t}" == "lib" ]] && continue
-      link_into_bin "$w"
-    done
-
-    # 5b) Libraries: ensure $BIN/lib is a real dir; then link recursively
-    if [[ -d "$OSXBIN_DIR/lib" ]]; then
-      if [[ -L "$BIN/lib" ]]; then
-        echo "  ~ removing old symlink at $BIN/lib"
-        rm -f "$BIN/lib"
-      fi
-      mkdir -p "$BIN/lib"
-
-      local f rel dest
-      for f in "$OSXBIN_DIR"/lib/**/*(.N); do
-        rel="${f#${OSXBIN_DIR}/lib/}"
-        dest="$BIN/lib/$rel"
-        mkdir -p "${dest:h}"
-        ln -sf "$f" "$dest"
-        printf '%s\t%s\n' "$dest" "$f" >> "$tmp_manifest"
-        echo "  + linked lib/${rel}"
-      done
-    fi
-
-    mv -f "$tmp_manifest" "$MANIFEST"
-    trap - EXIT
-    echo "Wrote manifest: $MANIFEST"
-
-    case ":$PATH:" in
-      *":$BIN:"*) echo "'run-podman-script' is installed at $BIN/run-podman-script and is already in your PATH for this shell." ;;
-      *) echo "'run-podman-script' is installed at $BIN/run-podman-script, but your current shell won't see it until you open a new session."
-         echo "  For this shell only, run: export PATH=\"\$HOME/bin:\$PATH\"" ;;
-    esac
-
     echo "Install complete."
-    echo "For macOS Shortcuts, at the top of your 'Run Shell Script' action add:"
-    echo "  source \"$SHORTCUTS_SNIPPET\""
   }
 
   uninstall_all() {
     echo "Uninstalling EVERYTHING this script installed…"
-
-    if [[ -f "$MANIFEST" ]]; then
-      echo "Removing symlinks listed in: $MANIFEST"
-      while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local line_fixed link target cur
-        line_fixed="${line//\\t/$'\t'}"
-        if [[ "$line_fixed" == *$'\t'* ]]; then
-          link="${line_fixed%%$'\t'*}"
-          target="${line_fixed#*$'\t'}"
-        else
-          continue
-        fi
-        [[ -n "$link" ]] || continue
-        if [[ -L "$link" ]]; then
-          cur="$(readlink "$link")"
-          if [[ "$cur" == "$target" || "$cur" == "$WRAPPERS_DIR"* || "$cur" == "$OSXBIN_DIR"* || ! -e "$cur" ]]; then
-            rm -f "$link"
-            echo "  - removed $link"
-          else
-            echo "  ~ skipped $link (retargeted to $cur)"
-          fi
-        elif [[ -e "$link" ]]; then
-          echo "  ~ skipped $link (exists but is not a symlink)"
-        fi
-      done < "$MANIFEST"
-      rm -f "$MANIFEST"
-      echo "Removed manifest."
-    else
-      echo "No manifest found—continuing."
-    fi
 
     if [[ -d "$WRAPPERS_DIR" ]]; then
       echo "Deleting generated wrappers directory: $WRAPPERS_DIR"
@@ -467,12 +345,6 @@ main() {
 
     local sock="/tmp/com.nashspence.podman-machine.$UID_NUM.sock"
     [[ -S "$sock" ]] && rm -f "$sock" || true
-
-    if [[ -f "$SHORTCUTS_SNIPPET" ]]; then
-      rm -f "$SHORTCUTS_SNIPPET"
-      rmdir -p "${SHORTCUTS_SNIPPET:h}" 2>/dev/null || true
-      echo "Removed Shortcuts PATH snippet."
-    fi
 
     remove_path_block "$HOME/.zprofile"
     remove_path_block "$HOME/.zshrc"
@@ -490,7 +362,7 @@ main() {
   else
     cat <<USAGE >&2
 Usage:
-  $0                 Install activation + generate wrappers + install symlinks + brew/podman/machine
+  $0                 Install activation + generate wrappers + add paths + brew/podman/machine
   $0 --uninstall     Remove EVERYTHING this script installed (incl. Podman machine)
 USAGE
     exit 2
