@@ -1,19 +1,33 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # run-podman-script — build (Podman) and run a Containerfile/Dockerfile; pipe-friendly.
 # Logs (stderr only): (1) waiting for connection, (2) chosen image + why, (3) exact run command.
 
-set -euo pipefail
+set -e
+set -u
+set -o pipefail
+[[ -n "${DEBUG:-}" ]] && set -x
 
-# ----- minimal logging (stderr only) -----------------------------------------------------------
-log()  { print -u2 -- "$*"; }
-fail() { print -u2 -- "ERROR: $*"; }
+main() {
+  emulate -L zsh
+  set -e
+  set -u
+  set -o pipefail
 
-# ----- config ----------------------------------------------------------------------------------
-DR_MACHINE="${DR_MACHINE:-${MACHINE:-com.nashspence.scripts}}"
-DR_IMAGE_PREFIX="${DR_IMAGE_PREFIX:-com.nashspence.scripts.}"
-DR_TAG="${DR_TAG:-latest}"
-WAKER_LABEL="${WAKER_LABEL:-com.nashspence.scripts.agent}"
-SOCK="${PODMAN_SCRIPTS_SOCK:-/tmp/com.nashspence.scripts.${UID}.sock}"
+  # ----- minimal logging (stderr only) ---------------------------------------
+  log()  { print -u2 -- "$*"; }
+  fail() { print -u2 -- "ERROR: $*"; }
+
+  # ----- deps ----------------------------------------------------------------
+  for c in podman awk date; do
+    command -v "$c" >/dev/null 2>&1 || { fail "$c not found"; exit 127; }
+  done
+
+  # ----- config --------------------------------------------------------------
+  local DR_MACHINE="${DR_MACHINE:-${MACHINE:-com.nashspence.scripts}}"
+  local DR_IMAGE_PREFIX="${DR_IMAGE_PREFIX:-com.nashspence.scripts.}"
+  local DR_TAG="${DR_TAG:-latest}"
+  local WAKER_LABEL="${WAKER_LABEL:-com.nashspence.scripts.agent}"
+  local SOCK="${PODMAN_SCRIPTS_SOCK:-/tmp/com.nashspence.scripts.${UID}.sock}"
 
 # input flags
 file=""
@@ -60,33 +74,65 @@ if [[ -z "$file" && -n "$release_yaml" ]]; then
   file="$release_yaml"
 fi
 
-# ----- hold the launchd socket for our entire lifetime (silent best-effort) --------------------
-typeset -gi DR_SOCK_FD=-1
-_close_sock_fd() { (( DR_SOCK_FD >= 0 )) && exec {DR_SOCK_FD}>&- 2>/dev/null || true; }
-trap _close_sock_fd EXIT   # covers early exits / exec failure paths
+  # ----- hold the launchd socket for our entire lifetime ---------------------
+  typeset -gi DR_SOCK_FD=-1
+  _close_sock_fd() { (( DR_SOCK_FD >= 0 )) && exec {DR_SOCK_FD}>&- 2>/dev/null || true; }
+  trap _close_sock_fd EXIT
 
-# when you create the socket FD:
-if zmodload zsh/net/socket 2>/dev/null && zsocket "$SOCK" 2>/dev/null; then
-  DR_SOCK_FD=$REPLY
-  if zmodload zsh/system 2>/dev/null; then
-    zsystem fdflags -s cloexec $DR_SOCK_FD 2>/dev/null || true
-  fi
-fi
-
-# ----- wait for podman connection (1) ----------------------------------------------------------
-wait_podman() {
-  local timeout="${DR_WAIT_SECS:-90}" start now; start="$(date +%s)"
-  log "waiting for podman connection '${DR_MACHINE}' (timeout ${timeout}s)"
-  while :; do
-    if podman --connection "$DR_MACHINE" info >/dev/null 2>&1; then
-      return 0
+  if zmodload zsh/net/socket 2>/dev/null && zsocket "$SOCK" 2>/dev/null; then
+    DR_SOCK_FD=$REPLY
+    if zmodload zsh/system 2>/dev/null; then
+      zsystem fdflags -s cloexec $DR_SOCK_FD 2>/dev/null || true
     fi
-    sleep 0.5
-    now="$(date +%s)"
-    (( now - start >= timeout )) && { fail "timed out waiting for Podman '${DR_MACHINE}'"; exit 2; }
-  done
-}
-wait_podman
+  fi
+
+  # ----- helpers -------------------------------------------------------------
+  slugify() {
+    emulate -L zsh
+    local s="${1:l}"
+    s="${s//[^a-z0-9._-]/-}"
+    s="${s##-}"; s="${s%%-}"
+    print -r -- "$s"
+  }
+
+  yaml_get_key() {
+    emulate -L zsh
+    local key="$1" yfile="$2"
+    awk -v k="$key" '
+      $0 ~ "^[[:space:]]*"k":" {
+        sub("^[[:space:]]*"k":[[:space:]]*", "", $0)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+        gsub(/^"[[:space:]]*|"[[:space:]]*$/,"",$0)
+        gsub(/^'\''[[:space:]]*|'\''[[:space:]]*$/,"",$0)
+        print $0; exit 0
+      }
+    ' "$yfile" 2>/dev/null || true
+  }
+
+  is_not_found_err() {
+    emulate -L zsh
+    local msg="${1:l}"
+    [[ "$msg" == *"manifest unknown"* || "$msg" == *"not found"* || "$msg" == *"no such image"* || "$msg" == *"unknown blob"* || "$msg" == *"error locating image"* ]]
+  }
+
+  wait_podman() {
+    emulate -L zsh
+    local timeout="${DR_WAIT_SECS:-90}"
+    local start now
+    start="$(date +%s)"
+    log "waiting for podman connection '${DR_MACHINE}' (timeout ${timeout}s)"
+    while :; do
+      if podman --connection "$DR_MACHINE" info >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep 0.5
+      now="$(date +%s)"
+      (( now - start >= timeout )) && { fail "timed out waiting for Podman '${DR_MACHINE}'"; exit 2; }
+    done
+  }
+
+  # ----- wait for podman connection (1) -------------------------------------
+  wait_podman
 
 # ----- helpers ---------------------------------------------------------------------------------
 slugify(){ local s="${1:l}"; s="${s//[^a-z0-9._-]/-}"; s="${s##-}"; s="${s%%-}"; print -r -- "$s"; }
@@ -125,15 +171,16 @@ repo="$(slugify "${DR_IMAGE_PREFIX}${wrapper}")"
 local_image="${repo}:${DR_TAG}"
 image="$local_image"
 
-pull_flag=()
-if [[ -z "${DR_NO_PULL:-}" ]]; then
-  case "${DR_PULL_MODE:-yes}" in
-    always) pull_flag=(--pull-always) ;;
-    never)  pull_flag=(--pull-never)  ;;
-    *)      pull_flag=(--pull) ;;
-  esac
-fi
-dir="$(cd "$(dirname "$file")" && pwd)"
+  local -a pull_flag
+  pull_flag=()
+  if [[ -z "${DR_NO_PULL:-}" ]]; then
+    case "${DR_PULL_MODE:-yes}" in
+      always) pull_flag=(--pull-always) ;;
+      never)  pull_flag=(--pull-never)  ;;
+      *)      pull_flag=(--pull) ;;
+    esac
+  fi
+  dir="$(cd "$(dirname "$file")" && pwd)"
 
 # ----- choose release image vs build -----------------------------------------------------------
 has_containerfile=1
@@ -183,43 +230,51 @@ if (( build_needed )); then
   fi
 fi
 
-# ----- run -------------------------------------------------------------------------------------
-run_flags=(-i)
-if [[ -t 0 && -z "${DR_STDIN_PIPE:-}" ]]; then run_flags=(-it)
-elif [[ -z "${DR_NO_TTY:-}" ]]; then run_flags+=(-t); fi
+  # ----- run ----------------------------------------------------------------
+  local -a run_flags env_flags run_extra cmd_args fullcmd
+  run_flags=(-i)
+  if [[ -t 0 && -z "${DR_STDIN_PIPE:-}" ]]; then
+    run_flags=(-it)
+  elif [[ -z "${DR_NO_TTY:-}" ]]; then
+    run_flags+=(-t)
+  fi
 
-env_flags=()
-if [[ ! -t 1 && -z "${DR_NO_UNBUFFER:-}" ]]; then env_flags+=(-e PYTHONUNBUFFERED=1 -e PYTHONIOENCODING=UTF-8); fi
+  env_flags=()
+  if [[ ! -t 1 && -z "${DR_NO_UNBUFFER:-}" ]]; then
+    env_flags+=(-e PYTHONUNBUFFERED=1 -e PYTHONIOENCODING=UTF-8)
+  fi
 
 # run flags and command arguments have been parsed above
 
-# (2) minimal image description
-log "${image_reason} -> using ${image}"
+  # (2) minimal image description
+  log "${image_reason} -> using ${image}"
 
-# Compose exact command and log it (3)
-fullcmd=(podman --connection "$DR_MACHINE" run --rm "${run_flags[@]}" "${env_flags[@]}" "${run_extra[@]}" "$image" "${cmd_args[@]}")
-log "${(j: :)${(q)fullcmd}}"
+  # Compose exact command and log it (3)
+  fullcmd=(podman --connection "$DR_MACHINE" run --rm "${run_flags[@]}" "${env_flags[@]}" "${run_extra[@]}" "$image" "${cmd_args[@]}")
+  log "${(j: :)${(q)fullcmd}}"
 
-# ----- execute with signal translation (INT then KILL) ----------------------------------------
-setopt TRAPS_ASYNC        # run traps even while waiting
-typeset -gi _child=0
+  # ----- execute with signal translation (INT then KILL) --------------------
+  setopt TRAPS_ASYNC
+  typeset -gi _child=0
 
-_term_forwarder() {
-  # prevent reentry
-  trap - TERM INT HUP
-  if (( _child > 0 )); then
-    /bin/kill -s INT  "$_child" 2>/dev/null || true
-    sleep ${DR_TERM_GRACE:-0.3}
-    /bin/kill -s KILL "$_child" 2>/dev/null || true
-  fi
-  exit 143
+  _term_forwarder() {
+    trap - TERM INT HUP
+    if (( _child > 0 )); then
+      /bin/kill -s INT  "$_child" 2>/dev/null || true
+      sleep ${DR_TERM_GRACE:-0.3}
+      /bin/kill -s KILL "$_child" 2>/dev/null || true
+    fi
+    exit 143
+  }
+  trap _term_forwarder TERM HUP
+  trap _term_forwarder INT
+
+  local rc=0
+  set +e
+  "${fullcmd[@]}" & _child=$!
+  wait "$_child"; rc=$?
+  set -e
+  exit $rc
 }
 
-trap _term_forwarder TERM HUP
-trap _term_forwarder INT   # keep Ctrl-C behavior consistent
-
-set +e
-"${fullcmd[@]}" & _child=$!
-wait "$_child"; rc=$?
-set -e
-exit $rc
+main "$@"

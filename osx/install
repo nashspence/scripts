@@ -1,25 +1,33 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # install: install / uninstall activation + wrapper tooling + brew/podman/machine (pure zsh)
 # Usage:
 #   ./install                 # Install everything (activation + wrappers + links + brew/podman/machine)
 #   ./install --uninstall     # Remove EVERYTHING this script installed (incl. Podman machine)
 
-set -euo pipefail
-emulate -L zsh
-setopt err_return pipefail null_glob extended_glob
+set -e
+set -u
+set -o pipefail
+[[ -n "${DEBUG:-}" ]] && set -x
 
-SCRIPT_PATH="${(%):-%N}"
-SCRIPT_DIR="${SCRIPT_PATH:A:h}"
+main() {
+  emulate -L zsh
+  set -e
+  set -u
+  set -o pipefail
+  setopt err_return pipefail null_glob extended_glob
 
-# ---- Config (overridable by env) -------------------------------------------------
-BIN="${BIN:-$HOME/bin}"
-REPO_DIR="${REPO_DIR:-${SCRIPT_DIR:h}}"
-WRAPPERS_DIR="${WRAPPERS_DIR:-${REPO_DIR}/.wrappers}"
-FILES_DIR="${FILES_DIR:-$REPO_DIR}"
-LA_DIR="$HOME/Library/LaunchAgents"
-UID_NUM="$(id -u)"
-OSXBIN_DIR="${SCRIPT_DIR}/bin"   # REQUIRED (must contain 'run-podman-script')
-MANIFEST="${WRAPPERS_DIR}/.symlinks-manifest"
+  # ---- Paths / Config (env-overridable) ------------------------------------
+  typeset -gr SCRIPT_PATH="${(%):-%N}"
+  typeset -gr SCRIPT_DIR="${SCRIPT_PATH:A:h}"
+
+  typeset -g BIN="${BIN:-$HOME/bin}"
+  typeset -g REPO_DIR="${REPO_DIR:-${SCRIPT_DIR:h}}"
+  typeset -g WRAPPERS_DIR="${WRAPPERS_DIR:-${REPO_DIR}/.wrappers}"
+  typeset -g FILES_DIR="${FILES_DIR:-$REPO_DIR}"
+  typeset -gr LA_DIR="$HOME/Library/LaunchAgents"
+  typeset -gr UID_NUM="$(id -u)"
+  typeset -g OSXBIN_DIR="${SCRIPT_DIR}/bin"   # must contain run-podman-script
+  typeset -g MANIFEST="${WRAPPERS_DIR}/.symlinks-manifest"
 
 TEMPLATES_DIR="${SCRIPT_DIR}/templates"
 WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
@@ -30,184 +38,187 @@ LAUNCHER_TEMPLATE="${TEMPLATES_DIR}/launcher.zsh"
 INFO_PLIST_TEMPLATE="${TEMPLATES_DIR}/info.plist"
 LAUNCH_AGENT_TEMPLATE="${TEMPLATES_DIR}/launch-agent.plist"
 
-MACHINE="${MACHINE:-com.nashspence.scripts}"
-PODMAN_CPUS="${PODMAN_CPUS:-10}"
-PODMAN_MEM="${PODMAN_MEM:-18432}"
-PODMAN_DISK="${PODMAN_DISK:-100}"
+  typeset -g MACHINE="${MACHINE:-com.nashspence.scripts}"
+  typeset -g PODMAN_CPUS="${PODMAN_CPUS:-10}"
+  typeset -g PODMAN_MEM="${PODMAN_MEM:-18432}"
+  typeset -g PODMAN_DISK="${PODMAN_DISK:-100}"
 
-# ---- Helper bundle / LaunchAgent -------------------------------------------------
-APP_NAME="Podman Scripts Agent"
-BUNDLE_ID="com.nashspence.scripts"
-AGENT_LABEL="${BUNDLE_ID}.agent"
-BASE_DIR="$HOME/Library/Application Support/Nash Spence/Podman Scripts"
-APP_DIR="$BASE_DIR/${APP_NAME}.app"
-CONTENTS="$APP_DIR/Contents"
-MACOS_DIR="$CONTENTS/MacOS"
-RES_DIR="$CONTENTS/Resources"
-INFO_PLIST="$CONTENTS/Info.plist"
-LAUNCHER="$MACOS_DIR/Podman Scripts Agent"
-MAIN_SCRIPT="$RES_DIR/podman-scripts-machine-agent"
-PLIST_PATH="${LA_DIR}/${AGENT_LABEL}.plist"
+  # ---- Helper bundle / LaunchAgent -----------------------------------------
+  typeset -gr APP_NAME="Podman Scripts Agent"
+  typeset -gr BUNDLE_ID="com.nashspence.scripts"
+  typeset -gr AGENT_LABEL="${BUNDLE_ID}.agent"
+  typeset -gr BASE_DIR="$HOME/Library/Application Support/Nash Spence/Podman Scripts"
+  typeset -gr APP_DIR="$BASE_DIR/${APP_NAME}.app"
+  typeset -gr CONTENTS="$APP_DIR/Contents"
+  typeset -gr MACOS_DIR="$CONTENTS/MacOS"
+  typeset -gr RES_DIR="$CONTENTS/Resources"
+  typeset -gr INFO_PLIST="$CONTENTS/Info.plist"
+  typeset -gr LAUNCHER="$MACOS_DIR/Podman Scripts Agent"
+  typeset -gr MAIN_SCRIPT="$RES_DIR/podman-scripts-machine-agent"
+  typeset -gr PLIST_PATH="${LA_DIR}/${AGENT_LABEL}.plist"
 
-# ---- PATH block markers ----------------------------------------------------------
-PATH_BEGIN_MARK="# >>> podman-scripts PATH >>>"
-PATH_END_MARK="# <<< podman-scripts PATH <<<"
-PATH_EXPORT_LINE='export PATH="$HOME/bin:$PATH"'
-SHORTCUTS_SNIPPET="$HOME/.config/podman-scripts/shortcuts_path.zsh"
+  # ---- PATH block markers ---------------------------------------------------
+  typeset -gr PATH_BEGIN_MARK="# >>> podman-scripts PATH >>>"
+  typeset -gr PATH_END_MARK="# <<< podman-scripts PATH <<<"
+  typeset -gr PATH_EXPORT_LINE='export PATH="$HOME/bin:$PATH"'
+  typeset -gr SHORTCUTS_SNIPPET="$HOME/.config/podman-scripts/shortcuts_path.zsh"
 
-# ---- Helpers ---------------------------------------------------------------------
-die() { print -u2 -- "ERROR: $*"; exit 1; }
-rehash_safely() { rehash 2>/dev/null || hash -r 2>/dev/null || true; }
+  # ---- Globals used by helpers ---------------------------------------------
+  typeset -g tmp_manifest=""
 
-add_path_block() {
-  local file="$1"
-  [[ -f "$file" ]] || : > "$file"
-  if ! grep -Fqx -- "$PATH_BEGIN_MARK" "$file" 2>/dev/null; then
-    {
-      printf '\n%s\n' "$PATH_BEGIN_MARK"
-      printf '%s\n' "$PATH_EXPORT_LINE"
-      printf '%s\n' "$PATH_END_MARK"
-    } >> "$file"
-    echo "  + added PATH block to ${file##$HOME/}"
-  fi
-}
+  # ---- Helpers --------------------------------------------------------------
+  die() { print -u2 -- "ERROR: $*"; exit 1; }
+  rehash_safely() { rehash 2>/dev/null || hash -r 2>/dev/null || true; }
 
-remove_path_block() {
-  local file="$1"
-  [[ -f "$file" ]] || return 0
-  sed -E -i '' "/$(printf '%s' "$PATH_BEGIN_MARK" | sed 's/[^^]/[&]/g; s/\^/\\^/g')/,/$(printf '%s' "$PATH_END_MARK" | sed 's/[^^]/[&]/g; s/\^/\\^/g')/d" "$file" || true
-}
-
-ensure_shortcuts_snippet() {
-  mkdir -p "${SHORTCUTS_SNIPPET:h}"
-  cp "$SHORTCUTS_TEMPLATE" "$SHORTCUTS_SNIPPET"
-  echo "Created Shortcuts PATH snippet: $SHORTCUTS_SNIPPET"
-  echo "  In Shortcuts 'Run Shell Script', add as first line:"
-  echo "    source \"$SHORTCUTS_SNIPPET\""
-}
-
-ensure_brew() {
-  if command -v brew >/dev/null 2>&1; then
-    return 0
-  elif [[ -x /opt/homebrew/bin/brew ]]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)" || true
-    rehash_safely; return 0
-  elif [[ -x /usr/local/bin/brew ]]; then
-    eval "$(/usr/local/bin/brew shellenv)" || true
-    rehash_safely; return 0
-  fi
-  echo "Homebrew not found — installing Homebrew..."
-  NONINTERACTIVE=1 /bin/bash -c \
-    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  if [[ -x /opt/homebrew/bin/brew ]]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-  elif [[ -x /usr/local/bin/brew ]]; then
-    eval "$(/usr/local/bin/brew shellenv)"
-  fi
-  rehash_safely
-  command -v brew >/dev/null 2>&1 || die "brew installation appears to have failed"
-}
-
-ensure_podman() {
-  if ! command -v podman >/dev/null 2>&1; then
-    echo "Installing Podman with Homebrew…"
-    brew list podman >/dev/null 2>&1 || brew install podman
-    rehash_safely
-  fi
-  command -v podman >/dev/null 2>&1 || die "podman not found after installation"
-}
-
-ensure_podman_machine() {
-  if ! podman machine inspect "$MACHINE" >/dev/null 2>&1; then
-    echo "Creating Podman machine '$MACHINE' (cpus=$PODMAN_CPUS, mem=${PODMAN_MEM}MB, disk=${PODMAN_DISK}GB)…"
-    podman machine init \
-      --cpus "$PODMAN_CPUS" \
-      --memory "$PODMAN_MEM" \
-      --disk-size "$PODMAN_DISK" \
-      "$MACHINE"
-  else
-    echo "Podman machine '$MACHINE' already exists."
-  fi
-}
-
-remove_podman_machine() {
-  if command -v podman >/dev/null 2>&1; then
-    if podman machine inspect "$MACHINE" >/dev/null 2>&1; then
-      echo "Removing Podman machine '$MACHINE'…"
-      podman machine stop "$MACHINE" >/dev/null 2>&1 || true
-      podman machine rm -f "$MACHINE" >/dev/null 2>&1 || true
+  add_path_block() {
+    local file="$1"
+    [[ -f "$file" ]] || : > "$file"
+    if ! grep -Fqx -- "$PATH_BEGIN_MARK" "$file" 2>/dev/null; then
+      {
+        printf '\n%s\n' "$PATH_BEGIN_MARK"
+        printf '%s\n' "$PATH_EXPORT_LINE"
+        printf '%s\n' "$PATH_END_MARK"
+      } >> "$file"
+      echo "  + added PATH block to ${file##$HOME/}"
     fi
-  fi
-}
+  }
 
-mk_app_bundle() {
-  mkdir -p "$MACOS_DIR" "$RES_DIR"
+  remove_path_block() {
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+    # BSD sed in-place with explicit backup suffix ''.
+    sed -E -i '' "/$(printf '%s' "$PATH_BEGIN_MARK" | sed 's/[^^]/[&]/g; s/\^/\\^/g')/,/$(printf '%s' "$PATH_END_MARK" | sed 's/[^^]/[&]/g; s/\^/\\^/g')/d" "$file" || true
+  }
 
-  install -m 0755 "$LAUNCHER_TEMPLATE" "$LAUNCHER"
+  ensure_shortcuts_snippet() {
+    mkdir -p "${SHORTCUTS_SNIPPET:h}"
+    cp "$SHORTCUTS_TEMPLATE" "$SHORTCUTS_SNIPPET"
+    echo "Created Shortcuts PATH snippet: $SHORTCUTS_SNIPPET"
+    echo "  In Shortcuts 'Run Shell Script', add as first line:"
+    echo "    source \"$SHORTCUTS_SNIPPET\""
+  }
 
-  sed -e "s|%BUNDLE_ID%|${BUNDLE_ID//&/\\&}|g" \
-      -e "s|%APP_NAME%|${APP_NAME//&/\\&}|g" \
-      "$INFO_PLIST_TEMPLATE" > "$INFO_PLIST"
-  chmod 644 "$INFO_PLIST"
+  ensure_brew() {
+    if command -v brew >/dev/null 2>&1; then
+      return 0
+    elif [[ -x /opt/homebrew/bin/brew ]]; then
+      eval "$(/opt/homebrew/bin/brew shellenv)" || true
+      rehash_safely; return 0
+    elif [[ -x /usr/local/bin/brew ]]; then
+      eval "$(/usr/local/bin/brew shellenv)" || true
+      rehash_safely; return 0
+    fi
+    echo "Homebrew not found — installing Homebrew..."
+    NONINTERACTIVE=1 /bin/bash -c \
+      "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    if [[ -x /opt/homebrew/bin/brew ]]; then
+      eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [[ -x /usr/local/bin/brew ]]; then
+      eval "$(/usr/local/bin/brew shellenv)"
+    fi
+    rehash_safely
+    command -v brew >/dev/null 2>&1 || die "brew installation appears to have failed"
+  }
 
-  install -m 0755 "$SCRIPT_DIR/podman-scripts-machine-agent" "$MAIN_SCRIPT"
-  codesign -s - --force --deep "$APP_DIR" 2>/dev/null || true
-}
+  ensure_podman() {
+    if ! command -v podman >/dev/null 2>&1; then
+      echo "Installing Podman with Homebrew…"
+      brew list podman >/dev/null 2>&1 || brew install podman
+      rehash_safely
+    fi
+    command -v podman >/dev/null 2>&1 || die "podman not found after installation"
+  }
 
-mk_agent_plist() {
-  mkdir -p "$LA_DIR"
-  local sock_path="/tmp/com.nashspence.scripts.${UID_NUM}.sock"
-  sed -e "s|%AGENT_LABEL%|${AGENT_LABEL//&/\\&}|g" \
-      -e "s|%LAUNCHER%|${LAUNCHER//&/\\&}|g" \
-      -e "s|%BUNDLE_ID%|${BUNDLE_ID//&/\\&}|g" \
-      -e "s|%SOCK_PATH%|${sock_path//&/\\&}|g" \
-      -e "s|%MACHINE%|${MACHINE//&/\\&}|g" \
-      -e "s|%LOG_OUT%|${HOME//&/\\&}/Library/Logs/${BUNDLE_ID}.out.log|g" \
-      -e "s|%LOG_ERR%|${HOME//&/\\&}/Library/Logs/${BUNDLE_ID}.err.log|g" \
-      "$LAUNCH_AGENT_TEMPLATE" > "$PLIST_PATH"
-  chmod 644 "$PLIST_PATH"
-}
+  ensure_podman_machine() {
+    if ! podman machine inspect "$MACHINE" >/dev/null 2>&1; then
+      echo "Creating Podman machine '$MACHINE' (cpus=$PODMAN_CPUS, mem=${PODMAN_MEM}MB, disk=${PODMAN_DISK}GB)…"
+      podman machine init \
+        --cpus "$PODMAN_CPUS" \
+        --memory "$PODMAN_MEM" \
+        --disk-size "$PODMAN_DISK" \
+        "$MACHINE"
+    else
+      echo "Podman machine '$MACHINE' already exists."
+    fi
+  }
 
-load_agent() {
-  launchctl bootout gui/$UID_NUM "$PLIST_PATH" >/dev/null 2>&1 || true
-  launchctl bootstrap gui/$UID_NUM "$PLIST_PATH"
-  launchctl kickstart -k gui/$UID_NUM/${AGENT_LABEL} 2>/dev/null || true
-}
+  remove_podman_machine() {
+    if command -v podman >/dev/null 2>&1; then
+      if podman machine inspect "$MACHINE" >/dev/null 2>&1; then
+        echo "Removing Podman machine '$MACHINE'…"
+        podman machine stop "$MACHINE" >/dev/null 2>&1 || true
+        podman machine rm -f "$MACHINE"   >/dev/null 2>&1 || true
+      fi
+    fi
+  }
 
-unload_agent() {
-  launchctl bootout gui/$UID_NUM "$PLIST_PATH" >/dev/null 2>&1 || true
-}
+  mk_app_bundle() {
+    mkdir -p "$MACOS_DIR" "$RES_DIR"
+    install -m 0755 "$LAUNCHER_TEMPLATE" "$LAUNCHER"
+    sed -e "s|%BUNDLE_ID%|${BUNDLE_ID//&/\\&}|g" \
+        -e "s|%APP_NAME%|${APP_NAME//&/\\&}|g" \
+        "$INFO_PLIST_TEMPLATE" > "$INFO_PLIST"
+    chmod 644 "$INFO_PLIST"
+    install -m 0755 "$SCRIPT_DIR/podman-scripts-machine-agent" "$MAIN_SCRIPT"
+    # codesign may be absent on CI; best-effort
+    command -v codesign >/dev/null 2>&1 && codesign -s - --force --deep "$APP_DIR" 2>/dev/null || true
+  }
 
-link_into_bin() {
-  local src="$1" base link
-  base="${src:t}"
-  link="$BIN/$base"
-  ln -sf "$src" "$link"
-  printf '%s\t%s\n' "$link" "$src" >> "$tmp_manifest"
-  echo "  + linked $base"
-}
+  mk_agent_plist() {
+    mkdir -p "$LA_DIR"
+    local sock_path="/tmp/com.nashspence.scripts.${UID_NUM}.sock"
+    sed -e "s|%AGENT_LABEL%|${AGENT_LABEL//&/\\&}|g" \
+        -e "s|%LAUNCHER%|${LAUNCHER//&/\\&}|g" \
+        -e "s|%BUNDLE_ID%|${BUNDLE_ID//&/\\&}|g" \
+        -e "s|%SOCK_PATH%|${sock_path//&/\\&}|g" \
+        -e "s|%MACHINE%|${MACHINE//&/\\&}|g" \
+        -e "s|%LOG_OUT%|${HOME//&/\\&}/Library/Logs/${BUNDLE_ID}.out.log|g" \
+        -e "s|%LOG_ERR%|${HOME//&/\\&}/Library/Logs/${BUNDLE_ID}.err.log|g" \
+        "$LAUNCH_AGENT_TEMPLATE" > "$PLIST_PATH"
+    chmod 644 "$PLIST_PATH"
+  }
 
-generate_wrappers() {
-  echo "Repo:            $REPO_DIR"
-  echo "Scan root:       $FILES_DIR"
-  echo "Wrappers out:    $WRAPPERS_DIR"
-  rm -rf "$WRAPPERS_DIR"
-  mkdir -p "$WRAPPERS_DIR"
+  load_agent() {
+    launchctl bootout   "gui/$UID_NUM" "$PLIST_PATH" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$UID_NUM" "$PLIST_PATH"
+    launchctl kickstart -k "gui/$UID_NUM/${AGENT_LABEL}" 2>/dev/null || true
+  }
 
-  typeset -A used_names
-  local index_file="${WRAPPERS_DIR}/index.tsv"
-  : > "$index_file"
+  unload_agent() {
+    launchctl bootout "gui/$UID_NUM" "$PLIST_PATH" >/dev/null 2>&1 || true
+  }
 
-make_name() {
-  local cf="$1"
-  local base="${cf:t}"
-  local dir="${cf:h:t}"      # parent directory name
-  local stem slug out i=2
+  # link helper uses global tmp_manifest set during install_all
+  link_into_bin() {
+    local src="$1" base link
+    base="${src:t}"
+    link="$BIN/$base"
+    ln -sf "$src" "$link"
+    printf '%s\t%s\n' "$link" "$src" >> "$tmp_manifest"
+    echo "  + linked $base"
+  }
+
+  generate_wrappers() {
+    echo "Repo:            $REPO_DIR"
+    echo "Scan root:       $FILES_DIR"
+    echo "Wrappers out:    $WRAPPERS_DIR"
+    rm -rf "$WRAPPERS_DIR"
+    mkdir -p "$WRAPPERS_DIR"
+
+    typeset -A used_names
+    local index_file="${WRAPPERS_DIR}/index.tsv"
+    : > "$index_file"
+
+    make_name() {
+      local cf="$1"
+      local base="${cf:t}"
+      local dirn="${cf:h:t}"   # parent directory name
+      local stem slug out i=2
 
   case "${base:l}" in
     containerfile|dockerfile|release.yaml)
       # Canonical filenames: use the directory as the service name
-      stem="$dir"
+      stem="$dirn"
       ;;
     *)
       # Use the file stem with common suffixes stripped
@@ -219,44 +230,41 @@ make_name() {
       ;;
   esac
 
-  # Slug: lowercase, keep [a-z0-9._-], compress/trim dashes
-  slug="${(L)stem//[^a-z0-9._-]/-}"
-  slug="${slug##-}"; slug="${slug%%-}"
-  [[ -z "$slug" ]] && slug="${(L)dir}"
+      slug="${(L)stem//[^a-z0-9._-]/-}"
+      slug="${slug##-}"; slug="${slug%%-}"
+      [[ -z "$slug" ]] && slug="${(L)dirn}"
 
-  out="$slug"
-  while [[ -n "${used_names[$out]:-}" || -e "$WRAPPERS_DIR/$out" ]]; do
-    out="${slug}-${i}"
-    (( i++ ))
-  done
-  used_names[$out]=1
-  print -r -- "$out"
-}
+      out="$slug"
+      while [[ -n "${used_names[$out]:-}" || -e "$WRAPPERS_DIR/$out" ]]; do
+        out="${slug}-${i}"
+        (( i++ ))
+      done
+      used_names[$out]=1
+      print -r -- "$out"
+    }
 
-  local cf name abs wrapper rel
-  for cf in \
-    "$FILES_DIR"/**/Containerfile(.N) "$FILES_DIR"/**/*.Containerfile(.N) "$FILES_DIR"/**/*.containerfile(.N) \
-    "$FILES_DIR"/**/Dockerfile(.N)    "$FILES_DIR"/**/*.Dockerfile(.N)    "$FILES_DIR"/**/*.dockerfile(.N)
-  do
-    [[ -f "$cf" ]] || continue
-    name="$(make_name "$cf")"
-    abs="${cf:A}"
-    wrapper="${WRAPPERS_DIR}/${name}"
-    rel="${cf:h}/release.yaml"
-    rel="${rel:A}"
+    local cf name abs wrapper rel tpl
+    for cf in \
+      "$FILES_DIR"/**/Containerfile(.N) "$FILES_DIR"/**/*.Containerfile(.N) "$FILES_DIR"/**/*.containerfile(.N) \
+      "$FILES_DIR"/**/Dockerfile(.N)    "$FILES_DIR"/**/*.Dockerfile(.N)    "$FILES_DIR"/**/*.dockerfile(.N)
+    do
+      [[ -f "$cf" ]] || continue
+      name="$(make_name "$cf")"
+      abs="${cf:A}"
+      wrapper="${WRAPPERS_DIR}/${name}"
+      rel="${cf:h}/release.yaml"; rel="${rel:A}"
 
-    local tpl
-    if [[ -f "$rel" ]]; then
-      tpl="$WRAPPER_RELEASE_TEMPLATE"
-    else
-      tpl="$WRAPPER_TEMPLATE"
-    fi
+      if [[ -f "$rel" ]]; then
+        tpl="$WRAPPER_RELEASE_TEMPLATE"
+      else
+        tpl="$WRAPPER_TEMPLATE"
+      fi
 
-    sed -e "s|%NAME%|${name//&/\\&}|g" \
-        -e "s|%ABS%|${abs//&/\\&}|g" \
-        -e "s|%REL%|${rel//&/\\&}|g" \
-        "$tpl" > "$wrapper"
-    chmod +x "$wrapper"
+      sed -e "s|%NAME%|${name//&/\\&}|g" \
+          -e "s|%ABS%|${abs//&/\\&}|g" \
+          -e "s|%REL%|${rel//&/\\&}|g" \
+          "$tpl" > "$wrapper"
+      chmod +x "$wrapper"
 
     printf '%s\t%s\n' "$name" "$abs" >> "$index_file"
     echo "  + ${name} -> ${abs}"
@@ -284,15 +292,15 @@ make_name() {
     echo "  + ${name} -> ${abs}"
   done
 
-  echo "Wrote index: $index_file"
-  echo "Done generating wrappers."
-}
+    echo "Wrote index: $index_file"
+    echo "Done generating wrappers."
+  }
 
-install_all() {
-  # Require OSXBIN_DIR and run-podman-script
-  [[ -d "$OSXBIN_DIR" ]] || die "required directory missing: $OSXBIN_DIR (must contain 'run-podman-script')"
-  [[ -f "$OSXBIN_DIR/run-podman-script" ]] || die "required tool missing: $OSXBIN_DIR/run-podman-script"
-  chmod +x "$OSXBIN_DIR/run-podman-script" 2>/dev/null || true
+  install_all() {
+    # require OSXBIN_DIR and run-podman-script
+    [[ -d "$OSXBIN_DIR" ]] || die "required directory missing: $OSXBIN_DIR (must contain 'run-podman-script')"
+    [[ -f "$OSXBIN_DIR/run-podman-script" ]] || die "required tool missing: $OSXBIN_DIR/run-podman-script"
+    chmod +x "$OSXBIN_DIR/run-podman-script" 2>/dev/null || true
 
   [[ -f "$SHORTCUTS_TEMPLATE" ]] || die "missing template: $SHORTCUTS_TEMPLATE"
   [[ -f "$WRAPPER_TEMPLATE" ]] || die "missing template: $WRAPPER_TEMPLATE"
@@ -302,168 +310,170 @@ install_all() {
   [[ -f "$INFO_PLIST_TEMPLATE" ]] || die "missing template: $INFO_PLIST_TEMPLATE"
   [[ -f "$LAUNCH_AGENT_TEMPLATE" ]] || die "missing template: $LAUNCH_AGENT_TEMPLATE"
 
-  mkdir -p "$BIN" "$LA_DIR" "$BASE_DIR"
+    mkdir -p "$BIN" "$LA_DIR" "$BASE_DIR"
 
-  # 0) Ensure ~/bin in PATH + Shortcuts snippet
-  add_path_block "$HOME/.zprofile"
-  add_path_block "$HOME/.zshrc"
-  ensure_shortcuts_snippet
+    # 0) Ensure ~/bin in PATH + Shortcuts snippet
+    add_path_block "$HOME/.zprofile"
+    add_path_block "$HOME/.zshrc"
+    ensure_shortcuts_snippet
 
-  # 0.5) Ensure brew & podman & machine
-  ensure_brew
-  ensure_podman
-  ensure_podman_machine
+    # 0.5) Ensure brew & podman & machine
+    ensure_brew
+    ensure_podman
+    ensure_podman_machine
 
-  # 1) Install helper app bundle and LaunchAgent
-  mk_app_bundle
-  mk_agent_plist
-  load_agent
-  echo "Loaded LaunchAgent."
-  echo "Socket: /tmp/com.nashspence.scripts.$UID_NUM.sock (owned by launchd)."
+    # 1) App bundle + LaunchAgent
+    mk_app_bundle
+    mk_agent_plist
+    load_agent
+    echo "Loaded LaunchAgent."
+    echo "Socket: /tmp/com.nashspence.scripts.$UID_NUM.sock (owned by launchd)."
 
-  # 2) Generate wrappers
-  generate_wrappers
+    # 2) Generate wrappers
+    generate_wrappers
 
-  # 3) Install symlinks (wrappers + tools) tracked by manifest
-  echo "Installing wrappers from: $WRAPPERS_DIR"
-  echo "Installing tools from:    $OSXBIN_DIR"
-  echo "Target bin dir:           $BIN"
+    # 3) Install symlinks (wrappers + tools) tracked by manifest
+    echo "Installing wrappers from: $WRAPPERS_DIR"
+    echo "Installing tools from:    $OSXBIN_DIR"
+    echo "Target bin dir:           $BIN"
 
-  tmp_manifest="$(mktemp "${MANIFEST}.XXXXXX")"
-  trap 'rm -f "$tmp_manifest"' EXIT
+    typeset -g tmp_manifest
+    tmp_manifest="$(mktemp "${MANIFEST}.XXXXXX")"
+    trap 'rm -f "$tmp_manifest"' EXIT
 
-  if [[ -f "$MANIFEST" ]]; then
-    while IFS=$'\t' read -r link target; do
-      [[ -n "$link" ]] || continue
-      if [[ -L "$link" ]]; then
-        local cur; cur="$(readlink "$link")"
-        if [[ "$cur" == "$WRAPPERS_DIR"* || "$cur" == "$OSXBIN_DIR"* || ! -e "$cur" ]]; then
-          rm -f "$link"
-          echo "  - removed old $link"
+    if [[ -f "$MANIFEST" ]]; then
+      while IFS=$'\t' read -r link target; do
+        [[ -n "$link" ]] || continue
+        if [[ -L "$link" ]]; then
+          local cur; cur="$(readlink "$link")"
+          if [[ "$cur" == "$WRAPPERS_DIR"* || "$cur" == "$OSXBIN_DIR"* || ! -e "$cur" ]]; then
+            rm -f "$link"
+            echo "  - removed old $link"
+          fi
         fi
-      fi
-    done < <(sed -e $'s/\\\\t/\t/g' "$MANIFEST")
-  fi
-
-  # Link generated wrappers (regular executable files only)
-  local w
-  for w in "$WRAPPERS_DIR"/*(.xN); do
-    link_into_bin "$w"
-  done
-
-  # Link top-level tools from OSXBIN_DIR, but never the lib dir
-  for w in "$OSXBIN_DIR"/*(.xN); do
-    [[ "${w:t}" == "lib" ]] && continue
-    link_into_bin "$w"
-  done
-
-  # 5b) Install libraries: make $BIN/lib a real dir, then link files from $OSXBIN_DIR/lib
-  if [[ -d "$OSXBIN_DIR/lib" ]]; then
-    # If a previous bad install left $BIN/lib as a symlink, remove it
-    if [[ -L "$BIN/lib" ]]; then
-      echo "  ~ removing old symlink at $BIN/lib"
-      rm -f "$BIN/lib"
+      done < <(sed -e $'s/\\\\t/\t/g' "$MANIFEST")
     fi
-    mkdir -p "$BIN/lib"
 
-    local f rel dest
-    # Link all regular files recursively, preserving subdirs
-    for f in "$OSXBIN_DIR"/lib/**/*(.N); do
-      rel="${f#${OSXBIN_DIR}/lib/}"
-      dest="$BIN/lib/$rel"
-      mkdir -p "${dest:h}"
-      ln -sf "$f" "$dest"
-      printf '%s\t%s\n' "$dest" "$f" >> "$tmp_manifest"
-      echo "  + linked lib/${rel}"
+    # Link generated wrappers (regular executable files only)
+    local w
+    for w in "$WRAPPERS_DIR"/*(.xN); do
+      link_into_bin "$w"
     done
-  fi
 
-  mv -f "$tmp_manifest" "$MANIFEST"
-  trap - EXIT
-  echo "Wrote manifest: $MANIFEST"
+    # Link top-level tools from OSXBIN_DIR, but never the lib dir
+    for w in "$OSXBIN_DIR"/*(.xN); do
+      [[ "${w:t}" == "lib" ]] && continue
+      link_into_bin "$w"
+    done
 
-  case ":$PATH:" in
-    *":$BIN:"*) echo "'run-podman-script' is installed at $BIN/run-podman-script and is already in your PATH for this shell." ;;
-    *) echo "'run-podman-script' is installed at $BIN/run-podman-script, but your current shell won't see it until you open a new session."
-       echo "  For this shell only, run: export PATH=\"\$HOME/bin:\$PATH\"" ;;
-  esac
-
-  echo "Install complete."
-  echo "For macOS Shortcuts, at the top of your 'Run Shell Script' action add:"
-  echo "  source \"$SHORTCUTS_SNIPPET\""
-}
-
-uninstall_all() {
-  echo "Uninstalling EVERYTHING this script installed…"
-
-  if [[ -f "$MANIFEST" ]]; then
-    echo "Removing symlinks listed in: $MANIFEST"
-    while IFS= read -r line; do
-      [[ -z "$line" ]] && continue
-      local line_fixed link target cur
-      line_fixed="${line//\\t/$'\t'}"
-      if [[ "$line_fixed" == *$'\t'* ]]; then
-        link="${line_fixed%%$'\t'*}"
-        target="${line_fixed#*$'\t'}"
-      else
-        continue
+    # 5b) Libraries: ensure $BIN/lib is a real dir; then link recursively
+    if [[ -d "$OSXBIN_DIR/lib" ]]; then
+      if [[ -L "$BIN/lib" ]]; then
+        echo "  ~ removing old symlink at $BIN/lib"
+        rm -f "$BIN/lib"
       fi
-      [[ -n "$link" ]] || continue
-      if [[ -L "$link" ]]; then
-        cur="$(readlink "$link")"
-        if [[ "$cur" == "$target" || "$cur" == "$WRAPPERS_DIR"* || "$cur" == "$OSXBIN_DIR"* || ! -e "$cur" ]]; then
-          rm -f "$link"
-          echo "  - removed $link"
+      mkdir -p "$BIN/lib"
+
+      local f rel dest
+      for f in "$OSXBIN_DIR"/lib/**/*(.N); do
+        rel="${f#${OSXBIN_DIR}/lib/}"
+        dest="$BIN/lib/$rel"
+        mkdir -p "${dest:h}"
+        ln -sf "$f" "$dest"
+        printf '%s\t%s\n' "$dest" "$f" >> "$tmp_manifest"
+        echo "  + linked lib/${rel}"
+      done
+    fi
+
+    mv -f "$tmp_manifest" "$MANIFEST"
+    trap - EXIT
+    echo "Wrote manifest: $MANIFEST"
+
+    case ":$PATH:" in
+      *":$BIN:"*) echo "'run-podman-script' is installed at $BIN/run-podman-script and is already in your PATH for this shell." ;;
+      *) echo "'run-podman-script' is installed at $BIN/run-podman-script, but your current shell won't see it until you open a new session."
+         echo "  For this shell only, run: export PATH=\"\$HOME/bin:\$PATH\"" ;;
+    esac
+
+    echo "Install complete."
+    echo "For macOS Shortcuts, at the top of your 'Run Shell Script' action add:"
+    echo "  source \"$SHORTCUTS_SNIPPET\""
+  }
+
+  uninstall_all() {
+    echo "Uninstalling EVERYTHING this script installed…"
+
+    if [[ -f "$MANIFEST" ]]; then
+      echo "Removing symlinks listed in: $MANIFEST"
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local line_fixed link target cur
+        line_fixed="${line//\\t/$'\t'}"
+        if [[ "$line_fixed" == *$'\t'* ]]; then
+          link="${line_fixed%%$'\t'*}"
+          target="${line_fixed#*$'\t'}"
         else
-          echo "  ~ skipped $link (retargeted to $cur)"
+          continue
         fi
-      elif [[ -e "$link" ]]; then
-        echo "  ~ skipped $link (exists but is not a symlink)"
-      fi
-    done < "$MANIFEST"
-    rm -f "$MANIFEST"
-    echo "Removed manifest."
+        [[ -n "$link" ]] || continue
+        if [[ -L "$link" ]]; then
+          cur="$(readlink "$link")"
+          if [[ "$cur" == "$target" || "$cur" == "$WRAPPERS_DIR"* || "$cur" == "$OSXBIN_DIR"* || ! -e "$cur" ]]; then
+            rm -f "$link"
+            echo "  - removed $link"
+          else
+            echo "  ~ skipped $link (retargeted to $cur)"
+          fi
+        elif [[ -e "$link" ]]; then
+          echo "  ~ skipped $link (exists but is not a symlink)"
+        fi
+      done < "$MANIFEST"
+      rm -f "$MANIFEST"
+      echo "Removed manifest."
+    else
+      echo "No manifest found—continuing."
+    fi
+
+    if [[ -d "$WRAPPERS_DIR" ]]; then
+      echo "Deleting generated wrappers directory: $WRAPPERS_DIR"
+      rm -rf "$WRAPPERS_DIR"
+    fi
+
+    unload_agent
+    rm -f "$PLIST_PATH"
+    rm -rf "$APP_DIR"
+    rmdir "$BASE_DIR" 2>/dev/null || true
+
+    local sock="/tmp/com.nashspence.scripts.$UID_NUM.sock"
+    [[ -S "$sock" ]] && rm -f "$sock" || true
+
+    if [[ -f "$SHORTCUTS_SNIPPET" ]]; then
+      rm -f "$SHORTCUTS_SNIPPET"
+      rmdir -p "${SHORTCUTS_SNIPPET:h}" 2>/dev/null || true
+      echo "Removed Shortcuts PATH snippet."
+    fi
+
+    remove_path_block "$HOME/.zprofile"
+    remove_path_block "$HOME/.zshrc"
+
+    remove_podman_machine
+
+    echo "Uninstall complete."
+  }
+
+  # ---- Main ---------------------------------------------------------------
+  if (( $# == 1 )) && [[ "$1" == "--uninstall" ]]; then
+    uninstall_all
+  elif (( $# == 0 )); then
+    install_all
   else
-    echo "No manifest found—continuing."
-  fi
-
-  if [[ -d "$WRAPPERS_DIR" ]]; then
-    echo "Deleting generated wrappers directory: $WRAPPERS_DIR"
-    rm -rf "$WRAPPERS_DIR"
-  fi
-
-  unload_agent
-  rm -f "$PLIST_PATH"
-  rm -rf "$APP_DIR"
-  rmdir "$BASE_DIR" 2>/dev/null || true
-
-  local sock="/tmp/com.nashspence.scripts.$UID_NUM.sock"
-  [[ -S "$sock" ]] && rm -f "$sock" || true
-
-  if [[ -f "$SHORTCUTS_SNIPPET" ]]; then
-    rm -f "$SHORTCUTS_SNIPPET"
-    rmdir -p "${SHORTCUTS_SNIPPET:h}" 2>/dev/null || true
-    echo "Removed Shortcuts PATH snippet."
-  fi
-
-  remove_path_block "$HOME/.zprofile"
-  remove_path_block "$HOME/.zshrc"
-
-  remove_podman_machine
-
-  echo "Uninstall complete."
-}
-
-# ---- Main -----------------------------------------------------------------------
-if (( $# == 1 )) && [[ "$1" == "--uninstall" ]]; then
-  uninstall_all
-elif (( $# == 0 )); then
-  install_all
-else
-  cat <<USAGE >&2
+    cat <<USAGE >&2
 Usage:
   $0                 Install activation + generate wrappers + install symlinks + brew/podman/machine
   $0 --uninstall     Remove EVERYTHING this script installed (incl. Podman machine)
 USAGE
-  exit 2
-fi
+    exit 2
+  fi
+}
+
+main "$@"
