@@ -1,5 +1,5 @@
 #!/bin/zsh
 set -euo pipefail
-# Auto-generated wrapper. Invokes 'run-podman-script' against a release.yaml only.
+# Auto-generated wrapper. Invokes 'podman-script-machine run' against a release.yaml only.
 export DR_WRAPPER_NAME="%NAME%"
-exec run-podman-script -r "%ABS%" "$@"
+exec podman-script-machine run -r "%ABS%" "$@"
