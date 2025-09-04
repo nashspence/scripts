@@ -25,26 +25,26 @@ main() {
   typeset -g FILES_DIR="${FILES_DIR:-$REPO_DIR}"
   typeset -gr LA_DIR="$HOME/Library/LaunchAgents"
   typeset -gr UID_NUM="$(id -u)"
-    typeset -g OSXBIN_DIR="${SCRIPT_DIR}/bin"   # must contain podman-script-machine
+  typeset -g OSXBIN_DIR="${SCRIPT_DIR}/bin"   # must contain podman-script-machine
 
-    typeset -gr TEMPLATES_DIR="${SCRIPT_DIR}/templates"
-    typeset -gr WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
-    typeset -gr WRAPPER_RELEASE_TEMPLATE="${TEMPLATES_DIR}/wrapper-release.zsh"
-    typeset -gr WRAPPER_RELEASEONLY_TEMPLATE="${TEMPLATES_DIR}/wrapper-release-only.zsh"
+  typeset -gr TEMPLATES_DIR="${SCRIPT_DIR}/templates"
+  typeset -gr WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
+  typeset -gr WRAPPER_RELEASE_TEMPLATE="${TEMPLATES_DIR}/wrapper-release.zsh"
+  typeset -gr WRAPPER_RELEASEONLY_TEMPLATE="${TEMPLATES_DIR}/wrapper-release-only.zsh"
 
   typeset -g MACHINE="${MACHINE:-com.nashspence.scripts}"
-  typeset -g PODMAN_CPUS="${PODMAN_CPUS:-10}"
+  typeset -g PODMAN_CPUS="${PODMAN_CPUS:-8}"
   typeset -g PODMAN_MEM="${PODMAN_MEM:-18432}"
-  typeset -g PODMAN_DISK="${PODMAN_DISK:-100}"
+  typeset -g PODMAN_DISK="${PODMAN_DISK:-20}"
 
-    # ---- Launch agent configuration -----------------------------------------
-    typeset -gr UID_NAME="$(id -un)"
-    typeset -gr LAUNCH_AGENTS_DIR="${SCRIPT_DIR}/launch-agents"
-    typeset -a LAUNCH_AGENT_DIRS=()
-    for dir in "${LAUNCH_AGENTS_DIR}"/*; do
-      [[ -d "$dir" ]] || continue
-      LAUNCH_AGENT_DIRS+=("$dir")
-    done
+  # ---- Launch agent configuration -----------------------------------------
+  typeset -gr UID_NAME="$(id -un)"
+  typeset -gr LAUNCH_AGENTS_DIR="${SCRIPT_DIR}/launch-agents"
+  typeset -a LAUNCH_AGENT_DIRS=()
+  for dir in "${LAUNCH_AGENTS_DIR}"/*; do
+    [[ -d "$dir" ]] || continue
+    LAUNCH_AGENT_DIRS+=("$dir")
+  done
 
   # ---- PATH block markers ---------------------------------------------------
   typeset -gr PATH_BEGIN_MARK="# >>> podman-scripts PATH >>>"
@@ -85,14 +85,17 @@ main() {
       eval "$(/usr/local/bin/brew shellenv)" || true
       rehash_safely; return 0
     fi
+
     echo "Homebrew not found — installing Homebrew..."
     NONINTERACTIVE=1 /bin/bash -c \
       "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
     if [[ -x /opt/homebrew/bin/brew ]]; then
       eval "$(/opt/homebrew/bin/brew shellenv)"
     elif [[ -x /usr/local/bin/brew ]]; then
       eval "$(/usr/local/bin/brew shellenv)"
     fi
+    
     rehash_safely
     command -v brew >/dev/null 2>&1 || die "brew installation appears to have failed"
   }
@@ -157,7 +160,6 @@ main() {
     echo "Loaded ${label} LaunchAgent."
   }
 
-
   uninstall_launch_agent() {
     local dir="$1" plist_src label plist resources
     plist_src=("$dir"/*.plist(N))
@@ -176,7 +178,6 @@ main() {
     fi
   }
 
-
   install_launch_agents() {
     local dir
     for dir in "${LAUNCH_AGENT_DIRS[@]}"; do
@@ -190,8 +191,6 @@ main() {
       uninstall_launch_agent "$dir"
     done
   }
-
-
 
   generate_wrappers() {
     echo "Repo:            $REPO_DIR"
@@ -210,20 +209,20 @@ main() {
       local dirn="${cf:h:t}"   # parent directory name
       local stem slug out i=2
 
-  case "${base:l}" in
-    containerfile|dockerfile|release.yaml)
-      # Canonical filenames: use the directory as the service name
-      stem="$dirn"
-      ;;
-    *)
-      # Use the file stem with common suffixes stripped
-      stem="$base"
-      stem="${stem%.Containerfile}"; stem="${stem%.containerfile}"
-      stem="${stem%.Dockerfile}";    stem="${stem%.dockerfile}"
-      stem="${stem%.*}"
-      [[ -z "$stem" ]] && stem="$dir"
-      ;;
-  esac
+      case "${base:l}" in
+        containerfile|dockerfile|release.yaml)
+          # Canonical filenames: use the directory as the service name
+          stem="$dirn"
+          ;;
+        *)
+          # Use the file stem with common suffixes stripped
+          stem="$base"
+          stem="${stem%.Containerfile}"; stem="${stem%.containerfile}"
+          stem="${stem%.Dockerfile}";    stem="${stem%.dockerfile}"
+          stem="${stem%.*}"
+          [[ -z "$stem" ]] && stem="$dir"
+          ;;
+      esac
 
       slug="${(L)stem//[^a-z0-9._-]/-}"
       slug="${slug##-}"; slug="${slug%%-}"
@@ -297,9 +296,9 @@ main() {
     [[ -f "$OSXBIN_DIR/podman-script-machine" ]] || die "required tool missing: $OSXBIN_DIR/podman-script-machine"
     chmod +x "$OSXBIN_DIR/podman-script-machine" 2>/dev/null || true
 
-  [[ -f "$WRAPPER_TEMPLATE" ]] || die "missing template: $WRAPPER_TEMPLATE"
-  [[ -f "$WRAPPER_RELEASE_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASE_TEMPLATE"
-  [[ -f "$WRAPPER_RELEASEONLY_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASEONLY_TEMPLATE"
+    [[ -f "$WRAPPER_TEMPLATE" ]] || die "missing template: $WRAPPER_TEMPLATE"
+    [[ -f "$WRAPPER_RELEASE_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASE_TEMPLATE"
+    [[ -f "$WRAPPER_RELEASEONLY_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASEONLY_TEMPLATE"
     [[ -d "$LAUNCH_AGENTS_DIR" ]] || die "missing directory: $LAUNCH_AGENTS_DIR"
     local dir plist has_file f
     for dir in "${LAUNCH_AGENT_DIRS[@]}"; do
