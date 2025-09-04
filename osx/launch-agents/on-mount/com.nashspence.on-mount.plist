@@ -8,4 +8,6 @@
   </array>
   <key>StartOnMount</key><true/>
   <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>%REPO_DIR%/osx/launch-agents/on-mount/stdout.log</string>
+  <key>StandardErrorPath</key><string>%REPO_DIR%/osx/launch-agents/on-mount/stderr.log</string>
 </dict></plist>

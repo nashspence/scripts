@@ -36,6 +36,6 @@
 
   <key>KeepAlive</key><false/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>/Users/%UID%/Library/Logs/com.nashspence.podman-machine.out.log</string>
-  <key>StandardErrorPath</key><string>/Users/%UID%/Library/Logs/com.nashspence.podman-machine.err.log</string>
+  <key>StandardOutPath</key><string>%REPO_DIR%/osx/launch-agents/podman-machine/stdout.log</string>
+  <key>StandardErrorPath</key><string>%REPO_DIR%/osx/launch-agents/podman-machine/stderr.log</string>
 </dict></plist>
