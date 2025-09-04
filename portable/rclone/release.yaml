@@ -1,4 +1,0 @@
-image: docker.io/rclone/rclone
-version: "latest"
-labels:
-  org.opencontainers.image.title: rclone
