@@ -134,8 +134,8 @@ main() {
   }
 
   typeset -A LAUNCH_AGENT_RESOURCES=(
-    [com.nashspence.on-mount]="state.tsv"
-    [com.nashspence.podman-machine]="agent"
+    [com.nashspence.scripts.on-mount]="state.tsv"
+    [com.nashspence.scripts.podman-machine]="agent"
   )
 
   install_launch_agent() {
@@ -342,7 +342,7 @@ main() {
 
     uninstall_launch_agents
 
-    local sock="/tmp/com.nashspence.podman-machine.$UID_NUM.sock"
+    local sock="/tmp/com.nashspence.scripts.podman-machine.$UID_NUM.sock"
     [[ -S "$sock" ]] && rm -f "$sock" || true
 
     remove_path_block "$HOME/.zprofile"

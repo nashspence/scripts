@@ -1,43 +1,90 @@
 #!/bin/zsh
 set -eu
 
-shortcut="On Mount"
-marker=".com.nashspence.on-mount.id"
-recent=20
+marker=".com.nashspence.scripts.on-mount.id"
+onmount_dir="${HOME}/On Mount"
 
 base="$(cd "$(dirname "$0")" && pwd)"
-state="${base}/state.tsv"
-lock="${HOME}/Library/Caches/com.nashspence.on-mount.lock"
+state="${base}/state.tsv"            # holds: <VolumeName>\t<DeviceID>
+tmp_state="${state}.$$.new"          # temp file for atomic rewrite
+lock="${HOME}/Library/Caches/com.nashspence.scripts.on-mount.lock"
+
+# --- minimal logging helpers ---
+ts()    { /bin/date '+%Y-%m-%d %H:%M:%S%z'; }
+log()   { print -r -- "[$(ts)] $*"; }
+warn()  { print -u2 -r -- "[$(ts)] $*"; }
 
 umask 077
 mkdir -p "${base}"
+: >| "${tmp_state}"
+: >| "${state}" 2>/dev/null || true   # ensure it exists
 
 # single-run lock
-if ! mkdir "${lock}" 2>/dev/null; then exit 0; fi
+if ! mkdir "${lock}" 2>/dev/null; then
+  warn "Another instance appears to be running (lock: ${lock}). Exiting."
+  exit 0
+fi
 trap 'rmdir "${lock}"' EXIT
 
-# quiet no-op if Shortcut missing
-if ! /usr/bin/shortcuts list 2>/dev/null | /usr/bin/grep -Fqx "${shortcut}"; then
+log "Starting on-mount scan (base=${base})"
+
+# If the action directory is missing, nothing to do (but let the user know)
+if [[ ! -d "${onmount_dir}" ]]; then
+  warn "Action directory not found: ${onmount_dir}. Nothing to execute."
   exit 0
 fi
 
-: > "${state}" 2>/dev/null || true
-now=$(/bin/date +%s)
+# helper to fetch previous device id for a volume from state
+get_prev_devid() {
+  local volname="$1"
+  /usr/bin/grep -F -m1 -e "^${volname}\t" "${state}" 2>/dev/null | /usr/bin/cut -f2- || true
+}
+
+typeset -i ran=0
 
 for vol in /Volumes/*(N/); do
   [[ -d $vol ]] || continue
+
+  volname=${vol:t}
   file="${vol%/}/${marker}"
   [[ -f $file ]] || continue
 
-  btime=$(/usr/bin/stat -f %B -- "$vol" 2>/dev/null || echo 0)
-  (( btime > 0 )) || continue
-  (( now - btime <= recent )) || continue
+  # current mount's device id; changes across unmount/remount
+  devid=$(/usr/bin/stat -f %d -- "$vol" 2>/dev/null || echo "")
+  [[ -n $devid ]] || { warn "Could not read device id for ${volname}"; continue; }
 
-  key="${vol#/Volumes/}\t${btime}"
-  if /usr/bin/grep -Fqx -- "$key" "$state"; then continue; fi
+  prev="$(get_prev_devid "$volname")"
 
-  /usr/bin/printf '%s' "$([ -f "$file" ] && /bin/cat -- "$file" 2>/dev/null || echo '')" \
-    | /usr/bin/shortcuts run "$shortcut" -i - >/dev/null 2>&1 || true
+  if [[ "$prev" != "$devid" ]]; then
+    # Read the first line of the marker file to get the program name
+    local name=""
+    IFS= read -r name < "$file" || name=""
+    # Strip any CR (in case of CRLF files) and force to basename to avoid paths
+    name="${name//$'\r'/}"
+    name="${name:t}"
 
-  print -r -- "$key" >> "$state"
+    if [[ -z "${name}" ]]; then
+      warn "Marker on ${volname} is empty; skipping."
+    else
+      prog="${onmount_dir%/}/${name}"
+      if [[ -f "${prog}" && -x "${prog}" ]]; then
+        log "Executing \"${prog}\" for \"${volname}\""
+        "${prog}" "$vol" || {
+          sc=$?
+          warn "Executable exited with status ${sc} for \"${volname}\""
+        }
+        (( ran++ ))
+      else
+        warn "No executable named \"${name}\" in ${onmount_dir} (missing or not executable); skipping ${volname}."
+      fi
+    fi
+  fi
+
+  # Keep only currently mounted volumes in the new state
+  /usr/bin/printf '%s\t%s\n' "$volname" "$devid" >> "${tmp_state}"
 done
+
+# Atomically update state (also prunes stale entries)
+mv -f "${tmp_state}" "${state}"
+
+log "Done. Triggered ${ran} time(s)."
