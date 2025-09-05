@@ -27,6 +27,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>MACHINE</key><string>%MACHINE%</string>
+    <key>REPO_DIR</key><string>%REPO_DIR%</string>
   </dict>
 
   <key>KeepAlive</key><false/>

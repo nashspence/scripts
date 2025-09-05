@@ -22,7 +22,7 @@ main() {
   # --- Config ----------------------------------------------------------------
   local MACHINE="${MACHINE:-com.nashspence.scripts}"
 
-  local STATE_DIR="${STATE_DIR:-${0:A:h}/agent}"
+  local STATE_DIR="${STATE_DIR:-$REPO_DIR/osx/launch-agents/podman-machine/agent}"
   local HOLDS_DIR="$STATE_DIR/holds"          # one file per live connection (by PID)
   local STOP_GRACE_SECS="${STOP_GRACE_SECS:-1}"
   local QUIESCE_MS="${QUIESCE_MS:-1500}"      # watch briefly for back-to-back clients

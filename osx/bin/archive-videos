@@ -15,12 +15,6 @@ main() {
   set -u
   set -o pipefail
 
-  # --- config / deps ---
-  local shortcuts="$HOME/.config/podman-scripts/shortcuts_path.zsh"
-  [[ -r "$shortcuts" ]] || die "Missing shortcuts file: $shortcuts"
-
-  . "$shortcuts"
-
   local input="${1:-}"
   [[ -n "$input" ]] || die "No input file path provided"
   [[ -r "$input" ]] || die "Input not readable: $input"
