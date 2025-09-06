@@ -175,7 +175,9 @@ def _round_half_up(x: float) -> int:
     return int(math.floor(x + 0.5))
 
 
-def quotas_like_zsh(durations_sec: list[float], slot_count: int, min_seconds: int) -> list[int]:
+def quotas_like_zsh(
+    durations_sec: list[float], slot_count: int, min_seconds: int
+) -> list[int]:
     """
     Match the zsh planning:
       q_i = round( (d_i / sum_d) * slot_count )  [round half up]
@@ -631,9 +633,17 @@ def main():
         save_manifest(args.autoedit_dir, m)
 
     # 3) Final concat (only if not already done or file missing)
-    out_path = os.path.join(
-        args.autoedit_dir, f"{datetime.now().strftime('%Y-%m-%d')} auto-edit.mkv"
+    files_span = m["plan"]["files"]
+    start_epoch = min(f["base_epoch"] for f in files_span)
+    last_file = max(files_span, key=lambda f: f["base_epoch"])
+    end_epoch = int(last_file["base_epoch"] + math.ceil(last_file["duration"]))
+    start_dt = datetime.fromtimestamp(start_epoch)
+    end_dt = datetime.fromtimestamp(end_epoch)
+    span_name = (
+        f"{start_dt.strftime('%Y-%m-%dT%H-%M-%S')}--"
+        f"{end_dt.strftime('%Y-%m-%dT%H-%M-%S')}"
     )
+    out_path = os.path.join(args.autoedit_dir, f"{span_name} auto-edit.mkv")
     m["final"]["out_path"] = out_path
     save_manifest(args.autoedit_dir, m)
 
