@@ -22,8 +22,12 @@ def now_utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+VERBOSE = False
+
+
 def log(msg: str):  # timestamped progress logs
-    eprint(f"[{now_utc_iso()}] [autoedit] {msg}")
+    if VERBOSE:
+        eprint(f"[{now_utc_iso()}] {msg}")
 
 
 VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".m4v", ".MP4", ".MKV", ".MOV", ".M4V")
@@ -360,7 +364,16 @@ def main():
         action="store_true",
         help="Print full ffmpeg/ffprobe commands before running.",
     )
+    ap.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable detailed logging for debugging.",
+    )
     args = ap.parse_args()
+
+    global VERBOSE
+    VERBOSE = args.verbose or args.debug_cmds
 
     for cmd in ("ffmpeg", "ffprobe"):
         need(cmd)
