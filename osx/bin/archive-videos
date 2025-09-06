@@ -1,8 +1,8 @@
 #!/usr/bin/env zsh
 # Pipeline driver: stage -> vcrunch -> ( mkiso & qcut ) -> burniso -> wait qcut
 # Usage:
-#   pipeline.zsh /path/to/input                     # output: $PWD/$(date +%Y%m%dT%H%M%S)
-#   pipeline.zsh /path/to/input /custom/output/dir  # output: /custom/output/dir
+#   archive-videos /path/to/input                     # output: $PWD/$(date -u +%Y%m%dT%H%M%SZ)
+#   archive-videos /path/to/input /custom/output/dir  # output: /custom/output/dir
 
 set -e
 set -u
@@ -28,7 +28,7 @@ main() {
   command -v rpush      >/dev/null 2>&1 || die "rpush not found"
 
   local now out stage_out vcrunch_out mkiso_out qcut_out
-  now=$(date +%Y%m%dT%H%M%S)
+  now="$(date -u +%Y%m%dT%H%M%SZ)"
 
   # If $2 provided, use it; else default to CWD/$now
   out="${2:-$PWD/$now}"
@@ -52,7 +52,7 @@ main() {
   vcrunch -v "${stage_out}:/in"   -v "${vcrunch_out}:/out"
 
   # --- parallel steps ---
-  mkiso -v "${vcrunch_out}:/in"   -v "${mkiso_out}:/out" -- --out-file "$now.iso" &
+  mkiso -v "${vcrunch_out}:/in"   -v "${mkiso_out}:/out" -- --out-file "${now}.iso" &
   mkiso_pid=$!
   qcut  -v "${stage_out}:/in"     -v "${qcut_out}:/out" &
   qcut_pid=$!
