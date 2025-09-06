@@ -7,10 +7,17 @@ import sys
 import time
 from datetime import datetime, timezone
 
+VERBOSE = False
+
 
 # ---------- small helpers ----------
 def eprint(*a, **k):
     print(*a, **k, file=sys.stderr)
+
+
+def vlog(*a, **k):
+    if VERBOSE:
+        eprint(*a, **k)
 
 
 def utc_ts() -> str:
@@ -77,7 +84,7 @@ def resolve_out_file(out_dir: str, out_file: str) -> str:
 
 def run_genisoimage(src_dir: str, label: str, out_path: str):
     cmd = ["genisoimage", "-quiet", "-o", out_path, "-V", label, "-udf", src_dir]
-    eprint(f"+ {' '.join(cmd)}")
+    vlog(f"+ {' '.join(cmd)}")
     proc = subprocess.run(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
     )
@@ -108,7 +115,13 @@ def main():
         "If a bare filename is given, it is placed in --out-dir. "
         "Overrides auto-naming.",
     )
+    ap.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable verbose logging."
+    )
     args = ap.parse_args()
+
+    global VERBOSE
+    VERBOSE = args.verbose
 
     start = time.time()
     if not os.path.isdir(args.src_dir):
@@ -126,10 +139,10 @@ def main():
         out_path = resolve_out_path(args.out_dir, label)
 
     n_files, n_bytes = count_files_bytes(args.src_dir)
-    eprint("[mkiso] Start")
-    eprint(f"[mkiso] Source: {args.src_dir}  ({n_files} files, {fmt_bytes(n_bytes)})")
-    eprint(f"[mkiso] Label:  {label}")
-    eprint(f"[mkiso] Output: {out_path}")
+    vlog("start")
+    vlog(f"src={args.src_dir} files={n_files} bytes={fmt_bytes(n_bytes)}")
+    vlog(f"label={label}")
+    vlog(f"out={out_path}")
 
     # Build ISO directly from src_dir
     run_genisoimage(args.src_dir, label, out_path)
@@ -141,8 +154,7 @@ def main():
     except OSError:
         pass
     dur = time.time() - start
-    eprint(f"[mkiso] Success: wrote {fmt_bytes(size)} in {dur:.1f}s")
-    eprint(f"[mkiso] ISO label: {label}")
+    eprint(f"{out_path} {fmt_bytes(size)} {dur:.1f}s label={label}")
 
 
 if __name__ == "__main__":
