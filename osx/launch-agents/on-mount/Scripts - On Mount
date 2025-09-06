@@ -6,7 +6,7 @@ onmount_dir="${HOME}/On Mount"
 
 base="$(cd "$(dirname "$0")" && pwd)"
 state="${base}/state.tsv"            # holds: <VolumeName>\t<DeviceID>
-tmp_state="${state}.$$.new"          # temp file for atomic rewrite
+tmp_state="${state}.new"             # temp file for atomic rewrite
 lock="${HOME}/Library/Caches/com.nashspence.scripts.on-mount.lock"
 
 # --- minimal logging helpers ---
@@ -16,15 +16,17 @@ warn()  { print -u2 -r -- "[$(ts)] $*"; }
 
 umask 077
 mkdir -p "${base}"
-: >| "${tmp_state}"
-: >| "${state}" 2>/dev/null || true   # ensure it exists
+[ -e "${state}" ] || : >| "${state}"  # ensure it exists without truncating
 
 # single-run lock
 if ! mkdir "${lock}" 2>/dev/null; then
   warn "Another instance appears to be running (lock: ${lock}). Exiting."
   exit 0
 fi
-trap 'rmdir "${lock}"' EXIT
+trap 'rm -f "${tmp_state}"; rmdir "${lock}"' EXIT
+
+rm -f "${state}"*.new 2>/dev/null
+: >| "${tmp_state}"
 
 log "Starting on-mount scan (base=${base})"
 
