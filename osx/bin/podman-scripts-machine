@@ -1,7 +1,8 @@
 #!/usr/bin/env zsh
-# podman-script-machine — run Podman subcommands against a machine; builds and
-# runs Containerfiles for the `run` subcommand. Pipe-friendly. Logs (stderr
-# only): (1) waiting for connection, (2) chosen image + why, (3) exact command.
+# podman-scripts-machine — run Podman subcommands against a machine; builds and
+# runs Containerfiles for the `run` subcommand. Pipe-friendly. By default, only
+# the full Podman command is logged to stderr; pass `--verbose` for detailed
+# debug logging including connection waits and image selection.
 
 set -e
 set -u
@@ -14,9 +15,19 @@ main() {
   set -u
   set -o pipefail
 
-  # ----- minimal logging (stderr only) ---------------------------------------
-  log()  { print -u2 -- "$*"; }
-  fail() { print -u2 -- "ERROR: $*"; }
+  local verbose=0
+  while (( $# )); do
+    case "$1" in
+      --verbose) verbose=1; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+
+  # ----- logging (stderr only) ----------------------------------------------
+  log()   { (( verbose )) && print -u2 -- "$*"; }
+  cmdlog(){ print -u2 -- "$*"; }
+  fail()  { print -u2 -- "ERROR: $*"; }
 
   # ----- deps ----------------------------------------------------------------
   for c in podman awk date; do
@@ -67,7 +78,7 @@ main() {
     if [[ -z "$file" && -z "$release_yaml" ]]; then
       local -a fullcmd
       fullcmd=(podman --connection "$DR_MACHINE" run "${raw_args[@]}")
-      log "${(j: :)${(q)fullcmd}}"
+      cmdlog "${(j: :)${(q)fullcmd}}"
       local rc=0
       set +e
       "${fullcmd[@]}"; rc=$?
@@ -155,7 +166,7 @@ main() {
   if [[ "$subcmd" != run ]]; then
     local -a fullcmd
     fullcmd=(podman --connection "$DR_MACHINE" "$subcmd" "$@")
-    log "${(j: :)${(q)fullcmd}}"
+    cmdlog "${(j: :)${(q)fullcmd}}"
     local rc=0
     set +e
     "${fullcmd[@]}"; rc=$?
@@ -260,7 +271,7 @@ main() {
 
   # Compose exact command and log it (3)
   fullcmd=(podman --connection "$DR_MACHINE" run --rm "${run_flags[@]}" "${env_flags[@]}" "${run_extra[@]}" "$image" "${cmd_args[@]}")
-  log "${(j: :)${(q)fullcmd}}"
+  cmdlog "${(j: :)${(q)fullcmd}}"
 
   # ----- execute with signal translation (INT then KILL) --------------------
   setopt TRAPS_ASYNC

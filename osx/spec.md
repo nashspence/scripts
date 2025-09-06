@@ -32,27 +32,31 @@
 * Then the image is written to media with hdiutil
 
 ## Scenario: build and run a Containerfile
-* When I run podman-script-machine with "run", "-f", and a directory path
+* When I run podman-scripts-machine with "run", "-f", and a directory path
 * Then the container builds and runs without affecting the default machine
 
 ## Scenario: run a released container image
 * Given a release.yaml describing a released image
-* When I run podman-script-machine with "run", "-f" and a directory path and "-r" and the release.yaml path
+* When I run podman-scripts-machine with "run", "-f" and a directory path and "-r" and the release.yaml path
 * Then the released container runs without building
 
 ## Scenario: run a released container image without a Containerfile
 * Given a release.yaml describing a released image
-* When I run podman-script-machine with "run", "-r" and a release.yaml path
+* When I run podman-scripts-machine with "run", "-r" and a release.yaml path
 * Then the released container runs without building
 
 ## Scenario: run an existing image without build options
-* When I run podman-script-machine with "run" and an image name
+* When I run podman-scripts-machine with "run" and an image name
 * And I pass a command to execute
 * Then Podman runs the image on the machine without "--file" or "--release"
 
 ## Scenario: run another Podman subcommand
-* When I run podman-script-machine with "secret" and "ls"
+* When I run podman-scripts-machine with "secret" and "ls"
 * Then Podman lists secrets from the machine
+
+## Scenario: enable verbose logging
+* When I run podman-scripts-machine with "--verbose", "run" and an image name
+* Then detailed debug logs are printed
 
 ## Scenario: push directory contents excluding dot files
 * When I run rpush
