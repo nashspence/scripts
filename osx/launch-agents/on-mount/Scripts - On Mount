@@ -5,7 +5,8 @@ marker=".com.nashspence.scripts.on-mount.id"
 onmount_dir="${HOME}/On Mount"
 
 base="$(cd "$(dirname "$0")" && pwd)"
-state="${base}/state.tsv"            # holds: <VolumeName>\t<DeviceID>
+data="${base}/data"
+state="${data}/state.tsv"            # holds: <VolumeName>\t<DeviceID>
 tmp_state="${state}.new"             # temp file for atomic rewrite
 lock="${HOME}/Library/Caches/com.nashspence.scripts.on-mount.lock"
 
@@ -15,7 +16,7 @@ log()   { print -r -- "[$(ts)] $*"; }
 warn()  { print -u2 -r -- "[$(ts)] $*"; }
 
 umask 077
-mkdir -p "${base}"
+mkdir -p "${data}"
 [ -e "${state}" ] || : >| "${state}"  # ensure it exists without truncating
 
 # single-run lock
