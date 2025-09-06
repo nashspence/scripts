@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
 # Burn an ISO on macOS using hdiutil.
-# Defaults: -verbose -speed max -verifyburn
+# Defaults: -speed max -verifyburn
 
 set -e
 set -u
@@ -24,7 +24,7 @@ main() {
   local VERIFY=1      # add -verifyburn
   local TEST=0
   local EJECT=""      # "", "eject", or "noeject"
-  local VERBOSE=1     # add -verbose
+  local VERBOSE=0     # quiet by default; add -verbose if set
   local DRYRUN=0
 
   # ---- parsing ----
@@ -39,7 +39,6 @@ main() {
       -t|--test|--testburn)      TEST=1 ;;
       -e|--eject)                EJECT="eject" ;;
       -k|--no-eject|--noeject)   EJECT="noeject" ;;
-      -q|--quiet)                VERBOSE=0 ;;
       -v|--verbose)              VERBOSE=1 ;;
       --dry-run|--dryrun)        DRYRUN=1 ;;
       --) shift; break ;;
@@ -51,6 +50,8 @@ main() {
     esac
     shift
   done
+
+  (( VERBOSE )) && set -x
 
   # Any remaining positional can be ISO if still unset
   if [[ -z "$ISO" && $# -gt 0 ]]; then
@@ -81,10 +82,14 @@ main() {
   cmd+=( "$ISO" )
 
   # ---- run ----
-  printf '+ ' ; printf '%q ' "${cmd[@]}" ; printf '\n'
+  if (( VERBOSE || DRYRUN )); then
+    local qcmd
+    printf -v qcmd '%q ' "${cmd[@]}"
+    print -u2 -- "+ $qcmd"
+  fi
   (( DRYRUN )) && exit 0
 
-  "${cmd[@]}"
+  "${cmd[@]}" >&2
 }
 
 print_usage() {
@@ -102,8 +107,7 @@ Options (defaults shown in brackets):
   -t, --test              Test/simulate the burn (-testburn). [off]
   -e, --eject             Eject media after burn (-eject). [default behavior]
   -k, --no-eject          Do not eject after burn (-noeject).
-  -q, --quiet             Less output (omit -verbose).
-  -v, --verbose           More output (-verbose). [on]
+  -v, --verbose           Verbose logging; pass -verbose to hdiutil.
       --dry-run           Print the command that would run, then exit.
   -h, --help              Show this help and exit.
 
@@ -114,7 +118,7 @@ Examples:
   burniso --no-verify --dry-run ~/Downloads/large.iso
 
 Notes:
-- Defaults match: hdiutil burn -verbose -speed max -verifyburn <ISO>
+- Defaults match: hdiutil burn -speed max -verifyburn <ISO>
 - Use --speed <integer> to cap speed if you get flaky burns.
 EOF
 }
