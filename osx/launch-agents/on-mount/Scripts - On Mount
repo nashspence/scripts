@@ -1,93 +1,96 @@
 #!/bin/zsh
+emulate -L zsh
 set -eu
+set -o pipefail
+setopt EXTENDED_GLOB NULL_GLOB
 
 marker=".com.nashspence.scripts.on-mount.id"
 onmount_dir="${HOME}/On Mount"
 
 base="$(cd "$(dirname "$0")" && pwd)"
 data="${base}/data"
-state="${data}/state.tsv"            # holds: <VolumeName>\t<DeviceID>
-tmp_state="${state}.new"             # temp file for atomic rewrite
+state="${data}/state.tsv"
+tmp_state="${state}.new"
 lock="${HOME}/Library/Caches/com.nashspence.scripts.on-mount.lock"
 
-# --- minimal logging helpers ---
 ts()    { /bin/date '+%Y-%m-%d %H:%M:%S%z'; }
 log()   { print -r -- "[$(ts)] $*"; }
 warn()  { print -u2 -r -- "[$(ts)] $*"; }
 
 umask 077
 mkdir -p "${data}"
-[ -e "${state}" ] || : >| "${state}"  # ensure it exists without truncating
+[ -e "${state}" ] || : >| "${state}"
 
-# single-run lock
 if ! mkdir "${lock}" 2>/dev/null; then
   warn "Another instance appears to be running (lock: ${lock}). Exiting."
   exit 0
 fi
-trap 'rm -f "${tmp_state}"; rmdir "${lock}"' EXIT
+trap 'rm -f "${tmp_state}" 2>/dev/null || true; rmdir "${lock}" 2>/dev/null || true' EXIT
 
-rm -f "${state}"*.new 2>/dev/null
+rm -f -- ${state}*.new(N) 2>/dev/null || true
 : >| "${tmp_state}"
 
+# Small settle so /Volumes reflects mounts/unmounts when triggered by WatchPaths
+sleep 0.2
+
 log "Starting on-mount scan (base=${base})"
+[[ -d "${onmount_dir}" ]] || { warn "Action directory not found: ${onmount_dir}. Nothing to execute."; exit 0; }
 
-# If the action directory is missing, nothing to do (but let the user know)
-if [[ ! -d "${onmount_dir}" ]]; then
-  warn "Action directory not found: ${onmount_dir}. Nothing to execute."
-  exit 0
-fi
-
-# helper to fetch previous device id for a volume from state
 get_prev_devid() {
   local volname="$1"
-  /usr/bin/grep -F -m1 -e "^${volname}\t" "${state}" 2>/dev/null | /usr/bin/cut -f2- || true
+  /usr/bin/awk -F '\t' -v v="$volname" '$1==v {print $2; exit}' "${state}" 2>/dev/null || true
+}
+
+get_devid() {
+  local vol="$1" id=""
+  id=$(/usr/sbin/diskutil info -plist "$vol" 2>/dev/null | /usr/bin/plutil -extract VolumeUUID raw -o - - 2>/dev/null || true)
+  [[ -n $id ]] || id=$(/usr/sbin/diskutil info -plist "$vol" 2>/dev/null | /usr/bin/plutil -extract APFSVolumeUUID raw -o - - 2>/dev/null || true)
+  [[ -n $id ]] || id=$(/usr/bin/stat -f '%d' "$vol" 2>/dev/null || true)
+  print -r -- "$id"
 }
 
 typeset -i ran=0
+typeset -a actions
 
-for vol in /Volumes/*(N/); do
+# PASS 1: compute new state (ONLY currently mounted + marked volumes)
+for vol in /Volumes/*(/N); do
   [[ -d $vol ]] || continue
-
   volname=${vol:t}
   file="${vol%/}/${marker}"
-  [[ -f $file ]] || continue
+  [[ -r $file ]] || continue
 
-  # current mount's device id; changes across unmount/remount
-  devid=$(/usr/bin/stat -f %d -- "$vol" 2>/dev/null || echo "")
+  devid="$(get_devid "$vol")"
   [[ -n $devid ]] || { warn "Could not read device id for ${volname}"; continue; }
 
   prev="$(get_prev_devid "$volname")"
 
-  if [[ "$prev" != "$devid" ]]; then
-    # Read the first line of the marker file to get the program name
-    local name=""
-    IFS= read -r name < "$file" || name=""
-    # Strip any CR (in case of CRLF files) and force to basename to avoid paths
-    name="${name//$'\r'/}"
-    name="${name:t}"
-
-    if [[ -z "${name}" ]]; then
-      warn "Marker on ${volname} is empty; skipping."
-    else
-      prog="${onmount_dir%/}/${name}"
-      if [[ -f "${prog}" && -x "${prog}" ]]; then
-        log "Executing \"${prog}\" for \"${volname}\""
-        "${prog}" "$vol" || {
-          sc=$?
-          warn "Executable exited with status ${sc} for \"${volname}\""
-        }
-        (( ran++ ))
-      else
-        warn "No executable named \"${name}\" in ${onmount_dir} (missing or not executable); skipping ${volname}."
-      fi
-    fi
-  fi
-
-  # Keep only currently mounted volumes in the new state
+  # record current state
   /usr/bin/printf '%s\t%s\n' "$volname" "$devid" >> "${tmp_state}"
+
+  # queue action if changed and executable exists
+  name=""
+  IFS= read -r name < "$file" || name=""
+  name="${name//$'\r'/}"
+  name="${name:t}"
+  if [[ "$prev" != "$devid" && -n "$name" ]]; then
+    prog="${onmount_dir%/}/${name}"
+    [[ -f "${prog}" && -x "${prog}" ]] && actions+=("${prog}" "$vol" "$volname") \
+      || warn "No executable named \"${name}\" in ${onmount_dir} (missing or not executable); skipping ${volname}."
+  fi
 done
 
-# Atomically update state (also prunes stale entries)
+# ALWAYS commit the new snapshot (prunes stale entries on unmount)
 mv -f "${tmp_state}" "${state}"
+log "State updated: $(/usr/bin/wc -l < "${state}" 2>/dev/null | xargs) entries."
+
+# PASS 2: run queued actions
+integer i=1
+while (( i <= ${#actions} )); do
+  prog="${actions[i]}" ; vol="${actions[i+1]}" ; volname="${actions[i+2]}"
+  log "Executing \"${prog}\" for \"${volname}\""
+  "${prog}" "$vol" || { sc=$?; warn "Executable exited with status ${sc} for \"${volname}\""; }
+  (( ran++ ))
+  (( i += 3 ))
+done
 
 log "Done. Triggered ${ran} time(s)."

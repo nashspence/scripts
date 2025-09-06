@@ -1,5 +1,5 @@
 # single source of truth for this service
 image: docker.io/nashspence/scripts-vcrunch
-version: v0.1.4
+version: v0.1.5
 labels:
   org.opencontainers.image.title: vcrunch

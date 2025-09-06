@@ -1,5 +1,5 @@
 # single source of truth for this service
 image: docker.io/nashspence/scripts-stage
-version: v0.1.2
+version: v0.1.3
 labels:
   org.opencontainers.image.title: stage
