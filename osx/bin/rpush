@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Generic Finder-backed network copy/move for macOS (BSD-ish zsh).
-# Usage: rpush <copy|move> <SRC_PATH> <URL>
+# Usage: rpush [--ignore-dotfiles] <copy|move> <SRC_PATH> <URL>
 # URL schemes: smb://  nfs://  http(s):// (WebDAV)
 
 set -e
@@ -13,8 +13,14 @@ main() {
   set -u
   set -o pipefail
 
+  local ignore_dotfiles=0
+  if [[ "${1:-}" == --ignore-dotfiles ]]; then
+    ignore_dotfiles=1
+    shift
+  fi
+
   if (( $# != 3 )); then
-    print -u2 "Usage: $0 <copy|move> <SRC_PATH> <URL>"
+    print -u2 "Usage: $0 [--ignore-dotfiles] <copy|move> <SRC_PATH> <URL>"
     return 64
   fi
 
@@ -42,6 +48,11 @@ main() {
   fi
   if (( is_file && src_has_trailing_slash )); then
     print -u2 "Trailing slash not allowed on file paths: $SRC"
+    return 64
+  fi
+
+  if (( ignore_dotfiles )) && (( ! src_has_trailing_slash || ! is_dir )); then
+    print -u2 "--ignore-dotfiles requires a directory path ending with '/': $SRC"
     return 64
   fi
 
@@ -134,6 +145,7 @@ main() {
     *)             rsync_base=( rsync -aE --progress --human-readable ) ;;
   esac
   [[ "$op" == move ]] && rsync_base+=( --remove-source-files )
+  (( ignore_dotfiles )) && rsync_base+=( '--exclude=.*' )
 
   # ---- Transfer (destination always ends with '/')
   if (( is_file )); then

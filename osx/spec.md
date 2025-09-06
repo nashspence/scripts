@@ -53,3 +53,11 @@
 ## Scenario: run another Podman subcommand
 * When I run podman-script-machine with "secret" and "ls"
 * Then Podman lists secrets from the machine
+
+## Scenario: push directory contents excluding dot files
+* When I run rpush
+* And I pass "--ignore-dotfiles"
+* And I pass "copy"
+* And I pass a directory path ending with "/"
+* And I pass a URL
+* Then dot files are not copied to the destination
