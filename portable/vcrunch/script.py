@@ -179,6 +179,24 @@ def all_videos_done(manifest: dict, out_dir: str) -> bool:
             return False
     return saw_video
 
+def log_system_info():
+    """Log basic CPU / cgroup info for debugging container limits."""
+    def run_cmd(cmd: str) -> str:
+        try:
+            return subprocess.check_output(cmd, shell=True, text=True).strip()
+        except Exception as e:
+            return f"ERR({e})"
+
+    eprint("=== system info ===")
+    eprint("nproc:", run_cmd("nproc"))
+    eprint("cpuinfo:", run_cmd("grep -c ^processor /proc/cpuinfo"))
+    eprint("cpu.max:", run_cmd("cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo N/A"))
+    eprint("cpuset.effective:", run_cmd("cat /sys/fs/cgroup/cpuset.cpus.effective 2>/dev/null || echo N/A"))
+    # use this process’s PID instead of $$ to be correct in Python
+    pid = os.getpid()
+    eprint("taskset:", run_cmd(f"taskset -pc {pid}"))
+    eprint("===================")
+
 # --- main ---
 def main():
     ap = argparse.ArgumentParser(
@@ -213,6 +231,9 @@ def main():
     )
 
     args = ap.parse_args()
+
+    # Log CPU/cgroup info early
+    log_system_info()
 
     # Resolve media preset (if any), then apply explicit overrides
     canon_media = _normalize_media(args.media)
