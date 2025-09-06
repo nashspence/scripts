@@ -95,7 +95,7 @@ main() {
     elif [[ -x /usr/local/bin/brew ]]; then
       eval "$(/usr/local/bin/brew shellenv)"
     fi
-    
+
     rehash_safely
     command -v brew >/dev/null 2>&1 || die "brew installation appears to have failed"
   }
@@ -134,8 +134,8 @@ main() {
   }
 
   typeset -A LAUNCH_AGENT_RESOURCES=(
-    [com.nashspence.scripts.on-mount]="state.tsv"
-    [com.nashspence.scripts.podman-machine]="agent"
+    [com.nashspence.scripts.on-mount]="data"
+    [com.nashspence.scripts.podman-machine]="data"
   )
 
   install_launch_agent() {

@@ -32,6 +32,6 @@
 
   <key>KeepAlive</key><false/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>%REPO_DIR%/osx/launch-agents/podman-machine/stdout.log</string>
-  <key>StandardErrorPath</key><string>%REPO_DIR%/osx/launch-agents/podman-machine/stderr.log</string>
+  <key>StandardOutPath</key><string>%REPO_DIR%/osx/launch-agents/podman-machine/data/stdout.log</string>
+  <key>StandardErrorPath</key><string>%REPO_DIR%/osx/launch-agents/podman-machine/data/stderr.log</string>
 </dict></plist>

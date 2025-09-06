@@ -5,7 +5,3 @@
 /logs
 node_modules/
 .DS_Store
-/osx/launch-agents/on-mount/state.tsv*
-/osx/launch-agents/on-mount/*.log
-/osx/launch-agents/podman-machine/agent/
-/osx/launch-agents/podman-machine/*.log
