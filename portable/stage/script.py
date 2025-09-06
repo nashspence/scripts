@@ -13,6 +13,7 @@ from typing import List, Optional, Tuple
 
 DEFAULT_MANIFEST = ".job.json"
 HASH_BUF = 8 * 1024 * 1024  # 8MB
+VERBOSE = False
 
 
 # ---------- tiny utils ----------
@@ -20,12 +21,17 @@ def eprint(*a, **k):
     print(*a, **k, file=sys.stderr)
 
 
+def debug(msg: str):
+    if VERBOSE:
+        eprint(msg)
+
+
 def log_created(path: str):
-    eprint(f"created {path}")
+    debug(f"created {path}")
 
 
 def log_deleted(path: str):
-    eprint(f"deleted {path}")
+    debug(f"deleted {path}")
 
 
 def warn(msg: str):
@@ -287,8 +293,15 @@ def main():
     ap.add_argument(
         "--dry-run", action="store_true", help="List planned actions; make no changes."
     )
+    ap.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging to stderr.",
+    )
 
     args = ap.parse_args()
+    global VERBOSE
+    VERBOSE = args.verbose
 
     os.makedirs(args.dest_dir, exist_ok=True)
     manifest_path = os.path.join(args.dest_dir, args.manifest_name)
@@ -368,6 +381,7 @@ def main():
             algo=args.hash,
             src_path_for_hash=src,
         ):
+            debug(f"verified existing {dst}")
             if rec.get("status") != "done":
                 rec.update({"status": "done", "finished_at": now_utc_iso()})
                 manifest["items"][key] = rec
@@ -377,6 +391,7 @@ def main():
             continue
 
         # Copy with infinite retries + verify
+        debug(f"copy {src} -> {dst}")
         copy_atomic_infinite_retry(
             src, dst, use_hash=not args.skip_hash, algo=args.hash
         )
