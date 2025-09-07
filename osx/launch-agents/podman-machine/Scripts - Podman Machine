@@ -19,14 +19,22 @@ main() {
   # --- deps ------------------------------------------------------------------
   command -v podman >/dev/null 2>&1 || { print -u2 -- "podman not found"; exit 127; }
 
-  # --- Config ----------------------------------------------------------------
+  # --- Config (globals needed by traps) -------------------------------------
   local MACHINE="${MACHINE:-com.nashspence.scripts}"
 
-  local STATE_DIR="${STATE_DIR:-$REPO_DIR/osx/launch-agents/podman-machine/data}"
-  local HOLDS_DIR="$STATE_DIR/holds"          # one file per live connection (by PID)
-  local STOP_GRACE_SECS="${STOP_GRACE_SECS:-1}"
-  local QUIESCE_MS="${QUIESCE_MS:-1500}"      # watch briefly for back-to-back clients
-  local WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-90}"
+  # Guard against REPO_DIR being unset under `set -u`
+  local _repo_root="${REPO_DIR:-$HOME}"
+
+  typeset -g STATE_DIR
+  typeset -g HOLDS_DIR
+  typeset -g HOLD_FILE
+
+  STATE_DIR="${STATE_DIR:-${_repo_root}/osx/launch-agents/podman-machine/data}"
+  HOLDS_DIR="${HOLDS_DIR:-$STATE_DIR/holds}"
+
+  integer STOP_GRACE_SECS="${STOP_GRACE_SECS:-1}"
+  integer QUIESCE_MS="${QUIESCE_MS:-1500}"      # watch briefly for back-to-back clients
+  integer WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-90}"
 
   log() { print -r -- "$(date '+%F %T') podman-machine-agent[$$]: $*"; }
 
@@ -37,10 +45,10 @@ main() {
       pid="${f:t}"
       # if filename isn't a PID, or PID is dead, remove it
       if [[ "$pid" != <-> ]]; then
-        rm -f "$f" 2>/dev/null || true
+        rm -f -- "$f" 2>/dev/null || true
         continue
       fi
-      kill -0 "$pid" 2>/dev/null || rm -f "$f" 2>/dev/null || true
+      kill -0 "$pid" 2>/dev/null || rm -f -- "$f" 2>/dev/null || true
     done
   }
 
@@ -67,12 +75,20 @@ main() {
   }
 
   # --- Main ------------------------------------------------------------------
-  mkdir -p "$HOLDS_DIR"
+  mkdir -p -- "$HOLDS_DIR"
   gc_holds
 
-  # Register a hold and remove it on exit
-  print -r -- "$$" > "$HOLDS_DIR/$$"
-  cleanup_hold() { rm -f "$HOLDS_DIR/$$" 2>/dev/null || true; }
+  # Register a hold file (global path so traps can see it after `main` returns)
+  HOLD_FILE="$HOLDS_DIR/$$"
+  print -r -- "$$" > "$HOLD_FILE"
+
+  cleanup_hold() {
+    emulate -L zsh
+    # Be defensive in traps; don't let nounset/errexit kill cleanup
+    set +u +e
+    [[ -n "${HOLD_FILE:-}" ]] && rm -f -- "$HOLD_FILE" 2>/dev/null
+    return 0
+  }
   trap cleanup_hold EXIT TERM HUP INT
 
   log "connection accepted; ensuring machine '$MACHINE' is running"
