@@ -1,29 +1,24 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
+
 import argparse
 import json
+import logging
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
+import hashlib
 from datetime import datetime, timezone
 from typing import List, Optional
 
-# --- constants ---
-VIDEO_EXTS = {
-    ".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".mpg", ".mpeg", ".wmv", ".flv",
-}
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".mpg", ".mpeg", ".wmv", ".flv"}
 OUT_EXT = ".mkv"
 DEFAULT_SUFFIX = "_vcrunch_av1"
 MANIFEST_NAME = ".job.json"
-MAX_SVT_KBPS = 100_000  # libsvtav1 maximum accepted target bitrate
-
-# Default BD-R single layer behavior when no media preset/overrides supplied
-DEFAULT_TARGET_SIZE = "23.30G"   # ~23.31 GiB free on 25 GB BD-R
-DEFAULT_SAFETY_OVERHEAD = 0.012  # 1.2% + fixed 20 MB reserve
-
-# Media presets (GiB-ish targets, with conservative overheads)
+MAX_SVT_KBPS = 100_000
+DEFAULT_TARGET_SIZE = "23.30G"
+DEFAULT_SAFETY_OVERHEAD = 0.012
 MEDIA_PRESETS = {
     "cdr700":  {"target_size": "650M",   "safety_overhead": 0.020},
     "dvd5":    {"target_size": "4.36G",  "safety_overhead": 0.020},
@@ -35,8 +30,6 @@ MEDIA_PRESETS = {
     "bdr100":  {"target_size": "93.10G", "safety_overhead": 0.012},
     "bdr128":  {"target_size": "119.10G","safety_overhead": 0.012},
 }
-
-# Synonym/alias normalization for convenience
 _MEDIA_ALIASES = {
     "cd700": "cdr700", "cdr": "cdr700", "cd-r": "cdr700", "cd-r700": "cdr700",
     "dvd-5": "dvd5", "dvd+5": "dvd5", "dvd5": "dvd5",
@@ -54,14 +47,9 @@ def _normalize_media(s: Optional[str]) -> Optional[str]:
         return None
     key = s.strip().lower().replace("_", "").replace(" ", "")
     key = key.replace("gb", "").replace("gib", "").replace("-", "")
-    # try exact first, then alias table
     if key in MEDIA_PRESETS:
         return key
     return _MEDIA_ALIASES.get(key)
-
-# --- tiny utils ---
-def eprint(*a, **k):
-    print(*a, **k, file=sys.stderr)
 
 def parse_size(s: str) -> int:
     s = s.strip().lower().replace("ib", "")
@@ -103,12 +91,6 @@ def is_valid_media(path: str) -> bool:
         return ffprobe_duration(path) > 0.0
     except Exception:
         return False
-
-def run(cmd: list):
-    eprint("+", " ".join(map(str, cmd)))
-    p = subprocess.run(cmd)
-    if p.returncode != 0:
-        raise SystemExit(p.returncode)
 
 def collect_all_files(paths: List[str], pattern: Optional[str]) -> List[str]:
     files = []
@@ -164,8 +146,6 @@ def src_key(src_abs: str, st: os.stat_result) -> str:
     return f"{src_abs}|{st.st_size}|{int(st.st_mtime)}"
 
 def all_videos_done(manifest: dict, out_dir: str) -> bool:
-    """Success = every video record is status=done and output file exists & is valid.
-    Also requires at least one video record."""
     saw_video = False
     for rec in manifest.get("items", {}).values():
         if rec.get("type") != "video":
@@ -179,114 +159,73 @@ def all_videos_done(manifest: dict, out_dir: str) -> bool:
             return False
     return saw_video
 
-def log_system_info():
-    """Log basic CPU / cgroup info for debugging container limits."""
-    def run_cmd(cmd: str) -> str:
+def _short_hash(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:8]
+
+def copy_assets(assets: List[str], out_dir: str):
+    for src in assets:
+        dest = os.path.join(out_dir, os.path.basename(src))
+        if os.path.abspath(src) == os.path.abspath(dest):
+            continue
         try:
-            return subprocess.check_output(cmd, shell=True, text=True).strip()
+            shutil.copy2(src, dest)
+            logging.info("copied asset: %s -> %s", src, dest)
         except Exception as e:
-            return f"ERR({e})"
+            logging.error("failed to copy asset %s -> %s: %s", src, dest, e)
 
-    eprint("=== system info ===")
-    eprint("nproc:", run_cmd("nproc"))
-    eprint("cpuinfo:", run_cmd("grep -c ^processor /proc/cpuinfo"))
-    eprint("cpu.max:", run_cmd("cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo N/A"))
-    eprint("cpuset.effective:", run_cmd("cat /sys/fs/cgroup/cpuset.cpus.effective 2>/dev/null || echo N/A"))
-    # use this process’s PID instead of $$ to be correct in Python
-    pid = os.getpid()
-    eprint("taskset:", run_cmd(f"taskset -pc {pid}"))
-    eprint("===================")
-
-# --- main ---
 def main():
-    ap = argparse.ArgumentParser(
-        description="Encode videos (SVT-AV1 defaults) with resume manifest. "
-                    "Non-video files are NOT copied, but their sizes are accounted from inputs."
-    )
-    # Inputs
+    ap = argparse.ArgumentParser(description="Encode videos (SVT-AV1) with resume manifest. Non-video files are copied to the output directory.")
     ap.add_argument("--input", action="append", default=["/in"], help="File or directory (repeatable).")
     ap.add_argument("--paths-from", help="Newline-delimited paths, or '-' for stdin.")
     ap.add_argument("--pattern", default=None, help="Optional glob to filter inputs (e.g., '*').")
-
-    # Media/preset + targeting
-    ap.add_argument(
-        "--media",
-        help=("Optical media preset (sets target size + safety overhead). "
-              "Choices: cdr700, dvd5, dvd9, dvd10, dvd18, bdr25, bdr50, bdr100, bdr128. "
-              "Synonyms like dvd-9, bd50, bdxl128 are accepted.")
-    )
-    # If user supplies explicit target/overhead, they override the preset
+    ap.add_argument("--media", help="Optical media preset. Choices: cdr700, dvd5, dvd9, dvd10, dvd18, bdr25, bdr50, bdr100, bdr128.")
     ap.add_argument("--target-size", default=None, help="Total target size (e.g., 23.30G, 7.95G, 650M).")
     ap.add_argument("--audio-bitrate", default="128k", help="Per-title audio bitrate (e.g., 128k).")
     ap.add_argument("--safety-overhead", type=float, default=None, help="Reserve fraction for mux/fs overhead.")
-
-    # Output dir + manifest
     ap.add_argument("--output-dir", default="/out", help="Output directory.")
     ap.add_argument("--manifest-name", default=MANIFEST_NAME, help="Manifest filename under output dir.")
     ap.add_argument("--name-suffix", default=DEFAULT_SUFFIX, help="Suffix before extension for encoded files.")
-    ap.add_argument(
-        "--move-if-fit",
-        action="store_true",
-        help="Move files instead of copying when inputs fit within target size without re-encoding.",
-    )
-
+    ap.add_argument("--move-if-fit", action="store_true", help="Move files instead of copying when inputs fit within target size without re-encoding.")
+    ap.add_argument("--stage-dir", default="/work", help="Local work dir inside the container; inputs are staged here before encoding.")
+    ap.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (-v, -vv).")
     args = ap.parse_args()
 
-    # Log CPU/cgroup info early
-    log_system_info()
+    level = logging.WARNING if args.verbose == 0 else (logging.INFO if args.verbose == 1 else logging.DEBUG)
+    logging.basicConfig(level=level, stream=sys.stderr, format="%(levelname)s: %(message)s")
 
-    # Resolve media preset (if any), then apply explicit overrides
     canon_media = _normalize_media(args.media)
     if args.media and not canon_media:
-        eprint("ERROR: Unknown --media value:", args.media)
-        eprint("Valid options:", ", ".join(sorted(MEDIA_PRESETS.keys())))
+        logging.error("unknown --media value: %s; valid: %s", args.media, ", ".join(sorted(MEDIA_PRESETS.keys())))
         sys.exit(2)
-
     preset = MEDIA_PRESETS.get(canon_media) if canon_media else None
-
-    target_size_str = (
-        args.target_size
-        if args.target_size is not None
-        else (preset["target_size"] if preset else DEFAULT_TARGET_SIZE)
-    )
-    safety_overhead = (
-        args.safety_overhead
-        if args.safety_overhead is not None
-        else (preset["safety_overhead"] if preset else DEFAULT_SAFETY_OVERHEAD)
-    )
+    target_size_str = args.target_size if args.target_size is not None else (preset["target_size"] if preset else DEFAULT_TARGET_SIZE)
+    safety_overhead = args.safety_overhead if args.safety_overhead is not None else (preset["safety_overhead"] if preset else DEFAULT_SAFETY_OVERHEAD)
 
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.stage_dir, exist_ok=True)
     manifest_path = os.path.join(args.output_dir, args.manifest_name)
     manifest = load_manifest(manifest_path)
-
-    # --- EARLY EXIT if manifest already shows success ---
     if all_videos_done(manifest, args.output_dir):
-        eprint("=== encode_videos: already complete ===")
-        eprint("Manifest indicates all videos are done and outputs are valid. Nothing to do.")
-        eprint(f"Manifest: {manifest_path}")
+        logging.warning("already complete; manifest indicates all videos are done and outputs are valid")
+        logging.info("manifest: %s", manifest_path)
         return
 
-    # Gather inputs
     inputs = []
     if args.paths_from:
         inputs += read_paths_from(args.paths_from)
     inputs += args.input
-
     all_files = collect_all_files([p for p in inputs if p], args.pattern)
     if not all_files:
-        eprint("No input files found.")
+        logging.error("no input files found")
         sys.exit(1)
 
-    # Split
     videos = [p for p in all_files if pathlib.Path(p).suffix.lower() in VIDEO_EXTS]
     assets = [p for p in all_files if pathlib.Path(p).suffix.lower() not in VIDEO_EXTS]
 
-    eprint("=== encode_videos: start ===")
-    if canon_media:
-        eprint(f"Media preset: {canon_media}  -> target={target_size_str}, safety_overhead={safety_overhead}")
-    eprint(f"Outputs -> {args.output_dir}")
-    eprint(f"Total inputs: {len(all_files)}  (videos: {len(videos)}, assets: {len(assets)})")
-    eprint("Note: No staging or deleting will occur. Assets are only accounted for sizing; they are not copied.")
+    logging.info("media preset: %s", canon_media or "none")
+    logging.info("outputs: %s", args.output_dir)
+    logging.info("staging: %s", args.stage_dir)
+    logging.info("inputs: %d (videos=%d assets=%d)", len(all_files), len(videos), len(assets))
 
     target_bytes = parse_size(target_size_str)
     total_input_bytes = 0
@@ -297,31 +236,27 @@ def main():
             pass
 
     if total_input_bytes <= target_bytes:
-        action = "Moving" if args.move_if_fit else "Copying"
-        eprint(f"Inputs fit within target size ({total_input_bytes:,} <= {target_bytes:,}); {action.lower()} without re-encoding.")
+        action = "move" if args.move_if_fit else "copy"
+        logging.warning("inputs fit within target size; %sing without re-encoding", action)
         manifest["items"] = {}
         for src in all_files:
             st = os.stat(src)
             dest = os.path.join(args.output_dir, os.path.basename(src))
-            if args.move_if_fit:
-                shutil.move(src, dest)
-            else:
-                shutil.copy2(src, dest)
+            try:
+                if args.move_if_fit:
+                    shutil.move(src, dest)
+                else:
+                    shutil.copy2(src, dest)
+            except Exception as e:
+                logging.error("%s failed %s -> %s: %s", action, src, dest, e)
+                sys.exit(1)
             if pathlib.Path(src).suffix.lower() in VIDEO_EXTS:
                 key = src_key(os.path.abspath(src), st)
-                manifest["items"][key] = {
-                    "type": "video",
-                    "src": src,
-                    "output": os.path.basename(src),
-                    "status": "done",
-                    "finished_at": now_utc_iso(),
-                }
+                manifest["items"][key] = {"type": "video", "src": src, "output": os.path.basename(src), "status": "done", "finished_at": now_utc_iso()}
         save_manifest(manifest, manifest_path)
-        eprint("=== encode_videos: done (no re-encoding needed) ===")
-        eprint(f"Manifest retained: {manifest_path}")
+        logging.warning("done; no re-encoding needed")
         return
 
-    # Account assets directly from inputs (no copying)
     asset_bytes = 0
     for src in assets:
         try:
@@ -329,9 +264,7 @@ def main():
         except FileNotFoundError:
             pass
 
-    # Compute bitrate budget for videos
     audio_bps = kbps_to_bps(args.audio_bitrate)
-
     total_duration = 0.0
     total_audio_bytes = 0
     durations = []
@@ -343,116 +276,139 @@ def main():
 
     reserved = int(target_bytes * safety_overhead) + 20_000_000
     video_budget_bytes = target_bytes - asset_bytes - total_audio_bytes - reserved
-
     if video_budget_bytes <= 0 and videos:
-        eprint("ERROR: Assets + audio + overhead exceed target size; no room left for video.")
+        logging.error("assets + audio + overhead exceed target size; no room for video")
         sys.exit(1)
 
     avg_video_bps = 0
     if videos:
         if total_duration <= 0:
-            eprint("ERROR: Total video duration is zero; cannot compute bitrate.")
+            logging.error("total video duration is zero; cannot compute bitrate")
             sys.exit(1)
         avg_video_bps = int((video_budget_bytes * 8) / total_duration)
-        if avg_video_bps < 50_000:  # 50 kbps sanity check
-            eprint("ERROR: Computed video bitrate unrealistically low.")
+        if avg_video_bps < 50_000:
+            logging.error("computed video bitrate unrealistically low")
             sys.exit(1)
 
-    # Choose encoder target kbps (clamped to SVT max)
     computed_kbps = max(1, int(avg_video_bps / 1000)) if avg_video_bps else 1
     if computed_kbps > MAX_SVT_KBPS:
-        eprint(
-            f"Warn: computed average video bitrate {computed_kbps} kbps exceeds SVT-AV1 max "
-            f"{MAX_SVT_KBPS} kbps; clamping to {MAX_SVT_KBPS} kbps. Final size will undershoot target."
-        )
+        logging.warning("computed average video bitrate %s kbps exceeds SVT-AV1 max %s kbps; clamping; final size will undershoot", computed_kbps, MAX_SVT_KBPS)
         global_video_kbps = MAX_SVT_KBPS
     else:
         global_video_kbps = computed_kbps
 
-    eprint(f"Target size: {target_bytes:,} bytes")
-    eprint(f"Assets accounted (no copy): {asset_bytes:,} bytes")
-    eprint(f"Video duration: {total_duration/3600:.2f} h; Audio bytes: {total_audio_bytes:,}")
+    logging.info("target bytes: %s", f"{target_bytes:,}")
+    logging.info("asset bytes: %s", f"{asset_bytes:,}")
+    logging.info("video duration hours: %.2f; audio bytes: %s", total_duration/3600, f"{total_audio_bytes:,}")
     if videos:
-        eprint(f"Video budget: {max(0, video_budget_bytes):,} bytes; "
-               f"Avg video bitrate: {computed_kbps:,} kbps (using {global_video_kbps:,} kbps)")
+        logging.info("video budget bytes: %s; avg video bitrate: %s kbps (using %s kbps)", f"{max(0, video_budget_bytes):,}", f"{computed_kbps:,}", f"{global_video_kbps:,}")
     else:
-        eprint("No videos to encode.")
+        logging.info("no videos to encode")
 
-    # Encode videos (SVT-AV1 defaults)
     encoded_count = 0
     for src, dur in zip(videos, durations):
         st = os.stat(src)
         stem = sanitize_base(pathlib.Path(src).stem)
-        out_name = f"{stem}{DEFAULT_SUFFIX}{OUT_EXT}"
+        ext = pathlib.Path(src).suffix
+        out_name = f"{stem}{args.name_suffix}{OUT_EXT}"
         final_path = os.path.join(args.output_dir, out_name)
         part_path = final_path + ".part"
-
+        h = _short_hash(os.path.abspath(src))
+        stage_src = os.path.join(args.stage_dir, f"{stem}.{h}{ext}")
+        stage_part = os.path.join(args.stage_dir, out_name + ".part")
         key = src_key(os.path.abspath(src), st)
-        rec = manifest["items"].get(
-            key, {"type": "video", "src": src, "output": out_name, "status": "pending"}
-        )
+        rec = manifest["items"].get(key, {"type": "video", "src": src, "output": out_name, "status": "pending"})
 
-        # Clean stale partial
-        if os.path.exists(part_path):
-            eprint(f"Removing stale partial: {part_path}")
-            try:
-                os.remove(part_path)
-            except FileNotFoundError:
-                pass
+        for stale in (part_path, stage_part):
+            if os.path.exists(stale):
+                try:
+                    os.remove(stale)
+                except FileNotFoundError:
+                    pass
 
-        # Skip when already done & valid
-        if (os.path.exists(final_path) and rec.get("status") == "done" and is_valid_media(final_path)):
-            eprint(f"Skip (done): {final_path}")
+        if os.path.exists(final_path) and rec.get("status") == "done" and is_valid_media(final_path):
+            logging.info("skip done: %s", final_path)
             continue
 
-        # Re-encode if invalid existing
         if os.path.exists(final_path) and not is_valid_media(final_path):
-            eprint(f"Invalid existing output; re-encoding: {final_path}")
             try:
                 os.remove(final_path)
             except FileNotFoundError:
                 pass
 
+        try:
+            if os.path.exists(stage_src):
+                try:
+                    os.remove(stage_src)
+                except FileNotFoundError:
+                    pass
+            if args.verbose:
+                logging.info("staging -> %s", stage_src)
+            shutil.copy2(src, stage_src)
+        except Exception as e:
+            logging.error("failed to stage source %s -> %s: %s", src, stage_src, e)
+            continue
+
         video_kbps = global_video_kbps
         audio_kbps = max(1, int(audio_bps / 1000))
-
         ff = [
-            "ffmpeg", "-hide_banner", "-loglevel", "warning", "-stats", "-y",
-            "-ignore_unknown", "-ignore_editlist", "1",
-            "-i", src,
+            "ffmpeg", "-hide_banner",
+            "-loglevel", "info" if args.verbose else "warning",
+        ]
+        if args.verbose:
+            ff += ["-stats"]
+        ff += [
+            "-y", "-ignore_unknown", "-ignore_editlist", "1",
+            "-i", stage_src,
             "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
             "-fps_mode", "passthrough",
             "-c:v", "libsvtav1", "-b:v", f"{video_kbps}k",
-            "-g", "240", "-preset", "5", "-svtav1-params", "scd=1",
+            "-g", "240", "-preset", "5", "-svtav1-params", "lp=6",
             "-c:a", "libopus", "-b:a", f"{audio_kbps}k",
             "-c:s", "copy",
             "-cues_to_front", "1", "-reserve_index_space", "200k",
-            "-f", "matroska", part_path,
+            "-f", "matroska", stage_part,
         ]
 
         rec.update({"status": "encoding_started", "started_at": now_utc_iso(), "output": out_name})
         manifest["items"][key] = rec
         save_manifest(manifest, manifest_path)
 
-        run(ff)
+        try:
+            logging.debug("+ %s", " ".join(map(str, ff)))
+            p = subprocess.run(ff)
+            if p.returncode != 0:
+                logging.error("ffmpeg failed for %s", src)
+                continue
 
-        if not is_valid_media(part_path):
-            eprint(f"ERROR: Encoded output invalid: {part_path} (will retry next run)")
-            continue
+            if not is_valid_media(stage_part):
+                logging.error("encoded output invalid (staged): %s", stage_part)
+                continue
 
-        os.replace(part_path, final_path)
-        rec.update({"status": "done", "finished_at": now_utc_iso()})
-        manifest["items"][key] = rec
-        save_manifest(manifest, manifest_path)
-        encoded_count += 1
+            try:
+                shutil.copy2(stage_part, part_path)
+            except Exception as e:
+                logging.error("failed to copy staged result to output: %s", e)
+                continue
 
-    eprint("=== encode_videos: done ===")
-    eprint(f"Videos encoded (this run): {encoded_count} / {len(videos)}")
-    eprint(f"Manifest retained: {manifest_path}")
+            os.replace(part_path, final_path)
+            rec.update({"status": "done", "finished_at": now_utc_iso()})
+            manifest["items"][key] = rec
+            save_manifest(manifest, manifest_path)
+            encoded_count += 1
 
-    # Keep manifest indefinitely; just report completion state
+        finally:
+            for pth in (stage_part, stage_src):
+                try:
+                    if os.path.exists(pth):
+                        os.remove(pth)
+                except FileNotFoundError:
+                    pass
+
+    copy_assets(assets, args.output_dir)
+    logging.warning("videos encoded (this run): %d / %d", encoded_count, len(videos))
     if all_videos_done(manifest, args.output_dir):
-        eprint("All videos complete. Leaving manifest in place.")
+        logging.warning("all videos complete; manifest retained at %s", manifest_path)
 
 if __name__ == "__main__":
     main()

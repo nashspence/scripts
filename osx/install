@@ -33,8 +33,8 @@ main() {
   typeset -gr WRAPPER_RELEASEONLY_TEMPLATE="${TEMPLATES_DIR}/wrapper-release-only.zsh"
 
   typeset -g MACHINE="${MACHINE:-com.nashspence.scripts}"
-  typeset -g PODMAN_CPUS="${PODMAN_CPUS:-8}"
-  typeset -g PODMAN_MEM="${PODMAN_MEM:-18432}"
+  typeset -g PODMAN_CPUS="${PODMAN_CPUS:-14}"
+  typeset -g PODMAN_MEM="${PODMAN_MEM:-16384}"
   typeset -g PODMAN_DISK="${PODMAN_DISK:-20}"
 
   # ---- Launch agent configuration -----------------------------------------

@@ -1,3 +1,4 @@
+FROM --platform=$BUILDPLATFORM mwader/static-ffmpeg:latest AS ffmpeg
 FROM python:3.12-alpine
 ARG VERSION
 ARG VCS_REF
@@ -5,7 +6,9 @@ ARG VCS_URL
 LABEL org.opencontainers.image.source="${VCS_URL}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.version="${VERSION}"
-RUN apk add --no-cache ffmpeg libarchive-tools coreutils font-dejavu
+RUN apk add --no-cache libarchive-tools coreutils font-dejavu
+COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 WORKDIR /app
 COPY script.py /app/qcut
 ENTRYPOINT ["python", "/app/qcut"]
