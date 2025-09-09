@@ -69,9 +69,10 @@ for vol in /Volumes/*(/N); do
 
   # queue action if changed and executable exists
   name=""
-  IFS= read -r name < "$file" || name=""
-  name="${name//$'\r'/}"
-  name="${name:t}"
+  IFS= read -r name < "$file" || :    # keep partial line if EOF w/o newline
+  name="${name//$'\r'/}"               # strip CR (if saved with CR or CRLF)
+  name="${name%%$'\n'*}"               # strip any trailing LF (belt & suspenders)
+  name="${name:t}"                     # basename
   if [[ "$prev" != "$devid" && -n "$name" ]]; then
     prog="${onmount_dir%/}/${name}"
     [[ -f "${prog}" && -x "${prog}" ]] && actions+=("${prog}" "$vol" "$volname") \
@@ -87,8 +88,21 @@ log "State updated: $(/usr/bin/wc -l < "${state}" 2>/dev/null | xargs) entries."
 integer i=1
 while (( i <= ${#actions} )); do
   prog="${actions[i]}" ; vol="${actions[i+1]}" ; volname="${actions[i+2]}"
-  log "Executing \"${prog}\" for \"${volname}\""
-  "${prog}" "$vol" || { sc=$?; warn "Executable exited with status ${sc} for \"${volname}\""; }
+  log "Executing \"${prog}\" in Terminal window for \"${volname}\""
+  if ! osascript <<EOF
+tell application "Terminal"
+    set t to (do script "exec \"$prog\" \"$vol\"")
+    activate
+    try
+        -- ensure the tab we just opened is selected/focused
+        set selected tab of (front window) to t
+    end try
+end tell
+EOF
+  then
+    sc=$?
+    warn "osascript exited with status ${sc} for \"${volname}\""
+  fi
   (( ran++ ))
   (( i += 3 ))
 done
