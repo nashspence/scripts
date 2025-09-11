@@ -34,8 +34,8 @@ main() {
 
   typeset -g MACHINE="${MACHINE:-com.nashspence.scripts}"
   typeset -g PODMAN_CPUS="${PODMAN_CPUS:-14}"
-  typeset -g PODMAN_MEM="${PODMAN_MEM:-16384}"
-  typeset -g PODMAN_DISK="${PODMAN_DISK:-20}"
+  typeset -g PODMAN_MEM="${PODMAN_MEM:-20480}"
+  typeset -g PODMAN_DISK="${PODMAN_DISK:-40}"
 
   # ---- Launch agent configuration -----------------------------------------
   typeset -gr UID_NAME="$(id -un)"
