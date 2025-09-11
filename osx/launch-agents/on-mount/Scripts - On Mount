@@ -5,7 +5,7 @@ set -o pipefail
 setopt EXTENDED_GLOB NULL_GLOB
 
 marker=".com.nashspence.scripts.on-mount.id"
-onmount_dir="${HOME}/On Mount"
+onmount_dir="${HOME}/git/osx-on-mount"
 
 base="$(cd "$(dirname "$0")" && pwd)"
 data="${base}/data"

@@ -376,7 +376,9 @@ def main():
 
         try:
             logging.debug("+ %s", " ".join(map(str, ff)))
-            p = subprocess.run(ff)
+            env = os.environ.copy()
+            env["SVT_LOG"] = "2" # set 4 for debug level logging from SVT
+            p = subprocess.run(ff, env=env)
             if p.returncode != 0:
                 logging.error("ffmpeg failed for %s", src)
                 continue

@@ -336,8 +336,8 @@ def main():
     ap.add_argument(
         "--target",
         type=int,
-        default=int(os.getenv("TARGET", "300")),  # 5 minutes
-        help="Target SECONDS total (default 300 = 5 minutes).",
+        default=int(os.getenv("TARGET", "600")),  # 10 minutes
+        help="Target SECONDS total (default 600 = 10 minutes).",
     )
     ap.add_argument(
         "--min",
@@ -352,11 +352,15 @@ def main():
         help="Maximum clip length in SECONDS (default 9).",
     )
     ap.add_argument("--svt-preset", type=int, default=int(os.getenv("SVT_PRESET", "5")))
-    ap.add_argument("--svt-crf", type=int, default=int(os.getenv("SVT_CRF", "30")))
-    ap.add_argument("--svt-gop", type=int, default=int(os.getenv("SVT_GOP", "240")))
+    ap.add_argument("--svt-crf", type=int, default=int(os.getenv("SVT_CRF", "32")))
     ap.add_argument("--opus-br", default=os.getenv("OPUS_BR", "128k"))
-    ap.add_argument("--tp", default=os.getenv("TP", "-1.5"))
-    ap.add_argument("--lufs-clip", default=os.getenv("LUFS_CLIP", "-9"))
+    # IMPORTANT: tp has no default; if omitted -> no limiter
+    ap.add_argument(
+        "--tp",
+        type=str,
+        default=None,
+        help="True-peak ceiling in dBFS (e.g., -1.5). If omitted, no per-clip limiter is applied.",
+    )
     ap.add_argument("--fontfile", default=os.getenv("FONTFILE", DEFAULT_FONT))
     ap.add_argument("--autoedit-dir", default=os.getenv("AUTOEDIT_DIR", "/out"))
     ap.add_argument(
@@ -375,7 +379,7 @@ def main():
     global VERBOSE
     VERBOSE = args.verbose or args.debug_cmds
 
-    for cmd in ("ffmpeg", "ffprobe"):
+    for cmd in ("ffmpeg", "ffprobe", "mkvmerge"):
         need(cmd)
 
     if not os.path.isdir(args.src_dir):
@@ -462,10 +466,8 @@ def main():
             "max_sec": args.max,
             "svt_preset": args.svt_preset,
             "svt_crf": args.svt_crf,
-            "svt_gop": args.svt_gop,
             "opus_br": args.opus_br,
-            "tp": args.tp,
-            "lufs_clip": args.lufs_clip,
+            "tp": args.tp,  # None -> no limiter
             "fontfile": args.fontfile,
             "len_slots_sec": len_slots_sec,
             "files": [
@@ -560,14 +562,23 @@ def main():
         draw = build_drawtext_pts(m["plan"]["fontfile"], epoch_int)
 
         has_a = has_audio_stream(src)
+        tp = m["plan"].get("tp")
         if has_a:
-            afilt = f"highpass=f=120,loudnorm=I={m['plan']['lufs_clip']}:TP={m['plan']['tp']}:LRA=11:linear=true,aresample=async=1:first_pts=0"
+            a_chain = ["highpass=f=120"]
+            if tp not in (None, "", "none"):
+                # Brickwall-style true-peak ceiling if requested
+                a_chain.append(f"alimiter=limit={tp}dB:level_in=0dB:level_out=0dB")
+            a_chain.append("aresample=async=1:first_pts=0:osr=48000")
+            a_chain.append("aformat=channel_layouts=stereo")
+            afilt = ",".join(a_chain)
             fcomplex = f"[0:v]{draw}[v];[0:a]{afilt}[a]"
-            map_seq = ["-map", "[v]", "-map", "[a]", "-map", "0:s?"]
         else:
-            # synthesize stereo silent audio for concat uniformity
-            fcomplex = f"[0:v]{draw}[v];anullsrc=r=48000:cl=stereo,atrim=duration={L:.6f},aresample=async=1:first_pts=0[a]"
-            map_seq = ["-map", "[v]", "-map", "[a]", "-map", "0:s?"]
+            fcomplex = (
+                f"[0:v]{draw}[v];"
+                f"anullsrc=r=48000:cl=stereo,atrim=duration={L:.6f},"
+                f"aresample=async=1:first_pts=0[a],aformat=channel_layouts=stereo[a]"
+            )
+        map_seq = ["-map","[v]","-map","[a]"]
 
         os.makedirs(os.path.dirname(out_clip), exist_ok=True)
         cmd = (
@@ -575,8 +586,7 @@ def main():
                 "ffmpeg",
                 "-hide_banner",
                 "-loglevel",
-                "error",
-                "-stats",
+                "warning",
                 "-y",
                 "-ss",
                 f"{start:.6f}",
@@ -597,14 +607,11 @@ def main():
                 str(m["plan"]["svt_preset"]),
                 "-crf",
                 str(m["plan"]["svt_crf"]),
-                "-g",
-                str(m["plan"]["svt_gop"]),
                 "-svtav1-params",
-                f"keyint={m['plan']['svt_gop']}:irefresh-type=2:scd=1",
+                "lp=6",
                 "-c:a",
                 "libopus",
-                "-b:a",
-                m["plan"]["opus_br"],
+                "-b:a", m["plan"]["opus_br"],
                 "-c:s",
                 "copy",
                 "-map_metadata",
@@ -615,6 +622,8 @@ def main():
                 "1",
                 "-reserve_index_space",
                 "200k",
+                "-f", 
+                "matroska",
                 out_clip,
             ]
         )
@@ -625,7 +634,11 @@ def main():
         if args.debug_cmds:
             log("CMD: " + " ".join(shlex.quote(x) for x in cmd))
         t0 = time.time()
-        r = subprocess.run(cmd)
+
+        env = os.environ.copy()
+        env["SVT_LOG"] = "2" # set 4 for debug level logging from SVT
+        r = subprocess.run(cmd, env=env)
+
         size_now = os.path.getsize(out_clip) if os.path.exists(out_clip) else 0
         log(
             f"clip {int(k):03d} DONE rc={r.returncode} in {time.time()-t0:.1f}s size={size_now} bytes"
@@ -653,8 +666,8 @@ def main():
     start_dt = datetime.fromtimestamp(start_epoch)
     end_dt = datetime.fromtimestamp(end_epoch)
     span_name = (
-        f"{start_dt.strftime('%Y-%m-%dT%H-%M-%S')}--"
-        f"{end_dt.strftime('%Y-%m-%dT%H-%M-%S')}"
+        f"{start_dt.strftime('%Y%m%dT%H%M%S')}--"
+        f"{end_dt.strftime('%Y%m%dT%H%M%S')}"
     )
     out_path = os.path.join(args.autoedit_dir, f"{span_name} auto-edit.mkv")
     m["final"]["out_path"] = out_path
@@ -667,61 +680,26 @@ def main():
         eprint("[autoedit] ERROR: not all clips finished; aborting before concat")
         sys.exit(1)
 
-    concat_path = os.path.join(work_dir, "concat.txt")
-    with open(concat_path, "w", encoding="utf-8") as f:
-        f.write(FFCONCAT_HEADER)
-        for k in sorted(m["clips"], key=lambda x: int(x)):
-            c = m["clips"][k]
-            d_clip = ffprobe_duration(c["out"]) or c["length"]
-            f.write(f"file '{c['out']}'\n")
-            f.write(f"duration {d_clip:.6f}\n")
+    clip_paths = [m["clips"][k]["out"] for k in sorted(m["clips"], key=lambda x: int(x))]
+    cmd_final = ["mkvmerge", "--quiet", "--append-mode", "track", "-o", out_path, clip_paths[0]]
+    cmd_final += ["+" + p for p in clip_paths[1:]]
+    cmd_final.insert(1, "--no-chapters"); cmd_final.insert(1, "--no-global-tags"); cmd_final.insert(1, "--no-track-tags")
 
-    cmd_final = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-stats",
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        concat_path,
-        "-map",
-        "0:v",
-        "-map",
-        "0:a?",
-        "-map",
-        "0:s?",
-        "-c",
-        "copy",
-        "-cues_to_front",
-        "1",
-        "-reserve_index_space",
-        "200k",
-        out_path,
-    ]
-    log(f"Concat list: {concat_path} ({len(m['clips'])} 'file' entries)")
+    log(f"mkvmerge append: {len(clip_paths)} clips → {out_path}")
     if args.debug_cmds:
         log("CMD: " + " ".join(shlex.quote(x) for x in cmd_final))
+
     t0 = time.time()
     r = subprocess.run(cmd_final)
-    log(f"Final concat rc={r.returncode} in {time.time()-t0:.1f}s → {out_path}")
+    log(f"mkvmerge rc={r.returncode} in {time.time()-t0:.1f}s → {out_path}")
     if r.returncode != 0:
-        eprint("[autoedit] ERROR: final concat failed")
+        eprint("[autoedit] ERROR: mkvmerge append failed")
         save_manifest(args.autoedit_dir, m)
         sys.exit(1)
 
     m["final"]["status"] = "done"
     m["final"]["finished_at"] = now_utc_iso()
     save_manifest(args.autoedit_dir, m)
-
-    # No deletions (inputs or clips). Work dir kept for resume/inspection.
-    dur = time.time() - start_time
-    size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
-    log(f"Success: wrote {size/1024/1024/1024:.2f} GB in {dur:.1f}s")
     print(out_path)
 
 

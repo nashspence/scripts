@@ -6,7 +6,7 @@ ARG VCS_URL
 LABEL org.opencontainers.image.source="${VCS_URL}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.version="${VERSION}"
-RUN apk add --no-cache libarchive-tools coreutils font-dejavu
+RUN apk add --no-cache libarchive-tools coreutils font-dejavu mkvtoolnix
 COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 WORKDIR /app
