@@ -401,7 +401,7 @@ def main():
             log(
                 f"Manifest indicates job already completed successfully at {finished_at}. Output: {outp}. Returning."
             )
-            print(outp)
+            print(os.path.basename(outp))
             return
         else:
             log(
@@ -415,7 +415,6 @@ def main():
         save_manifest(args.autoedit_dir, m)
         log("New manifest created.")
 
-    start_time = time.time()
     log("Start")
     log(
         f"Source dir: {m['sources']['src_dir']}  "
@@ -578,7 +577,7 @@ def main():
                 f"anullsrc=r=48000:cl=stereo,atrim=duration={L:.6f},"
                 f"aresample=async=1:first_pts=0[a],aformat=channel_layouts=stereo[a]"
             )
-        map_seq = ["-map","[v]","-map","[a]"]
+        map_seq = ["-map", "[v]", "-map", "[a]"]
 
         os.makedirs(os.path.dirname(out_clip), exist_ok=True)
         cmd = (
@@ -611,7 +610,8 @@ def main():
                 "lp=5",
                 "-c:a",
                 "libopus",
-                "-b:a", m["plan"]["opus_br"],
+                "-b:a",
+                m["plan"]["opus_br"],
                 "-c:s",
                 "copy",
                 "-map_metadata",
@@ -622,7 +622,7 @@ def main():
                 "1",
                 "-reserve_index_space",
                 "200k",
-                "-f", 
+                "-f",
                 "matroska",
                 out_clip,
             ]
@@ -635,10 +635,9 @@ def main():
             log("CMD: " + " ".join(shlex.quote(x) for x in cmd))
         t0 = time.time()
 
-
         env = os.environ.copy()
         if not VERBOSE:
-            env["SVT_LOG"] = "2" # set 4 for debug level logging from SVT
+            env["SVT_LOG"] = "2"  # set 4 for debug level logging from SVT
         r = subprocess.run(cmd, env=env)
 
         size_now = os.path.getsize(out_clip) if os.path.exists(out_clip) else 0
@@ -668,8 +667,7 @@ def main():
     start_dt = datetime.fromtimestamp(start_epoch)
     end_dt = datetime.fromtimestamp(end_epoch)
     span_name = (
-        f"{start_dt.strftime('%Y%m%dT%H%M%S')}--"
-        f"{end_dt.strftime('%Y%m%dT%H%M%S')}"
+        f"{start_dt.strftime('%Y%m%dT%H%M%S')}--" f"{end_dt.strftime('%Y%m%dT%H%M%S')}"
     )
     out_path = os.path.join(args.autoedit_dir, f"{span_name} auto-edit.mkv")
     m["final"]["out_path"] = out_path
@@ -682,10 +680,22 @@ def main():
         eprint("[autoedit] ERROR: not all clips finished; aborting before concat")
         sys.exit(1)
 
-    clip_paths = [m["clips"][k]["out"] for k in sorted(m["clips"], key=lambda x: int(x))]
-    cmd_final = ["mkvmerge", "--quiet", "--append-mode", "track", "-o", out_path, clip_paths[0]]
+    clip_paths = [
+        m["clips"][k]["out"] for k in sorted(m["clips"], key=lambda x: int(x))
+    ]
+    cmd_final = [
+        "mkvmerge",
+        "--quiet",
+        "--append-mode",
+        "track",
+        "-o",
+        out_path,
+        clip_paths[0],
+    ]
     cmd_final += ["+" + p for p in clip_paths[1:]]
-    cmd_final.insert(1, "--no-chapters"); cmd_final.insert(1, "--no-global-tags"); cmd_final.insert(1, "--no-track-tags")
+    cmd_final.insert(1, "--no-chapters")
+    cmd_final.insert(1, "--no-global-tags")
+    cmd_final.insert(1, "--no-track-tags")
 
     log(f"mkvmerge append: {len(clip_paths)} clips → {out_path}")
     if args.debug_cmds:
@@ -702,7 +712,7 @@ def main():
     m["final"]["status"] = "done"
     m["final"]["finished_at"] = now_utc_iso()
     save_manifest(args.autoedit_dir, m)
-    print(out_path)
+    print(os.path.basename(out_path))
 
 
 if __name__ == "__main__":
