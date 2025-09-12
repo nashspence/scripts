@@ -1,373 +1,319 @@
-#!/usr/bin/env zsh
-# install: install / uninstall activation + wrapper tooling + brew/podman/machine (pure zsh)
+#!/bin/sh
+# install: install / uninstall activation + wrapper tooling + brew/podman/machine
 # Usage:
 #   ./install                 # Install everything (activation + wrappers + PATH + brew/podman/machine)
 #   ./install --uninstall     # Remove EVERYTHING this script installed (incl. Podman machine)
 
-set -e
-set -u
-set -o pipefail
-[[ -n "${DEBUG:-}" ]] && set -x
+set -eu
 
-main() {
-  emulate -L zsh
-  set -e
-  set -u
-  set -o pipefail
-  setopt err_return pipefail null_glob extended_glob
+[ -n "${DEBUG:-}" ] && set -x
 
-  # ---- Paths / Config (env-overridable) ------------------------------------
-  typeset -gr SCRIPT_PATH="${(%):-%N}"
-  typeset -gr SCRIPT_DIR="${SCRIPT_PATH:A:h}"
+# ---- paths / config ----
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+repo_dir=${REPO_DIR:-$(cd "${script_dir}/.." && pwd -P)}
+wrappers_dir=${WRAPPERS_DIR:-"${repo_dir}/.wrappers"}
+files_dir=${FILES_DIR:-"${repo_dir}"}
+la_dir="${HOME}/Library/LaunchAgents"
+uid_name=$(id -un)
+uid_num=$(id -u)
+osxbin_dir="${script_dir}/bin"
 
-  typeset -g REPO_DIR="${REPO_DIR:-${SCRIPT_DIR:h}}"
-  typeset -g WRAPPERS_DIR="${WRAPPERS_DIR:-${REPO_DIR}/.wrappers}"
-  typeset -g FILES_DIR="${FILES_DIR:-$REPO_DIR}"
-  typeset -gr LA_DIR="$HOME/Library/LaunchAgents"
-  typeset -gr UID_NUM="$(id -u)"
-  typeset -g OSXBIN_DIR="${SCRIPT_DIR}/bin"   # must contain podman-scripts-machine
+templates_dir="${script_dir}/templates"
+wrapper_template="${templates_dir}/wrapper.zsh"
+wrapper_release_template="${templates_dir}/wrapper-release.zsh"
+wrapper_releaseonly_template="${templates_dir}/wrapper-release-only.zsh"
 
-  typeset -gr TEMPLATES_DIR="${SCRIPT_DIR}/templates"
-  typeset -gr WRAPPER_TEMPLATE="${TEMPLATES_DIR}/wrapper.zsh"
-  typeset -gr WRAPPER_RELEASE_TEMPLATE="${TEMPLATES_DIR}/wrapper-release.zsh"
-  typeset -gr WRAPPER_RELEASEONLY_TEMPLATE="${TEMPLATES_DIR}/wrapper-release-only.zsh"
+machine=${MACHINE:-com.nashspence.scripts}
+podman_cpus=${PODMAN_CPUS:-14}
+podman_mem=${PODMAN_MEM:-20480}
+podman_disk=${PODMAN_DISK:-40}
 
-  typeset -g MACHINE="${MACHINE:-com.nashspence.scripts}"
-  typeset -g PODMAN_CPUS="${PODMAN_CPUS:-14}"
-  typeset -g PODMAN_MEM="${PODMAN_MEM:-20480}"
-  typeset -g PODMAN_DISK="${PODMAN_DISK:-40}"
+path_begin="# >>> podman-scripts PATH >>>"
+path_end="# <<< podman-scripts PATH <<<"
+export_repo_line="export PODMAN_SCRIPTS_DIR=\"${repo_dir}\""
+source_lib_line=". \"\${PODMAN_SCRIPTS_DIR}/osx/lib.sh\""
 
-  # ---- Launch agent configuration -----------------------------------------
-  typeset -gr UID_NAME="$(id -un)"
-  typeset -gr LAUNCH_AGENTS_DIR="${SCRIPT_DIR}/launch-agents"
-  typeset -a LAUNCH_AGENT_DIRS=()
-  for dir in "${LAUNCH_AGENTS_DIR}"/*; do
-    [[ -d "$dir" ]] || continue
-    LAUNCH_AGENT_DIRS+=("$dir")
-  done
+die() {
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 1
+}
 
-  # ---- PATH block markers ---------------------------------------------------
-  typeset -gr PATH_BEGIN_MARK="# >>> podman-scripts PATH >>>"
-  typeset -gr PATH_END_MARK="# <<< podman-scripts PATH <<<"
-  typeset -gr EXPORT_REPO_LINE="export PODMAN_SCRIPTS_DIR=\"${REPO_DIR}\""
-  typeset -gr SOURCE_LIB_LINE='source "$PODMAN_SCRIPTS_DIR/osx/lib.sh"'
-
-  # ---- Helpers --------------------------------------------------------------
-  die() { print -u2 -- "ERROR: $*"; exit 1; }
-  rehash_safely() { rehash 2>/dev/null || hash -r 2>/dev/null || true; }
-
-  add_path_block() {
-    local file="$1"
-    [[ -f "$file" ]] || : > "$file"
-    if ! grep -Fqx -- "$PATH_BEGIN_MARK" "$file" 2>/dev/null; then
-      {
-        printf '\n%s\n' "$PATH_BEGIN_MARK"
-        printf '%s\n' "$EXPORT_REPO_LINE"
-        printf '%s\n' "$SOURCE_LIB_LINE"
-        printf '%s\n' "$PATH_END_MARK"
-      } >> "$file"
-      echo "  + added PATH block to ${file##$HOME/}"
+add_path_block() {
+    file=$1
+    [ -f "${file}" ] || : >"${file}"
+    if ! grep -Fqx "${path_begin}" "${file}" 2>/dev/null; then
+        {
+            printf '\n%s\n' "${path_begin}"
+            printf '%s\n' "${export_repo_line}"
+            printf '%s\n' "${source_lib_line}"
+            printf '%s\n' "${path_end}"
+        } >>"${file}"
+        printf '  + added PATH block to %s\n' "${file#"${HOME}/"}"
     fi
-  }
+}
 
-  remove_path_block() {
-    local file="$1"
-    [[ -f "$file" ]] || return 0
-    # BSD sed in-place with explicit backup suffix ''.
-    sed -E -i '' "/$(printf '%s' "$PATH_BEGIN_MARK" | sed 's/[^^]/[&]/g; s/\^/\\^/g')/,/$(printf '%s' "$PATH_END_MARK" | sed 's/[^^]/[&]/g; s/\^/\\^/g')/d" "$file" || true
-  }
+remove_path_block() {
+    file=$1
+    [ -f "${file}" ] || return 0
+    tmp=$(mktemp)
+    awk -v b="${path_begin}" -v e="${path_end}" '
+        $0==b {skip=1}
+        !skip {print}
+        $0==e {skip=0}
+    ' "${file}" >"${tmp}"
+    mv "${tmp}" "${file}"
+}
 
-  ensure_brew() {
+ensure_brew() {
     if command -v brew >/dev/null 2>&1; then
-      return 0
-    elif [[ -x /opt/homebrew/bin/brew ]]; then
-      eval "$(/opt/homebrew/bin/brew shellenv)" || true
-      rehash_safely; return 0
-    elif [[ -x /usr/local/bin/brew ]]; then
-      eval "$(/usr/local/bin/brew shellenv)" || true
-      rehash_safely; return 0
+        return 0
     fi
-
+    if [ -x /opt/homebrew/bin/brew ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)" || true
+        return 0
+    fi
+    if [ -x /usr/local/bin/brew ]; then
+        eval "$(/usr/local/bin/brew shellenv)" || true
+        return 0
+    fi
     echo "Homebrew not found — installing Homebrew..."
     NONINTERACTIVE=1 /bin/bash -c \
-      "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-    if [[ -x /opt/homebrew/bin/brew ]]; then
-      eval "$(/opt/homebrew/bin/brew shellenv)"
-    elif [[ -x /usr/local/bin/brew ]]; then
-      eval "$(/usr/local/bin/brew shellenv)"
+        "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    if [ -x /opt/homebrew/bin/brew ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)" || true
+    elif [ -x /usr/local/bin/brew ]; then
+        eval "$(/usr/local/bin/brew shellenv)" || true
     fi
-
-    rehash_safely
     command -v brew >/dev/null 2>&1 || die "brew installation appears to have failed"
-  }
+}
 
-  ensure_podman() {
-    if ! command -v podman >/dev/null 2>&1; then
-      echo "Installing Podman with Homebrew…"
-      brew list podman >/dev/null 2>&1 || brew install podman
-      rehash_safely
-    fi
-    command -v podman >/dev/null 2>&1 || die "podman not found after installation"
-  }
-
-  ensure_podman_machine() {
-    if ! podman machine inspect "$MACHINE" >/dev/null 2>&1; then
-      echo "Creating Podman machine '$MACHINE' (cpus=$PODMAN_CPUS, mem=${PODMAN_MEM}MB, disk=${PODMAN_DISK}GB)…"
-      podman machine init \
-        -v /Users:/Users -v /Volumes:/Volumes \
-        --cpus "$PODMAN_CPUS" \
-        --memory "$PODMAN_MEM" \
-        --disk-size "$PODMAN_DISK" \
-        "$MACHINE"
-    else
-      echo "Podman machine '$MACHINE' already exists."
-    fi
-  }
-
-  remove_podman_machine() {
+ensure_podman() {
     if command -v podman >/dev/null 2>&1; then
-      if podman machine inspect "$MACHINE" >/dev/null 2>&1; then
-        echo "Removing Podman machine '$MACHINE'…"
-        podman machine stop "$MACHINE" >/dev/null 2>&1 || true
-        podman machine rm -f "$MACHINE"   >/dev/null 2>&1 || true
-      fi
+        return 0
     fi
-  }
+    echo "Installing Podman with Homebrew…"
+    brew list podman >/dev/null 2>&1 || brew install podman
+    command -v podman >/dev/null 2>&1 || die "podman not found after installation"
+}
 
-  typeset -A LAUNCH_AGENT_RESOURCES=(
-    [com.nashspence.scripts.on-mount]="data"
-    [com.nashspence.scripts.podman-machine]="data"
-  )
-
-  install_launch_agent() {
-    local dir="$1" plist_src label plist
-    plist_src=("$dir"/*.plist(N))
-    label="${plist_src[1]:t:r}"
-    plist="$LA_DIR/${label}.plist"
-
-    mkdir -p "$LA_DIR"
-
-    sed -e "s|%UID%|${UID_NAME//&/\\&}|g" \
-        -e "s|%UID_NUM%|${UID_NUM//&/\\&}|g" \
-        -e "s|%MACHINE%|${MACHINE//&/\\&}|g" \
-        -e "s|%REPO_DIR%|${REPO_DIR//&/\\&}|g" \
-        "${plist_src[1]}" > "$plist"
-    chmod 644 "$plist"
-
-    launchctl bootout "gui/$UID_NUM" "$plist" >/dev/null 2>&1 || true
-    launchctl bootstrap "gui/$UID_NUM" "$plist"
-    launchctl kickstart -k "gui/$UID_NUM/$label" 2>/dev/null || true
-
-    echo "Loaded ${label} LaunchAgent."
-  }
-
-  uninstall_launch_agent() {
-    local dir="$1" plist_src label plist resources
-    plist_src=("$dir"/*.plist(N))
-    label="${plist_src[1]:t:r}"
-    plist="$LA_DIR/${label}.plist"
-
-    launchctl bootout "gui/$UID_NUM" "$plist" >/dev/null 2>&1 || true
-    rm -f "$plist"
-
-    resources="${LAUNCH_AGENT_RESOURCES[$label]:-}"
-    if [[ -n "$resources" ]]; then
-      local r
-      for r in ${(s: :)resources}; do
-        rm -rf "$dir/$r" 2>/dev/null || true
-      done
+ensure_podman_machine() {
+    if podman machine inspect "${machine}" >/dev/null 2>&1; then
+        return 0
     fi
-  }
+    echo "Creating Podman machine '${machine}' (cpus=${podman_cpus}, mem=${podman_mem}MB, disk=${podman_disk}GB)…"
+    podman machine init \
+        -v /Users:/Users -v /Volumes:/Volumes \
+        --cpus "${podman_cpus}" \
+        --memory "${podman_mem}" \
+        --disk-size "${podman_disk}" \
+        "${machine}"
+    podman machine start "${machine}"
+}
 
-  install_launch_agents() {
-    local dir
-    for dir in "${LAUNCH_AGENT_DIRS[@]}"; do
-      install_launch_agent "$dir"
+remove_podman_machine() {
+    if podman machine inspect "${machine}" >/dev/null 2>&1; then
+        podman machine stop "${machine}" >/dev/null 2>&1 || true
+        podman machine rm -f "${machine}" >/dev/null 2>&1 || true
+    fi
+}
+
+install_launch_agent() {
+    dir=$1
+    plist_src=$(find "${dir}" -maxdepth 1 -name '*.plist' | head -n1)
+    [ -n "${plist_src}" ] || die "missing plist in ${dir}"
+    label=$(basename "${plist_src}" .plist)
+    plist="${la_dir}/${label}.plist"
+
+    mkdir -p "${la_dir}"
+
+    sed -e "s|%UID%|$uid_name|g" \
+        -e "s|%UID_NUM%|$uid_num|g" \
+        -e "s|%MACHINE%|$machine|g" \
+        -e "s|%REPO_DIR%|$repo_dir|g" \
+        "${plist_src}" >"${plist}"
+    chmod 644 "${plist}"
+
+    launchctl bootout "gui/${uid_num}" "${plist}" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/${uid_num}" "${plist}"
+    launchctl kickstart -k "gui/${uid_num}/${label}" >/dev/null 2>&1 || true
+
+    printf 'Loaded %s LaunchAgent.\n' "${label}"
+}
+
+uninstall_launch_agent() {
+    dir=$1
+    plist_src=$(find "${dir}" -maxdepth 1 -name '*.plist' | head -n1)
+    [ -n "${plist_src}" ] || return 0
+    label=$(basename "${plist_src}" .plist)
+    plist="${la_dir}/${label}.plist"
+
+    launchctl bootout "gui/${uid_num}" "${plist}" >/dev/null 2>&1 || true
+    rm -f "${plist}"
+
+    case "$label" in
+        com.nashspence.scripts.podman-machine)
+            rm -rf "$dir/data" 2>/dev/null || true
+            ;;
+    esac
+}
+
+install_launch_agents() {
+    for dir in "${script_dir}/launch-agents"/*; do
+        [ -d "${dir}" ] || continue
+        install_launch_agent "${dir}"
     done
-  }
+}
 
-  uninstall_launch_agents() {
-    local dir
-    for dir in "${LAUNCH_AGENT_DIRS[@]}"; do
-      uninstall_launch_agent "$dir"
+uninstall_launch_agents() {
+    for dir in "${script_dir}/launch-agents"/*; do
+        [ -d "${dir}" ] || continue
+        uninstall_launch_agent "${dir}"
     done
-  }
+}
 
-  generate_wrappers() {
-    echo "Repo:            $REPO_DIR"
-    echo "Scan root:       $FILES_DIR"
-    echo "Wrappers out:    $WRAPPERS_DIR"
-    rm -rf "$WRAPPERS_DIR"
-    mkdir -p "$WRAPPERS_DIR"
-
-    typeset -A used_names
-    local index_file="${WRAPPERS_DIR}/index.tsv"
-    : > "$index_file"
-
-    make_name() {
-      local cf="$1"
-      local base="${cf:t}"
-      local dirn="${cf:h:t}"   # parent directory name
-      local stem slug out i=2
-
-      case "${base:l}" in
+make_name() {
+    cf=$1
+    base=$(basename "$cf")
+    dirn=$(basename "$(dirname "$cf")")
+    lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+    case $lower in
         containerfile|dockerfile|release.yaml)
-          # Canonical filenames: use the directory as the service name
-          stem="$dirn"
-          ;;
+            stem=$dirn
+            ;;
         *)
-          # Use the file stem with common suffixes stripped
-          stem="$base"
-          stem="${stem%.Containerfile}"; stem="${stem%.containerfile}"
-          stem="${stem%.Dockerfile}";    stem="${stem%.dockerfile}"
-          stem="${stem%.*}"
-          [[ -z "$stem" ]] && stem="$dir"
-          ;;
-      esac
+            stem=$base
+            stem=${stem%.Containerfile}
+            stem=${stem%.containerfile}
+            stem=${stem%.Dockerfile}
+            stem=${stem%.dockerfile}
+            stem=${stem%.*}
+            [ -n "$stem" ] || stem=$dirn
+            ;;
+    esac
+    slug=$(printf '%s' "$stem" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/^-*//; s/-*$//')
+    [ -n "$slug" ] || slug=$(printf '%s' "$dirn" | tr '[:upper:]' '[:lower:]')
+    out=$slug
+    i=2
+    while [ -e "$wrappers_dir/$out" ]; do
+        out="$slug-$i"
+        i=$((i+1))
+    done
+    printf '%s\n' "$out"
+}
 
-      slug="${(L)stem//[^a-z0-9._-]/-}"
-      slug="${slug##-}"; slug="${slug%%-}"
-      [[ -z "$slug" ]] && slug="${(L)dirn}"
+generate_wrappers() {
+    printf 'Repo:            %s\n' "$repo_dir"
+    printf 'Scan root:       %s\n' "$files_dir"
+    printf 'Wrappers out:    %s\n' "$wrappers_dir"
+    rm -rf "$wrappers_dir"
+    mkdir -p "$wrappers_dir"
 
-      out="$slug"
-      while [[ -n "${used_names[$out]:-}" || -e "$WRAPPERS_DIR/$out" ]]; do
-        out="${slug}-${i}"
-        (( i++ ))
-      done
-      used_names[$out]=1
-      print -r -- "$out"
-    }
+    index_file="$wrappers_dir/index.tsv"
+    : >"$index_file"
 
-    local cf name abs wrapper rel tpl
-    for cf in \
-      "$FILES_DIR"/**/Containerfile(.N) "$FILES_DIR"/**/*.Containerfile(.N) "$FILES_DIR"/**/*.containerfile(.N) \
-      "$FILES_DIR"/**/Dockerfile(.N)    "$FILES_DIR"/**/*.Dockerfile(.N)    "$FILES_DIR"/**/*.dockerfile(.N)
-    do
-      [[ -f "$cf" ]] || continue
-      name="$(make_name "$cf")"
-      abs="${cf:A}"
-      wrapper="${WRAPPERS_DIR}/${name}"
-      rel="${cf:h}/release.yaml"; rel="${rel:A}"
-
-      if [[ -f "$rel" ]]; then
-        tpl="$WRAPPER_RELEASE_TEMPLATE"
-      else
-        tpl="$WRAPPER_TEMPLATE"
-      fi
-
-      sed -e "s|%NAME%|${name//&/\\&}|g" \
-          -e "s|%ABS%|${abs//&/\\&}|g" \
-          -e "s|%REL%|${rel//&/\\&}|g" \
-          "$tpl" > "$wrapper"
-      chmod +x "$wrapper"
-
-    printf '%s\t%s\n' "$name" "$abs" >> "$index_file"
-    echo "  + ${name} -> ${abs}"
-  done
-
-  # release.yaml-only directories (no Containerfile)
-  local relf
-  for relf in "$FILES_DIR"/portable/**/release.yaml(.N); do
-    [[ -f "$relf" ]] || continue
-    local dir
-    dir="${relf:h}"
-    if [[ -f "$dir/Containerfile" || -f "$dir"/*.Containerfile(.N) || -f "$dir"/*.containerfile(.N) \
-          || -f "$dir/Dockerfile" || -f "$dir"/*.Dockerfile(.N) || -f "$dir"/*.dockerfile(.N) ]]; then
-      continue
-    fi
-    name="$(make_name "$relf")"
-    abs="${relf:A}"
-    wrapper="${WRAPPERS_DIR}/${name}"
-    sed -e "s|%NAME%|${name//&/\\&}|g" \
-        -e "s|%ABS%|${abs//&/\\&}|g" \
-        "$WRAPPER_RELEASEONLY_TEMPLATE" > "$wrapper"
-    chmod +x "$wrapper"
-
-    printf '%s\t%s\n' "$name" "$abs" >> "$index_file"
-    echo "  + ${name} -> ${abs}"
-  done
-
-    echo "Wrote index: $index_file"
-    echo "Done generating wrappers."
-  }
-
-  install_all() {
-    # require OSXBIN_DIR and podman-scripts-machine
-    [[ -d "$OSXBIN_DIR" ]] || die "required directory missing: $OSXBIN_DIR (must contain 'podman-scripts-machine')"
-    [[ -f "$OSXBIN_DIR/podman-scripts-machine" ]] || die "required tool missing: $OSXBIN_DIR/podman-scripts-machine"
-    chmod +x "$OSXBIN_DIR/podman-scripts-machine" 2>/dev/null || true
-
-    [[ -f "$WRAPPER_TEMPLATE" ]] || die "missing template: $WRAPPER_TEMPLATE"
-    [[ -f "$WRAPPER_RELEASE_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASE_TEMPLATE"
-    [[ -f "$WRAPPER_RELEASEONLY_TEMPLATE" ]] || die "missing template: $WRAPPER_RELEASEONLY_TEMPLATE"
-    [[ -d "$LAUNCH_AGENTS_DIR" ]] || die "missing directory: $LAUNCH_AGENTS_DIR"
-    local dir plist has_file f
-    for dir in "${LAUNCH_AGENT_DIRS[@]}"; do
-      plist=("$dir"/*.plist(N))
-      [[ -f "${plist[1]}" ]] || die "missing plist in: $dir"
-      has_file=0
-      for f in "$dir"/*(N); do
-        [[ "$f" == *.plist ]] && continue
-        has_file=1; break
-      done
-      (( has_file )) || die "missing agent file in: $dir"
+    find "${files_dir}" -type f \( -name Containerfile -o -name '*.Containerfile' -o -name '*.containerfile' -o -name Dockerfile -o -name '*.Dockerfile' -o -name '*.dockerfile' \) | while IFS= read -r cf; do
+        name=$(make_name "$cf")
+        dir=$(dirname "${cf}")
+        abs=$(cd "${dir}" && pwd)/$(basename "${cf}")
+        rel="${dir}/release.yaml"
+        if [ -f "${rel}" ]; then
+            tpl=${wrapper_release_template}
+            rel=$(cd "${dir}" && pwd)/release.yaml
+        else
+            tpl=${wrapper_template}
+            rel=""
+        fi
+        sed -e "s|%NAME%|$name|g" \
+            -e "s|%ABS%|${abs}|g" \
+            -e "s|%REL%|${rel}|g" \
+            "${tpl}" >"${wrappers_dir}/${name}"
+        chmod +x "${wrappers_dir}/${name}"
+        printf '%s\t%s\n' "${name}" "${abs}" >>"${index_file}"
+        printf '  + %s -> %s\n' "${name}" "${abs}"
     done
 
-    mkdir -p "$LA_DIR"
+    find "${files_dir}/portable" -type f -name release.yaml | while IFS= read -r relf; do
+        dir=$(dirname "${relf}")
+        if find "${dir}" -maxdepth 1 -type f \( -name Containerfile -o -name '*.Containerfile' -o -name '*.containerfile' -o -name Dockerfile -o -name '*.Dockerfile' -o -name '*.dockerfile' \) | read -r _; then
+            continue
+        fi
+        name=$(make_name "${relf}")
+        abs=$(cd "${dir}" && pwd)/release.yaml
+        sed -e "s|%NAME%|$name|g" \
+            -e "s|%ABS%|${abs}|g" \
+            "${wrapper_releaseonly_template}" >"${wrappers_dir}/${name}"
+        chmod +x "${wrappers_dir}/${name}"
+        printf '%s\t%s\n' "${name}" "${abs}" >>"${index_file}"
+        printf '  + %s -> %s\n' "${name}" "${abs}"
+    done
 
-    # 0) Ensure PATH blocks
-    add_path_block "$HOME/.zprofile"
-    add_path_block "$HOME/.zshrc"
+    printf 'Wrote index: %s\n' "${index_file}"
+    echo "Done generating wrappers."
+}
 
-    # 0.5) Ensure brew & podman & machine
+install_all() {
+    [ -d "${osxbin_dir}" ] || die "required directory missing: ${osxbin_dir} (must contain 'podman-scripts-machine')"
+    [ -f "${osxbin_dir}/podman-scripts-machine" ] || die "required tool missing: ${osxbin_dir}/podman-scripts-machine"
+    chmod +x "${osxbin_dir}/podman-scripts-machine" 2>/dev/null || true
+
+    [ -f "${wrapper_template}" ] || die "missing template: ${wrapper_template}"
+    [ -f "${wrapper_release_template}" ] || die "missing template: ${wrapper_release_template}"
+    [ -f "${wrapper_releaseonly_template}" ] || die "missing template: ${wrapper_releaseonly_template}"
+    [ -d "${script_dir}/launch-agents" ] || die "missing directory: ${script_dir}/launch-agents"
+    for dir in "${script_dir}/launch-agents"/*; do
+        [ -d "${dir}" ] || continue
+        plist=$(find "${dir}" -maxdepth 1 -name '*.plist' | head -n1)
+        [ -f "${plist}" ] || die "missing plist in: ${dir}"
+        if ! find "${dir}" -maxdepth 1 -type f ! -name '*.plist' | read -r _; then
+            die "missing agent file in: ${dir}"
+        fi
+    done
+
+    mkdir -p "${la_dir}"
+
+    add_path_block "${HOME}/.zprofile"
+    add_path_block "${HOME}/.zshrc"
+
     ensure_brew
     ensure_podman
     ensure_podman_machine
 
-    # 1) LaunchAgents
     install_launch_agents
-
-    # 2) Generate wrappers
     generate_wrappers
 
     echo "Install complete."
-  }
+}
 
-  uninstall_all() {
+uninstall_all() {
     echo "Uninstalling EVERYTHING this script installed…"
 
-    if [[ -d "$WRAPPERS_DIR" ]]; then
-      echo "Deleting generated wrappers directory: $WRAPPERS_DIR"
-      rm -rf "$WRAPPERS_DIR"
+    if [ -d "${wrappers_dir}" ]; then
+        echo "Deleting generated wrappers directory: ${wrappers_dir}"
+        rm -rf "${wrappers_dir}"
     fi
 
     uninstall_launch_agents
 
-    local sock="/tmp/com.nashspence.scripts.podman-machine.$UID_NUM.sock"
-    [[ -S "$sock" ]] && rm -f "$sock" || true
+    sock="/tmp/com.nashspence.scripts.podman-machine.${uid_num}.sock"
+    [ -S "${sock}" ] && rm -f "${sock}"
 
-    remove_path_block "$HOME/.zprofile"
-    remove_path_block "$HOME/.zshrc"
+    remove_path_block "${HOME}/.zprofile"
+    remove_path_block "${HOME}/.zshrc"
 
     remove_podman_machine
 
     echo "Uninstall complete."
-  }
+}
 
-  # ---- Main ---------------------------------------------------------------
-  if (( $# == 1 )) && [[ "$1" == "--uninstall" ]]; then
+if [ "$#" -eq 1 ] && [ "$1" = "--uninstall" ]; then
     uninstall_all
-  elif (( $# == 0 )); then
+elif [ "$#" -eq 0 ]; then
     install_all
-  else
+else
     cat <<USAGE >&2
 Usage:
   $0                 Install activation + generate wrappers + add paths + brew/podman/machine
   $0 --uninstall     Remove EVERYTHING this script installed (incl. Podman machine)
 USAGE
     exit 2
-  fi
-}
-
-main "$@"
+fi
