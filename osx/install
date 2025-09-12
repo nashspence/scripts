@@ -49,7 +49,8 @@ main() {
   # ---- PATH block markers ---------------------------------------------------
   typeset -gr PATH_BEGIN_MARK="# >>> podman-scripts PATH >>>"
   typeset -gr PATH_END_MARK="# <<< podman-scripts PATH <<<"
-  typeset -gr PATH_EXPORT_LINE="export PATH=\"${WRAPPERS_DIR}:${OSXBIN_DIR}:\$PATH\""
+  typeset -gr EXPORT_REPO_LINE="export PODMAN_SCRIPTS_DIR=\"${REPO_DIR}\""
+  typeset -gr SOURCE_LIB_LINE='source "$PODMAN_SCRIPTS_DIR/osx/lib.sh"'
 
   # ---- Helpers --------------------------------------------------------------
   die() { print -u2 -- "ERROR: $*"; exit 1; }
@@ -61,7 +62,8 @@ main() {
     if ! grep -Fqx -- "$PATH_BEGIN_MARK" "$file" 2>/dev/null; then
       {
         printf '\n%s\n' "$PATH_BEGIN_MARK"
-        printf '%s\n' "$PATH_EXPORT_LINE"
+        printf '%s\n' "$EXPORT_REPO_LINE"
+        printf '%s\n' "$SOURCE_LIB_LINE"
         printf '%s\n' "$PATH_END_MARK"
       } >> "$file"
       echo "  + added PATH block to ${file##$HOME/}"
