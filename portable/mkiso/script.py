@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
 import argparse
 import os
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from typing import Any
 
-VERBOSE = False
+VERBOSE: bool = False
 
 
 # ---------- small helpers ----------
-def eprint(*a, **k):
+def eprint(*a: object, **k: Any) -> None:
     print(*a, **k, file=sys.stderr)
 
 
-def vlog(*a, **k):
+def vlog(*a: object, **k: Any) -> None:
     if VERBOSE:
         eprint(*a, **k)
 
@@ -31,6 +31,7 @@ def fmt_bytes(n: int) -> str:
         if f < 1024.0 or u == units[-1]:
             return f"{f:.1f} {u}" if u != "B" else f"{int(f)} {u}"
         f /= 1024.0
+    raise AssertionError("unreachable")
 
 
 def count_files_bytes(root: str) -> tuple[int, int]:
@@ -82,8 +83,17 @@ def resolve_out_file(out_dir: str, out_file: str) -> str:
     return os.path.join(out_dir, out_file)
 
 
-def run_genisoimage(src_dir: str, label: str, out_path: str):
-    cmd = ["genisoimage", "-quiet", "-o", out_path, "-V", label, "-udf", src_dir]
+def run_genisoimage(src_dir: str, label: str, out_path: str) -> None:
+    cmd: list[str] = [
+        "genisoimage",
+        "-quiet",
+        "-o",
+        out_path,
+        "-V",
+        label,
+        "-udf",
+        src_dir,
+    ]
     vlog(f"+ {' '.join(cmd)}")
     proc = subprocess.run(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
@@ -95,7 +105,7 @@ def run_genisoimage(src_dir: str, label: str, out_path: str):
 
 
 # ---------- main ----------
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(description=("Minimal ISO builder (dir → .iso)."))
     ap.add_argument(
         "--src-dir", default="/in", help="Directory to package (default: /in)."
@@ -118,7 +128,7 @@ def main():
     ap.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging."
     )
-    args = ap.parse_args()
+    args: argparse.Namespace = ap.parse_args()
 
     global VERBOSE
     VERBOSE = args.verbose
@@ -128,9 +138,9 @@ def main():
         eprint(f"[mkiso] ERROR: source directory not found: {args.src_dir}")
         sys.exit(2)
 
-    label = args.label or utc_ts()
+    label: str = args.label or utc_ts()
 
-    if args.out_file:
+    if args.out_file is not None:
         out_path = resolve_out_file(args.out_dir, args.out_file)
         if os.path.exists(out_path):
             eprint(f"[mkiso] ERROR: output file already exists: {out_path}")
@@ -148,7 +158,7 @@ def main():
     run_genisoimage(args.src_dir, label, out_path)
 
     # Final summary
-    size = 0
+    size: int = 0
     try:
         size = os.path.getsize(out_path)
     except OSError:

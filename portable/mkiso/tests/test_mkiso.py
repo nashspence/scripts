@@ -1,15 +1,16 @@
 """Tests for mkiso script."""
 
-# mypy: ignore-errors
-
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 import portable.mkiso.script as script  # noqa: E402
 
 
-def test_stdout_is_output_filename(tmp_path, monkeypatch, capsys):
+def test_stdout_is_output_filename(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     (src_dir / "a.txt").write_text("hi")
