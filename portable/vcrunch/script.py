@@ -352,18 +352,23 @@ def main():
         video_kbps = global_video_kbps
         audio_kbps = max(1, int(audio_bps / 1000))
         ff = [
-            "ffmpeg", "-hide_banner",
-            "-loglevel", "info" if args.verbose else "warning",
+            "ffmpeg",
         ]
         if args.verbose:
-            ff += ["-stats"]
+            ff += ["-stats",
+                "-loglevel", "info",
+            ]
+        else:
+            ff += ["-hide_banner",
+                "-loglevel", "warning",
+            ]
         ff += [
             "-y", "-ignore_unknown", "-ignore_editlist", "1",
             "-i", stage_src,
             "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
             "-fps_mode", "passthrough",
             "-c:v", "libsvtav1", "-b:v", f"{video_kbps}k",
-            "-g", "240", "-preset", "5", "-svtav1-params", "lp=6",
+            "-g", "240", "-preset", "5", "-svtav1-params", "lp=5",
             "-c:a", "libopus", "-b:a", f"{audio_kbps}k",
             "-c:s", "copy",
             "-cues_to_front", "1", "-reserve_index_space", "200k",
@@ -377,7 +382,12 @@ def main():
         try:
             logging.debug("+ %s", " ".join(map(str, ff)))
             env = os.environ.copy()
-            env["SVT_LOG"] = "2" # set 4 for debug level logging from SVT
+
+            if not args.verbose:
+                env["SVT_LOG"] = "2"
+            else:
+                env["SVT_LOG"] = "4"
+                
             p = subprocess.run(ff, env=env)
             if p.returncode != 0:
                 logging.error("ffmpeg failed for %s", src)

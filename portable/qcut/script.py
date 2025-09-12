@@ -608,7 +608,7 @@ def main():
                 "-crf",
                 str(m["plan"]["svt_crf"]),
                 "-svtav1-params",
-                "lp=6",
+                "lp=5",
                 "-c:a",
                 "libopus",
                 "-b:a", m["plan"]["opus_br"],
@@ -635,8 +635,10 @@ def main():
             log("CMD: " + " ".join(shlex.quote(x) for x in cmd))
         t0 = time.time()
 
+
         env = os.environ.copy()
-        env["SVT_LOG"] = "2" # set 4 for debug level logging from SVT
+        if not VERBOSE:
+            env["SVT_LOG"] = "2" # set 4 for debug level logging from SVT
         r = subprocess.run(cmd, env=env)
 
         size_now = os.path.getsize(out_clip) if os.path.exists(out_clip) else 0
