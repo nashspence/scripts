@@ -1,8 +1,8 @@
-#!/usr/bin/env zsh
+#!/bin/sh
 
 # Adjust PATH using the repository directory provided in PODMAN_SCRIPTS_DIR.
-
-# Skip if the variable is unset.
-[[ -n "${PODMAN_SCRIPTS_DIR:-}" ]] || return 0
-
-export PATH="${PODMAN_SCRIPTS_DIR}/.wrappers:${PODMAN_SCRIPTS_DIR}/osx/bin:$PATH"
+if [ -z "${PODMAN_SCRIPTS_DIR:-}" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+PATH="${PODMAN_SCRIPTS_DIR}/.wrappers:${PODMAN_SCRIPTS_DIR}/osx/bin:${PATH}"
+export PATH
