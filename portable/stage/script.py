@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
 import argparse
 import hashlib
 import json
@@ -9,36 +8,53 @@ import shutil
 import sys
 import time
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, NotRequired, Optional, Set, Tuple, TypedDict, cast
 
 DEFAULT_MANIFEST = ".job.json"
 HASH_BUF = 8 * 1024 * 1024  # 8MB
 VERBOSE = False
 
 
+class ManifestItem(TypedDict, total=False):
+    src: str
+    dst: str
+    size: int
+    mtime: int
+    status: str
+    finished_at: str
+
+
+class Manifest(TypedDict):
+    version: int
+    updated: str
+    items: Dict[str, ManifestItem]
+    complete: NotRequired[bool]
+    completed_at: NotRequired[str]
+
+
 # ---------- tiny utils ----------
-def eprint(*a, **k):
+def eprint(*a: object, **k: Any) -> None:
     print(*a, **k, file=sys.stderr)
 
 
-def debug(msg: str):
+def debug(msg: str) -> None:
     if VERBOSE:
         eprint(msg)
 
 
-def log_created(path: str):
+def log_created(path: str) -> None:
     debug(f"created {path}")
 
 
-def log_deleted(path: str):
+def log_deleted(path: str) -> None:
     debug(f"deleted {path}")
 
 
-def warn(msg: str):
+def warn(msg: str) -> None:
     eprint(f"warn: {msg}")
 
 
-def error(msg: str):
+def error(msg: str) -> None:
     eprint(f"error: {msg}")
 
 
@@ -52,20 +68,28 @@ def read_paths_from(fpath: str) -> List[str]:
         return [ln.strip() for ln in fh if ln.strip()]
 
 
-def load_manifest(path: str) -> dict:
+def load_manifest(path: str) -> Manifest:
     if not os.path.exists(path):
-        return {"version": 1, "updated": now_utc_iso(), "items": {}}
+        return {
+            "version": 1,
+            "updated": now_utc_iso(),
+            "items": cast(Dict[str, ManifestItem], {}),
+        }
     try:
         with open(path, "r", encoding="utf-8") as f:
-            m = json.load(f)
+            m = cast(Manifest, json.load(f))
             if "items" not in m:
-                m["items"] = {}
+                m["items"] = cast(Dict[str, ManifestItem], {})
             return m
     except Exception:
-        return {"version": 1, "updated": now_utc_iso(), "items": {}}
+        return {
+            "version": 1,
+            "updated": now_utc_iso(),
+            "items": cast(Dict[str, ManifestItem], {}),
+        }
 
 
-def save_manifest(manifest: dict, path: str):
+def save_manifest(manifest: Manifest, path: str) -> None:
     manifest["updated"] = now_utc_iso()
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -104,7 +128,7 @@ def verify_copy_srcsize(
         return False
 
 
-def fsync_path(path: str):
+def fsync_path(path: str) -> None:
     try:
         fd = os.open(path, os.O_RDONLY)
         try:
@@ -123,7 +147,7 @@ def fsync_path(path: str):
         pass
 
 
-def copy_atomic_infinite_retry(src: str, dst: str, use_hash: bool, algo: str):
+def copy_atomic_infinite_retry(src: str, dst: str, use_hash: bool, algo: str) -> None:
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     attempt = 0
     while True:
@@ -153,7 +177,7 @@ def copy_atomic_infinite_retry(src: str, dst: str, use_hash: bool, algo: str):
         time.sleep(min(60, 2 ** min(10, attempt)))
 
 
-def delete_with_retry(path: str):
+def delete_with_retry(path: str) -> None:
     attempt = 0
     while True:
         attempt += 1
@@ -169,7 +193,7 @@ def delete_with_retry(path: str):
 
 
 # ---------- completion helpers ----------
-def manifest_indicates_completed(manifest: dict) -> bool:
+def manifest_indicates_completed(manifest: Manifest) -> bool:
     """
     True if manifest says the job is complete:
       - top-level `complete` flag, OR
@@ -177,7 +201,9 @@ def manifest_indicates_completed(manifest: dict) -> bool:
     """
     if manifest.get("complete") is True:
         return True
-    items = manifest.get("items", {})
+    items: Dict[str, ManifestItem] = manifest.get(
+        "items", cast(Dict[str, ManifestItem], {})
+    )
     if not items:
         return False
     for rec in items.values():
@@ -221,7 +247,7 @@ def walk_root(root: str) -> List[str]:
     return files
 
 
-def unique_with_suffix(dest_dir: str, rel_path: str, used: set) -> str:
+def unique_with_suffix(dest_dir: str, rel_path: str, used: Set[str]) -> str:
     base_dir = os.path.dirname(rel_path)
     name = os.path.basename(rel_path)
     stem, ext = os.path.splitext(name)
@@ -251,7 +277,7 @@ def plan_dest_for_file(src: str, root: str) -> str:
 
 
 # ---------- main ----------
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(
         description="Generic, durable file staging: mirrors subdirectories by default (EXCLUDES root). "
         "Atomic writes, infinite retries, auto-resume, and a retained manifest."
@@ -305,7 +331,7 @@ def main():
 
     os.makedirs(args.dest_dir, exist_ok=True)
     manifest_path = os.path.join(args.dest_dir, args.manifest_name)
-    manifest = load_manifest(manifest_path)
+    manifest: Manifest = load_manifest(manifest_path)
 
     # ----- EARLY EXIT if manifest already indicates successful completion -----
     if manifest_indicates_completed(manifest):
@@ -336,7 +362,7 @@ def main():
         sys.exit(1)
 
     # Plan destinations. If manifest already has a recorded dst for this (src_key), reuse it exactly.
-    used_relpaths = set()
+    used_relpaths: Set[str] = set()
     planned: List[Tuple[str, str, str, os.stat_result]] = []  # (src, dst_abs, key, st)
     for src, root in file_entries:
         st = os.stat(src)
@@ -366,7 +392,13 @@ def main():
 
     copied = 0
     for src, dst, key, st in planned:
-        rec = manifest["items"].get(key, {"src": src, "dst": dst, "status": "pending"})
+        rec: ManifestItem = manifest["items"].get(
+            key,
+            cast(
+                ManifestItem,
+                {"src": src, "dst": dst, "status": "pending"},
+            ),
+        )
         rec.update(
             {"src": src, "dst": dst, "size": st.st_size, "mtime": int(st.st_mtime)}
         )
@@ -420,13 +452,17 @@ def main():
     # ----- completion check: mark manifest complete if ALL planned items are done and present -----
     success = True
     for _src, _dst, key, _st in planned:
-        rec = manifest["items"].get(key)
-        if not rec or rec.get("status") != "done":
+        rec_entry = manifest["items"].get(key)
+        if not rec_entry or rec_entry.get("status") != "done":
+            success = False
+            break
+        dst_path = rec_entry.get("dst")
+        if not dst_path:
             success = False
             break
         try:
-            ds = os.stat(rec["dst"])
-            if ds.st_size != rec.get("size", ds.st_size):
+            ds = os.stat(dst_path)
+            if ds.st_size != rec_entry.get("size", ds.st_size):
                 success = False
                 break
         except FileNotFoundError:
