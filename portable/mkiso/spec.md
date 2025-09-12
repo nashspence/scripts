@@ -1,9 +1,22 @@
 # mkiso
 
 ## Scenario: build an ISO image
-* When I run mkiso with an input directory and output file
-* Then the output file is created
+* Given a directory "<src>" containing files
+* And an output directory "<out>"
+* When I pass --src-dir "<src>"
+* And I pass --out-dir "<out>"
+* And I pass --out-file "<name>.iso"
+* And I run mkiso
+* Then mkiso writes the ISO to "<out>/<name>.iso"
+* And mkiso prints "<name>.iso"
 
 ## Scenario: verbose logging
-* When I run mkiso with an input directory and output file and verbose mode
-* Then the output file is created
+* Given a directory "<src>" containing files
+* And an output directory "<out>"
+* When I pass --src-dir "<src>"
+* And I pass --out-dir "<out>"
+* And I pass --out-file "<name>.iso"
+* And I pass --verbose
+* And I run mkiso
+* Then mkiso writes the ISO to "<out>/<name>.iso"
+* And mkiso prints "<name>.iso"

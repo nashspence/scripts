@@ -155,6 +155,7 @@ def main():
         pass
     dur = time.time() - start
     eprint(f"{out_path} {fmt_bytes(size)} {dur:.1f}s label={label}")
+    print(os.path.basename(out_path))
 
 
 if __name__ == "__main__":
