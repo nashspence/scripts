@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
+
 import argparse
 import json
 import math
@@ -11,10 +11,11 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, cast
 
 
 # ------------------------- logging & misc -------------------------
-def eprint(msg: str):  # errors/warnings to stderr
+def eprint(msg: str) -> None:  # errors/warnings to stderr
     print(msg, file=sys.stderr)
 
 
@@ -25,7 +26,7 @@ def now_utc_iso() -> str:
 VERBOSE = False
 
 
-def log(msg: str):  # timestamped progress logs
+def log(msg: str) -> None:  # timestamped progress logs
     if VERBOSE:
         eprint(f"[{now_utc_iso()}] {msg}")
 
@@ -39,7 +40,7 @@ MANIFEST_NAME = ".job.json"
 
 
 # ------------------------- system/ffmpeg helpers -------------------------
-def need(cmd: str):
+def need(cmd: str) -> None:
     r = subprocess.run(["sh", "-lc", f"command -v {cmd} >/dev/null 2>&1"])
     if r.returncode != 0:
         eprint(f"[autoedit] ERROR: required command missing: {cmd}")
@@ -104,8 +105,8 @@ def has_audio_stream(path: str, timeout_sec: int = 15) -> bool:
     return bool(r.stdout.strip())
 
 
-def walk_video_files(root: str):
-    files = []
+def walk_video_files(root: str) -> List[str]:
+    files: List[str] = []
     for dp, _, fns in os.walk(root):
         for f in fns:
             if f.endswith(VIDEO_EXTS):
@@ -126,7 +127,7 @@ _PATTERNS = [
 ]
 
 
-def epoch_from_filename(name: str):
+def epoch_from_filename(name: str) -> Optional[int]:
     bn = os.path.basename(name)
     for rx in _PATTERNS:
         m = rx.search(bn)
@@ -247,18 +248,18 @@ def manifest_path(out_dir: str) -> str:
     return os.path.join(out_dir, MANIFEST_NAME)
 
 
-def load_manifest(out_dir: str) -> dict:
+def load_manifest(out_dir: str) -> Dict[str, Any]:
     path = manifest_path(out_dir)
     if not os.path.exists(path):
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            return cast(Dict[str, Any], json.load(f))
     except Exception:
         return {}
 
 
-def save_manifest(out_dir: str, m: dict):
+def save_manifest(out_dir: str, m: Dict[str, Any]) -> None:
     # Atomic, non-destructive update (never deletes the manifest file outright)
     m["updated"] = now_utc_iso()
     tmp = manifest_path(out_dir) + ".tmp"
@@ -268,7 +269,9 @@ def save_manifest(out_dir: str, m: dict):
     os.replace(tmp, manifest_path(out_dir))
 
 
-def new_manifest(src_dir: str, files_with_stats: list[dict], out_dir: str) -> dict:
+def new_manifest(
+    src_dir: str, files_with_stats: List[Dict[str, Any]], out_dir: str
+) -> Dict[str, Any]:
     total_size = sum(f["size"] for f in files_with_stats)
     return {
         "version": 1,
@@ -286,9 +289,9 @@ def new_manifest(src_dir: str, files_with_stats: list[dict], out_dir: str) -> di
     }
 
 
-def current_sources_sig(src_dir: str) -> list[dict]:
+def current_sources_sig(src_dir: str) -> List[Dict[str, Any]]:
     files = walk_video_files(src_dir)
-    stats = []
+    stats: List[Dict[str, Any]] = []
     for p in files:
         try:
             st = os.stat(p)
@@ -304,7 +307,7 @@ def current_sources_sig(src_dir: str) -> list[dict]:
     return stats
 
 
-def sources_sig_same(m: dict, src_dir: str) -> bool:
+def sources_sig_same(m: Dict[str, Any], src_dir: str) -> bool:
     try:
         cur = current_sources_sig(src_dir)
         prev = m.get("sources", {})
@@ -323,7 +326,7 @@ def sources_sig_same(m: dict, src_dir: str) -> bool:
 
 
 # ------------------------- main -------------------------
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(
         description="Auto-edit from a source directory of videos with timestamp overlays and resumable manifest."
     )
@@ -379,8 +382,8 @@ def main():
     global VERBOSE
     VERBOSE = args.verbose or args.debug_cmds
 
-    for cmd in ("ffmpeg", "ffprobe", "mkvmerge"):
-        need(cmd)
+    for exe in ("ffmpeg", "ffprobe", "mkvmerge"):
+        need(exe)
 
     if not os.path.isdir(args.src_dir):
         eprint(
@@ -580,7 +583,7 @@ def main():
         map_seq = ["-map", "[v]", "-map", "[a]"]
 
         os.makedirs(os.path.dirname(out_clip), exist_ok=True)
-        cmd = (
+        cmd: list[str] = (
             [
                 "ffmpeg",
                 "-hide_banner",
