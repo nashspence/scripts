@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# mypy: ignore-errors
 
 import argparse
 import hashlib
@@ -11,7 +10,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, List, Optional, Sequence, TypedDict, cast
 
 VIDEO_EXTS = {
     ".mp4",
@@ -31,7 +30,14 @@ MANIFEST_NAME = ".job.json"
 MAX_SVT_KBPS = 100_000
 DEFAULT_TARGET_SIZE = "23.30G"
 DEFAULT_SAFETY_OVERHEAD = 0.012
-MEDIA_PRESETS = {
+
+
+class MediaPreset(TypedDict):
+    target_size: str
+    safety_overhead: float
+
+
+MEDIA_PRESETS: dict[str, MediaPreset] = {
     "cdr700": {"target_size": "650M", "safety_overhead": 0.020},
     "dvd5": {"target_size": "4.36G", "safety_overhead": 0.020},
     "dvd9": {"target_size": "7.95G", "safety_overhead": 0.020},
@@ -42,7 +48,8 @@ MEDIA_PRESETS = {
     "bdr100": {"target_size": "93.10G", "safety_overhead": 0.012},
     "bdr128": {"target_size": "119.10G", "safety_overhead": 0.012},
 }
-_MEDIA_ALIASES = {
+
+_MEDIA_ALIASES: dict[str, str] = {
     "cd700": "cdr700",
     "cdr": "cdr700",
     "cd-r": "cdr700",
@@ -117,9 +124,9 @@ def kbps_to_bps(s: str) -> int:
     return int(float(s))
 
 
-def ffprobe_json(cmd: list) -> dict:
+def ffprobe_json(cmd: Sequence[str]) -> dict[str, Any]:
     out = subprocess.check_output(cmd)
-    return json.loads(out)
+    return cast(dict[str, Any], json.loads(out))
 
 
 def ffprobe_duration(path: str) -> float:
@@ -181,12 +188,12 @@ def now_utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def load_manifest(path: str) -> dict:
+def load_manifest(path: str) -> dict[str, Any]:
     if not os.path.exists(path):
         return {"version": 1, "updated": now_utc_iso(), "items": {}}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            m = json.load(f)
+            m = cast(dict[str, Any], json.load(f))
             if "items" not in m:
                 m["items"] = {}
             return m
@@ -194,7 +201,7 @@ def load_manifest(path: str) -> dict:
         return {"version": 1, "updated": now_utc_iso(), "items": {}}
 
 
-def save_manifest(manifest: dict, path: str):
+def save_manifest(manifest: dict[str, Any], path: str) -> None:
     manifest["updated"] = now_utc_iso()
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -207,7 +214,7 @@ def src_key(src_abs: str, st: os.stat_result) -> str:
     return f"{src_abs}|{st.st_size}|{int(st.st_mtime)}"
 
 
-def all_videos_done(manifest: dict, out_dir: str) -> bool:
+def all_videos_done(manifest: dict[str, Any], out_dir: str) -> bool:
     saw_video = False
     for rec in manifest.get("items", {}).values():
         if rec.get("type") != "video":
@@ -228,7 +235,7 @@ def _short_hash(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:8]
 
 
-def copy_assets(assets: List[str], out_dir: str):
+def copy_assets(assets: List[str], out_dir: str) -> None:
     for src in assets:
         dest = os.path.join(out_dir, os.path.basename(src))
         if os.path.abspath(src) == os.path.abspath(dest):
@@ -240,7 +247,7 @@ def copy_assets(assets: List[str], out_dir: str):
             logging.error("failed to copy asset %s -> %s: %s", src, dest, e)
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(
         description="Encode videos (SVT-AV1) with resume manifest. Non-video files are copied to the output directory."
     )
@@ -342,7 +349,7 @@ def main():
         logging.info("manifest: %s", manifest_path)
         return
 
-    inputs = []
+    inputs: List[str] = []
     if args.paths_from:
         inputs += read_paths_from(args.paths_from)
     inputs += args.input
@@ -409,7 +416,7 @@ def main():
     audio_bps = kbps_to_bps(args.audio_bitrate)
     total_duration = 0.0
     total_audio_bytes = 0
-    durations = []
+    durations: List[float] = []
     for src in videos:
         d = ffprobe_duration(src)
         durations.append(d)
