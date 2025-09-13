@@ -25,8 +25,11 @@ STOP_GRACE_SECS=${STOP_GRACE_SECS:-1}
 QUIESCE_MS=${QUIESCE_MS:-1500}      # watch briefly for back-to-back clients
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-90}
 
+mkdir -p "$STATE_DIR"
+exec 3>>"$STATE_DIR/agent.log"
+
 log() {
-  printf '%s podman-machine-agent[%s]: %s\n' "$(date '+%F %T')" "$$" "$*"
+  printf '%s podman-machine-agent[%s]: %s\n' "$(date '+%F %T')" "$$" "$*" >&3
 }
 
 gc_holds() {
