@@ -16,27 +16,32 @@ case "$pid" in
 esac
 
 command -v nc >/dev/null 2>&1 || { echo "nc not found" >&2; exit 127; }
+command -v podman >/dev/null 2>&1 || { echo "podman not found" >&2; exit 127; }
 
 uid=$(id -u)
 sock="${DR_PODMAN_SOCK:-${PODMAN_SOCK:-/tmp/com.nashspence.scripts.podman-machine.${uid}.sock}}"
 
-nc -U "$sock" </dev/null >/dev/null &
-sock_pid=$!
+while kill -0 "$pid" 2>/dev/null; do
+    if podman --url "unix://$sock" info >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1 || exit 1
+done
+kill -0 "$pid" 2>/dev/null || exit 1
 
-cleanup() {
+(
+    nc -U "$sock" </dev/null >/dev/null &
+    sock_pid=$!
+    sleep 0.1
+    if ! kill -0 "$sock_pid" 2>/dev/null; then
+        wait "$sock_pid" 2>/dev/null || true
+        exit 1
+    fi
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 15 || break
+    done
     kill "$sock_pid" 2>/dev/null || true
     wait "$sock_pid" 2>/dev/null || true
-}
-trap cleanup EXIT INT HUP TERM
+) &
 
-# ensure connection succeeded
-sleep 0.1
-if ! kill -0 "$sock_pid" 2>/dev/null; then
-    wait "$sock_pid" 2>/dev/null || true
-    echo "failed to connect to $sock" >&2
-    exit 1
-fi
-
-while kill -0 "$pid" 2>/dev/null; do
-    sleep 15 || break
-done
+exit 0

@@ -22,8 +22,7 @@ MACHINE=${DR_MACHINE:-${MACHINE:-com.nashspence.scripts}}
 IMAGE_PREFIX=${DR_IMAGE_PREFIX:-com.nashspence.scripts.}
 TAG=${DR_TAG:-latest}
 
-use-scripts-machine "$$" &
-podman --connection "$MACHINE" info >/dev/null 2>&1 || true
+use-scripts-machine "$$"
 
 release_file="${dir}/release.yaml"
 containerfile=""
