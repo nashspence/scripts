@@ -18,6 +18,11 @@ This file applies to the entire repository.
 4. GitHub Actions CI runs `pre-commit run --all-files`, `pytest`, and `pytest -m integration` on all supported platforms.
 5. For portable services with a `Containerfile`, update `spec.md`. Directories containing only a `release.yaml` do not require a spec.
 
+Avoid adding linter or formatter ignore comments (for example, `# noqa`, `# fmt: off`)
+unless absolutely necessary. When such comments are required, include an inline
+explanation of their necessity, justify why they are acceptable, and note this
+explicitly in the commit message.
+
 Scripts are containerised for cross‑platform use with Podman. Host-specific helpers (e.g. in `osx/`) are only for tasks that do not containerise cleanly.
 
 When writing shell scripts, prefer POSIX-compliant `sh` and use other shells only when absolutely necessary.
