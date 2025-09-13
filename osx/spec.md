@@ -95,3 +95,18 @@
 * When I run kc with "delete"
 * And I pass the same name
 * Then the password is removed
+
+## Scenario: send a notification to all services
+* When I run ha-notify
+* And I pass "*"
+* And I pass a title
+* And I pass a message
+* Then Home Assistant receives the notification
+
+## Scenario: send a notification to a service with data
+* When I run ha-notify
+* And I pass "mobile_app_phone"
+* And I pass a title
+* And I pass a message
+* And I pass "\\{\\\"foo\\\":\\\"bar\\\"\\}"
+* Then Home Assistant receives the notification
