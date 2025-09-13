@@ -1,5 +1,7 @@
 #!/bin/sh
 set -eu
-# Auto-generated wrapper. Invokes 'podman-scripts-machine run' against a release.yaml only.
+# Auto-generated wrapper. Runs a portable container image.
 export DR_WRAPPER_NAME="%NAME%"
-exec podman-scripts-machine run -r "%ABS%" "$@"
+use-scripts-machine "$$" &
+img=$(nsimg "%NAME%")
+exec podman run --rm "$img" "$@"
