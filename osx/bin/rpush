@@ -1,282 +1,114 @@
-#!/bin/zsh
-# Generic Finder-backed network copy/move for macOS (BSD-ish zsh).
+#!/bin/sh
+# Minimal Finder-backed network copy/move for macOS.
 # Usage: rpush [--ignore-dotfiles] <copy|move> <SRC_PATH> <URL>
 # URL schemes: smb://  nfs://  http(s):// (WebDAV)
 
-set -e
-set -u
-set -o pipefail
+set -eu
 
-main() {
-  emulate -L zsh
-  set -e
-  set -u
-  set -o pipefail
+ignore_dotfiles=0
+if [ "${1-}" = "--ignore-dotfiles" ]; then
+  ignore_dotfiles=1
+  shift
+fi
 
-  local ignore_dotfiles=0
-  if [[ "${1:-}" == --ignore-dotfiles ]]; then
-    ignore_dotfiles=1
-    shift
-  fi
+if [ "$#" -ne 3 ]; then
+  printf 'Usage: %s [--ignore-dotfiles] <copy|move> <SRC_PATH> <URL>\n' "$0" >&2
+  exit 64
+fi
 
-  if (( $# != 3 )); then
-    print -u2 "Usage: $0 [--ignore-dotfiles] <copy|move> <SRC_PATH> <URL>"
-    return 64
-  fi
+op=$1
+SRC=$2
+URL=$3
 
-  local op="$1" SRC="$2" URL="$3"
-  local TIMEOUT=10
+case "$op" in
+  copy|move) ;;
+  *) printf 'First arg must be "copy" or "move"\n' >&2; exit 64 ;;
+esac
 
-  case "$op" in
-    copy|move) ;;
-    *) print -u2 "First arg must be 'copy' or 'move'"; return 64 ;;
-  esac
+src_has_trailing_slash=0
+case "$SRC" in
+  */) src_has_trailing_slash=1 ;;
+esac
+SRC_CHECK=${SRC%/}
 
-  # Trailing-slash semantics (dirs only)
-  local src_has_trailing_slash=0
-  [[ "$SRC" == */ ]] && src_has_trailing_slash=1
-  local SRC_CHECK="${SRC%/}"
+if [ -d "$SRC_CHECK" ]; then
+  is_dir=1
+  is_file=0
+elif [ -f "$SRC_CHECK" ]; then
+  is_dir=0
+  is_file=1
+else
+  printf 'No such file or directory: %s\n' "$SRC_CHECK" >&2
+  exit 2
+fi
 
-  local is_dir=0 is_file=0
-  if [[ -d "$SRC_CHECK" ]]; then
-    is_dir=1
-  elif [[ -f "$SRC_CHECK" ]]; then
-    is_file=1
-  else
-    print -u2 "No such file or directory: $SRC_CHECK"
-    return 2
-  fi
-  if (( is_file && src_has_trailing_slash )); then
-    print -u2 "Trailing slash not allowed on file paths: $SRC"
-    return 64
-  fi
+if [ $is_file -eq 1 ] && [ $src_has_trailing_slash -eq 1 ]; then
+  printf 'Trailing slash not allowed on file paths: %s\n' "$SRC" >&2
+  exit 64
+fi
 
-  if (( ignore_dotfiles )) && (( ! src_has_trailing_slash || ! is_dir )); then
-    print -u2 "--ignore-dotfiles requires a directory path ending with '/': $SRC"
-    return 64
-  fi
+if [ $ignore_dotfiles -eq 1 ] && { [ $src_has_trailing_slash -eq 0 ] || [ $is_dir -eq 0 ]; }; then
+  printf '%s\n' "--ignore-dotfiles requires a directory path ending with '/': $SRC" >&2
+  exit 64
+fi
 
-  # ---- Parse URL (scheme://[userinfo@]host[:port][/path...])
-  local proto="${URL%%:*}"
-  local rest="${URL#*://}"
-  local authority="${rest%%/*}"
-  local path_all=""; [[ "$rest" == */* ]] && path_all="${rest#*/}"
+proto=${URL%%:*}
+rest=${URL#*://}
+host=${rest%%/*}
+path_all=""
+[ "$rest" != "$host" ] && path_all=${rest#*/}
 
-  local host="${authority##*@}"; host="${host%%:*}"
-  [[ -n "$proto" && -n "$host" ]] || { print -u2 "Malformed URL: $URL"; return 64; }
+case "$proto" in
+  smb|nfs|http|https) ;;
+  *) printf 'Unsupported protocol: %s (allowed: smb,nfs,http,https)\n' "$proto" >&2; exit 64 ;;
+esac
 
-  case "$proto" in
-    smb|nfs|http|https) ;;
-    *) print -u2 "Unsupported protocol: $proto (allowed: smb,nfs,http,https)"; return 64 ;;
-  esac
+# Mount the network volume
+/usr/bin/osascript -e "try" -e "mount volume \"$URL\"" -e "end try" >/dev/null 2>&1 || true
 
-  # ---- Map scheme to mount-root semantics + fstype hint
-  local mode_and_hint
-  _scheme_root_mode "$proto"; mode_and_hint="$REPLY"
-  local root_mode="${mode_and_hint%%:*}"
-  local fstype_hint="${mode_and_hint#*:}"
+# Guess mount point
+if [ "$proto" = "smb" ]; then
+  share=${path_all%%/*}
+  [ -n "$share" ] || { printf 'smb:// requires smb://HOST/SHARE[/sub/dir]\n' >&2; exit 64; }
+  mount_point="/Volumes/$(printf '%b' "$(printf '%s' "$share" | sed 's/+/ /g;s/%/\\x/g')")"
+  dest_sub=""
+  [ "$path_all" = "$share" ] || dest_sub=${path_all#*/}
+else
+  base=$host
+  [ -n "$path_all" ] && base=${path_all##*/}
+  mount_point="/Volumes/$(printf '%b' "$(printf '%s' "$base" | sed 's/+/ /g;s/%/\\x/g')")"
+  dest_sub=""
+fi
 
-  # ---- Compute mount URL, expected /Volumes name, and subpath under the mount
-  local mount_url vol_basename dest_subpath_decoded=""
-  local url_has_subpath=0   # NEW: track if user *asked* for a subpath
-  local smb_share_seg=""
-  case "$root_mode" in
-    share)  # SMB: mount share root; anything after first / is subdir
-      smb_share_seg="${path_all%%/*}"
-      [[ -n "$smb_share_seg" ]] || { print -u2 "smb:// requires smb://HOST/SHARE[/sub/dir]"; return 64; }
-      mount_url="${proto}://${authority}/${smb_share_seg}"
-      vol_basename="$(url_decode "$smb_share_seg")"
-      if [[ "$path_all" == */* ]]; then
-        url_has_subpath=1
-        # remove the leading "SHARE/" exactly, not just "*/"
-        local enc_remainder="${path_all#${smb_share_seg}/}"
-        dest_subpath_decoded="$(url_decode "$enc_remainder")"
-        # normalize: drop any accidental leading slash and trailing slash
-        dest_subpath_decoded="${dest_subpath_decoded#/}"
-        dest_subpath_decoded="${dest_subpath_decoded%/}"
-      fi
-      ;;
-    fullpath)  # NFS / WebDAV: mount the full path as root
-      mount_url="$URL"
-      if [[ -n "$path_all" ]]; then
-        vol_basename="$(url_decode "${path_all##*/}")"
-      else
-        vol_basename="$host"
-      fi
-      dest_subpath_decoded=""
-      url_has_subpath=0
-      ;;
-  esac
+[ -d "$mount_point" ] || { printf 'Failed to mount %s\n' "$URL" >&2; exit 4; }
 
-  # ---- Find or mount (background; no Finder focus/window)
-  local MOUNT
-  if ! MOUNT="$(_find_mountpoint_for "$proto" "$host" "$vol_basename" "$fstype_hint" "$smb_share_seg")"; then
-    _mount_network_volume "$mount_url" || true
-    local i=1
-    while (( i <= TIMEOUT )); do
-      if MOUNT="$(_find_mountpoint_for "$proto" "$host" "$vol_basename" "$fstype_hint" "$smb_share_seg")"; then
-        break
-      fi
-      sleep 1
-      (( i++ ))
-    done
-    [[ -n "${MOUNT:-}" ]] || { print -u2 "Failed to mount $mount_url"; return 4; }
-  fi
+dest="$mount_point"
+if [ -n "$dest_sub" ]; then
+  decoded_sub=$(printf '%b' "$(printf '%s' "$dest_sub" | sed 's/+/ /g;s/%/\\x/g')")
+  dest="$dest/$decoded_sub"
+fi
 
-  # Build destination directory path (fully normalized)
-  local DEST_DIR_NORM="$MOUNT"
-  if [[ "$root_mode" == share && "$url_has_subpath" == 1 ]]; then
-    # Always honor that a subpath was requested; never silently collapse to root
-    [[ -z "$dest_subpath_decoded" ]] && { print -u2 "Invalid destination path in URL (empty after decoding): $URL"; return 64; }
-    DEST_DIR_NORM="${MOUNT%/}/${dest_subpath_decoded}"
-  fi
-
-  mkdir -p -- "$DEST_DIR_NORM" || { print -u2 "Cannot create dest dir: $DEST_DIR_NORM"; return 5; }
-  [[ -d "$DEST_DIR_NORM" ]] || { print -u2 "Dest path is not a directory: $DEST_DIR_NORM"; return 5; }
-
-  # ---- Choose rsync flags (safe for network FS)
-  command -v rsync >/dev/null 2>&1 || { print -u2 "rsync not found"; return 69; }
-
-  local fstype_actual; fstype_actual="$(_fstype_for_mount "$MOUNT")"
-  local -a rsync_base
-  case "$fstype_actual" in
-    smbfs|webdav*) rsync_base=( rsync -a --inplace --no-perms --no-owner --no-group --progress --human-readable ) ;;
-    nfs*)          rsync_base=( rsync -a --progress --human-readable ) ;;
-    *)             rsync_base=( rsync -aE --progress --human-readable ) ;;
-  esac
-  [[ "$op" == move ]] && rsync_base+=( --remove-source-files )
-  (( ignore_dotfiles )) && rsync_base+=( '--exclude=.*' )
-
-  # ---- Transfer (destination always ends with '/')
-  if (( is_file )); then
-    "${rsync_base[@]}" -- "$SRC_CHECK" "${DEST_DIR_NORM%/}/"
-  else
-    if (( src_has_trailing_slash )); then
-      "${rsync_base[@]}" -- "${SRC_CHECK%/}/" "${DEST_DIR_NORM%/}/"
-      [[ "$op" == move ]] && find "$SRC_CHECK" -type d -empty -depth -delete || true
+if [ "$op" = copy ]; then
+  if [ $src_has_trailing_slash -eq 1 ]; then
+    if [ $ignore_dotfiles -eq 1 ]; then
+      rsync -a --exclude='.*' "$SRC" "$dest"
     else
-      "${rsync_base[@]}" -- "$SRC_CHECK" "${DEST_DIR_NORM%/}/"
-      [[ "$op" == move ]] && find "$SRC_CHECK" -type d -empty -depth -delete || true
+      rsync -a "$SRC" "$dest"
     fi
-  fi
-}
-
-# ---- helpers ---------------------------------------------------------------
-
-_scheme_root_mode() {
-  emulate -L zsh
-  local scheme="$1" mode hint
-  case "$scheme" in
-    smb)   mode="share";    hint="smbfs"  ;;
-    nfs)   mode="fullpath"; hint="nfs"    ;;
-    http)  mode="fullpath"; hint="webdav" ;;
-    https) mode="fullpath"; hint="webdav" ;;
-    *)     mode="fullpath"; hint=""       ;;
-  esac
-  REPLY="${mode}:${hint}"
-}
-
-_mount_network_volume() {
-  emulate -L zsh
-  local url="$1"
-  /usr/bin/osascript -l AppleScript - "$url" >/dev/null 2>&1 <<'APPLESCRIPT'
-on run argv
-  try
-    set theURL to item 1 of argv
-    tell application "Finder" to mount volume theURL
-    -- background mount; no window/focus
-  end try
-end run
-APPLESCRIPT
-}
-
-# NOTE: Added $5 expected_share for SMB to avoid grabbing the wrong share.
-_find_mountpoint_for() {
-  emulate -L zsh
-  setopt localoptions null_glob
-  unsetopt extendedglob nomatch
-
-  local proto="$1" host="$2" expected_base="$3" fstype_hint="$4" expected_share="$5"
-  local expected="/Volumes/$expected_base"
-
-  if [[ -d "$expected" ]]; then
-    print -r -- "$expected"; return 0
-  fi
-
-  local mp line spec fstype rhost rshare
-  for mp in /Volumes/*; do
-    [[ -d "$mp" ]] || continue
-    line="$(LC_ALL=C mount | grep -F " on $mp " || true)"
-    [[ -n "$line" ]] || continue
-
-    spec="${line%% on *}"
-    fstype="$(printf '%s\n' "$line" | awk -F'[()]' 'NF>=2{print $2}' | awk -F',' 'NF{print $1}')"
-
-    [[ -n "$fstype_hint" ]] && [[ "$fstype" != "$fstype_hint"* ]] && continue
-
-    rhost=""
-    rshare=""
-    case "$fstype" in
-      smbfs)
-        # //user@host/share
-        rhost="${spec#//*}"; rhost="${rhost#*@}"; rhost="${rhost%%/*}"
-        rshare="${spec##*/}"
-        ;;
-      webdav*)
-        rhost="${spec#*://}"; rhost="${rhost##*@}"; rhost="${rhost%%/*}"; rhost="${rhost%%:*}"
-        ;;
-      nfs*)
-        rhost="${spec%%:*}"
-        ;;
-    esac
-    if [[ -n "$rhost" ]]; then
-      _hosts_equivalent "$host" "$rhost" || continue
-    fi
-    # For SMB, also enforce exact share match if provided
-    if [[ "$fstype" == smbfs && -n "$expected_share" ]]; then
-      # Compare decoded share names
-      if [[ "$(url_decode "$rshare")" != "$(url_decode "$expected_share")" ]]; then
-        continue
-      fi
-    fi
-
-    print -r -- "$mp"
-    return 0
-  done
-
-  return 1
-}
-
-_fstype_for_mount() {
-  emulate -L zsh
-  local mp="$1" line
-  line="$(LC_ALL=C mount | grep -F " on $mp " || true)"
-  [[ -z "$line" ]] && { print -r -- ""; return 0; }
-  printf '%s\n' "$line" \
-    | awk -F'[()]' 'NF>=2{print $2}' \
-    | awk -F',' 'NF{print $1}'
-}
-
-_hosts_equivalent() {
-  emulate -L zsh
-  local a="${1:l}" b="${2:l}"
-  [[ "$a" == "$b" ]] && return 0
-  [[ "${a%%.*}" == "${b%%.*}" ]] && return 0
-  return 1
-}
-
-url_decode() {
-  emulate -L zsh
-  # Prefer zsh’s ${(%)...} if available for correctness; fall back to printf trick.
-  if [[ -n "${ZSH_VERSION:-}" ]]; then
-    # shellcheck disable=SC2059
-    print -r -- "${(%)1}"
   else
-    local s="$1"
-    s="${s//+/ }"
-    s="${s//%/\\x}"
-    printf '%b' "$s"
+    [ $ignore_dotfiles -eq 0 ] || { printf '%s\n' '--ignore-dotfiles requires a directory path ending with "/"' >&2; exit 64; }
+    cp -R "$SRC" "$dest"
   fi
-}
-
-main "$@"
+else
+  if [ $src_has_trailing_slash -eq 1 ]; then
+    if [ $ignore_dotfiles -eq 1 ]; then
+      rsync -a --remove-source-files --exclude='.*' "$SRC" "$dest"
+      find "$SRC_CHECK" -type d -empty -delete
+    else
+      rsync -a --remove-source-files "$SRC" "$dest"
+      find "$SRC_CHECK" -type d -empty -delete
+    fi
+  else
+    mv "$SRC" "$dest"
+  fi
+fi
