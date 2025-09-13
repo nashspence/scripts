@@ -9,4 +9,3 @@ RUN pip install --no-cache-dir pillow
 WORKDIR /app
 COPY script.py /app/padimg
 ENTRYPOINT ["python", "/app/padimg"]
-

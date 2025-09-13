@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Pad an image to a target aspect ratio by adding even gray bars.
+"""Pad an image to a target aspect ratio by adding even gray bars.
 
 Examples:
   # classic: make a square into 4:5 (top/bottom bars)
@@ -18,26 +17,38 @@ Notes:
 - Chooses the minimal padding: tries vertical first (fix width),
   falls back to horizontal if height would need to shrink.
 """
-import os, sys, argparse, math
+
+import argparse
+import math
+import os
+import sys
+
 from PIL import Image, ImageOps
+
+Color = int | tuple[int, int] | tuple[int, int, int] | tuple[int, int, int, int]
+
 
 def parse_ratio(s: str) -> float:
     s = s.strip().lower()
     if ":" in s:
-        a, b = s.split(":")
-        a, b = float(a), float(b)
-        if a <= 0 or b <= 0: raise ValueError
+        a_str, b_str = s.split(":")
+        a, b = float(a_str), float(b_str)
+        if a <= 0 or b <= 0:
+            raise ValueError
         return a / b
     if "x" in s:
-        a, b = s.split("x")
-        a, b = float(a), float(b)
-        if a <= 0 or b <= 0: raise ValueError
+        a_str, b_str = s.split("x")
+        a, b = float(a_str), float(b_str)
+        if a <= 0 or b <= 0:
+            raise ValueError
         return a / b
     r = float(s)
-    if r <= 0: raise ValueError
+    if r <= 0:
+        raise ValueError
     return r
 
-def make_bg(gray: int, mode: str):
+
+def make_bg(gray: int, mode: str) -> Color:
     gray = max(0, min(255, int(gray)))
     if mode in ("RGBA",):
         return (gray, gray, gray, 255)
@@ -47,18 +58,34 @@ def make_bg(gray: int, mode: str):
         return gray
     return (gray, gray, gray)
 
-def main():
-    ap = argparse.ArgumentParser(description="Pad an image to a target aspect ratio with gray bars.")
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="Pad an image to a target aspect ratio with gray bars."
+    )
     ap.add_argument("input", help="Path to input image")
-    ap.add_argument("output", nargs="?", help="Optional output path; defaults to *_padded.<ext>")
-    ap.add_argument("--ratio", default="4:5", help="Target aspect ratio (W:H, float, or WxH). Default: 4:5")
-    ap.add_argument("--gray", type=int, default=128, help="Gray level for bars (0–255). Default: 128")
+    ap.add_argument(
+        "output", nargs="?", help="Optional output path; defaults to *_padded.<ext>"
+    )
+    ap.add_argument(
+        "--ratio",
+        default="4:5",
+        help="Target aspect ratio (W:H, float, or WxH). Default: 4:5",
+    )
+    ap.add_argument(
+        "--gray",
+        type=int,
+        default=128,
+        help="Gray level for bars (0–255). Default: 128",
+    )
     args = ap.parse_args()
 
     try:
         target_ratio = parse_ratio(args.ratio)
     except Exception:
-        sys.exit("error: --ratio must be W:H, WxH, or a positive float (e.g., 4:5, 1080x1350, 0.8)")
+        sys.exit(
+            "error: --ratio must be W:H, WxH, or a positive float (e.g., 4:5, 1080x1350, 0.8)"
+        )
 
     img = Image.open(args.input)
     img = ImageOps.exif_transpose(img)
@@ -73,14 +100,12 @@ def main():
     if new_h >= h:
         pad_total = new_h - h
         pad_top = pad_total // 2
-        pad_bottom = pad_total - pad_top
         canvas = Image.new(img.mode, (w, new_h), make_bg(args.gray, img.mode))
         canvas.paste(img, (0, pad_top))
     else:
         new_w = math.ceil(h * target_ratio)
         pad_total = new_w - w
         pad_left = pad_total // 2
-        pad_right = pad_total - pad_left
         canvas = Image.new(img.mode, (new_w, h), make_bg(args.gray, img.mode))
         canvas.paste(img, (pad_left, 0))
 
@@ -96,6 +121,7 @@ def main():
 
     canvas.save(out_path, quality=95)
     print(out_path)
+
 
 if __name__ == "__main__":
     main()
