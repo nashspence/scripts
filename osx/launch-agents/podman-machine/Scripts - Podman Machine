@@ -78,7 +78,8 @@ log "connection accepted; ensuring machine '$MACHINE' is running"
 podman machine start "$MACHINE" >/dev/null 2>&1 || true
 wait_podman_ready || true
 
-# Block until client closes (connected socket on stdin)
+# Notify the client that the machine is ready, then block until it disconnects
+printf 'ready\n'
 cat >/dev/null || true
 
 # Client disconnected — debounce, then quiesce-watch for a short window
