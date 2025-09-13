@@ -1,28 +1,27 @@
-#!/usr/bin/env zsh
+#!/bin/sh
 
-set -e
-set -u
-set -o pipefail
-[[ -n "${DEBUG:-}" ]] && set -x
+set -eu
+[ -n "${DEBUG:-}" ] && set -x
+
+die() {
+  printf '%s\n' "$*" >&2
+  exit 2
+}
 
 main() {
-  emulate -L zsh
-  set -e
-  set -u
-  set -o pipefail
+  shortcuts="$HOME/.config/podman-scripts/shortcuts_path.zsh"
+  [ -r "$shortcuts" ] || die "Missing shortcuts file: $shortcuts"
 
-  local shortcuts="$HOME/.config/podman-scripts/shortcuts_path.zsh"
-  [[ -r "$shortcuts" ]] || die "Missing shortcuts file: $shortcuts"
-
+  # shellcheck source=/dev/null  # dynamic user config path
   . "$shortcuts"
 
-  local src="${1:-}"
-  [[ -n "$src" ]] || die "No input directory path provided"
-  [[ -r "$src" ]] || die "Input not readable: $src"
+  src="${1:-}"
+  [ -n "$src" ] || die "No input directory path provided"
+  [ -r "$src" ] || die "Input not readable: $src"
 
-  local rname="${2:-}"
-  [[ -n "$rname" ]] || die "No record name provided"
-  [[ -r "$rname" ]] || die "Record name not readable: $rname"
+  rname="${2:-}"
+  [ -n "$rname" ] || die "No record name provided"
+  [ -r "$rname" ] || die "Record name not readable: $rname"
 
   command -v caffeinate >/dev/null 2>&1 || die "caffeinate not found"
   command -v birthrname >/dev/null 2>&1 || die "birthrname not found"
@@ -32,7 +31,5 @@ main() {
   birthrname "$src"
   rpush move "$src/" "smb://0819870.xyz/convert/$rname/"
 }
-
-die() { print -u2 -- "$@"; exit 2; }
 
 main "$@"

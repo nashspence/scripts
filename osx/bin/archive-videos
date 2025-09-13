@@ -1,23 +1,37 @@
-#!/usr/bin/env zsh
+#!/bin/sh
 # Pipeline driver: stage -> vcrunch -> ( mkiso & qcut ) -> burniso -> wait qcut
 # Usage:
 #   archive-videos /path/to/input                     # output: $PWD/$(date -u +%Y%m%dT%H%M%SZ)
 #   archive-videos /path/to/input /custom/output/dir  # output: /custom/output/dir
 
-set -e
-set -u
-set -o pipefail
-[[ -n "${DEBUG:-}" ]] && set -x
+set -eu
+[ -n "${DEBUG:-}" ] && set -x
+
+die() {
+  printf '%s\n' "$*" >&2
+  exit 2
+}
+
+kill_if_running() {
+  pid=${1:-}
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill "$pid" 2>/dev/null || true
+}
+
+cleanup() {
+  for p in "$@"; do
+    kill_if_running "$p"
+  done
+  for p in "$@"; do
+    [ -n "$p" ] && wait "$p" 2>/dev/null || true
+  done
+}
 
 main() {
-  emulate -L zsh
-  set -e
-  set -u
-  set -o pipefail
-
-  local input="${1:-}"
-  [[ -n "$input" ]] || die "No input file path provided"
-  [[ -r "$input" ]] || die "Input not readable: $input"
+  input=${1:-}
+  [ -n "$input" ] || die "No input file path provided"
+  [ -r "$input" ] || die "Input not readable: $input"
 
   command -v caffeinate >/dev/null 2>&1 || die "caffeinate not found"
   command -v burniso    >/dev/null 2>&1 || die "burniso not found"
@@ -27,11 +41,9 @@ main() {
   command -v qcut       >/dev/null 2>&1 || die "qcut not found"
   command -v rpush      >/dev/null 2>&1 || die "rpush not found"
 
-  local now out stage_out vcrunch_out mkiso_out qcut_out
-  now="$(date -u +%Y%m%dT%H%M%SZ)"
+  now=$(date -u +%Y%m%dT%H%M%SZ)
 
-  # If $2 provided, use it; else default to CWD/$now
-  out="${2:-$PWD/$now}"
+  out=${2:-"$PWD/$now"}
 
   stage_out="$out/stage"
   vcrunch_out="$out/vcrunch"
@@ -39,67 +51,38 @@ main() {
   qcut_out="$out/qcut"
   mkdir -p -- "$stage_out" "$vcrunch_out" "$mkiso_out" "$qcut_out"
 
-  # Keep Mac awake until this PID exits (caffeinate exits automatically).
   caffeinate -dims -w $$ &
 
-  # Ensure background jobs are cleaned up on signals.
-  local mkiso_pid="" qcut_pid=""
+  mkiso_pid=
+  qcut_pid=
   trap 'cleanup "$mkiso_pid" "$qcut_pid"; exit 130' INT
   trap 'cleanup "$mkiso_pid" "$qcut_pid"; exit 143' TERM HUP QUIT
 
-  # --- sequential steps ---
-  stage   -v "${input}:/in"       -v "${stage_out}:/out"
-  vcrunch -v "${stage_out}:/in"   -v "${vcrunch_out}:/out"
+  stage   -v "${input}:/in"     -v "${stage_out}:/out"
+  vcrunch -v "${stage_out}:/in" -v "${vcrunch_out}:/out"
 
-  # --- parallel steps ---
-  mkiso -v "${vcrunch_out}:/in"   -v "${mkiso_out}:/out" -- --out-file "${now}.iso" &
+  mkiso -v "${vcrunch_out}:/in" -v "${mkiso_out}:/out" -- --out-file "${now}.iso" &
   mkiso_pid=$!
-  qcut  -v "${stage_out}:/in"     -v "${qcut_out}:/out" &
+  qcut  -v "${stage_out}:/in"   -v "${qcut_out}:/out" &
   qcut_pid=$!
 
-  # Wait for mkiso first; on failure, cancel qcut and exit with mkiso's code.
   if ! wait "$mkiso_pid"; then
-    local rc=$?
+    rc=$?
     kill_if_running "$qcut_pid"
     wait "$qcut_pid" 2>/dev/null || true
-    exit $rc
+    exit "$rc"
   fi
 
-  # Burn ISO; on failure, also cancel qcut and propagate burniso's status.
   if ! burniso -v "${mkiso_out}/${now}.iso"; then
-    local rc=$?
+    rc=$?
     kill_if_running "$qcut_pid"
     wait "$qcut_pid" 2>/dev/null || true
-    exit $rc
+    exit "$rc"
   fi
 
-  # Let qcut finish; propagate its status.
   wait "$qcut_pid"
 
-  # Send qcut output to SMB share
   rpush copy "${qcut_out}/" "smb://0819870.xyz/shared/family/daily/"
-}
-
-# ---- helpers ---------------------------------------------------------------
-
-die() { print -u2 -- "$@"; exit 2; }
-
-kill_if_running() {
-  local pid="${1:-}"
-  [[ -n "$pid" ]] || return 0
-  kill -0 "$pid" 2>/dev/null || return 0
-  kill "$pid" 2>/dev/null || true
-}
-
-cleanup() {
-  # best-effort termination of provided PIDs
-  local p
-  for p in "$@"; do
-    kill_if_running "$p"
-  done
-  for p in "$@"; do
-    [[ -n "$p" ]] && wait "$p" 2>/dev/null || true
-  done
 }
 
 main "$@"

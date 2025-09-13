@@ -1,5 +1,5 @@
-#!/bin/zsh
-set -euo pipefail
+#!/bin/sh
+set -eu
 # Auto-generated wrapper. Invokes 'podman-scripts-machine run' against a specific build file.
 export DR_WRAPPER_NAME="%NAME%"
-exec podman-scripts-machine run -f "%ABS%" "$@"
+exec podman-scripts-machine run -f "%ABS%" -r "%REL%" "$@"

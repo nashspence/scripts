@@ -19,9 +19,9 @@ uid_num=$(id -u)
 osxbin_dir="${script_dir}/bin"
 
 templates_dir="${script_dir}/templates"
-wrapper_template="${templates_dir}/wrapper.zsh"
-wrapper_release_template="${templates_dir}/wrapper-release.zsh"
-wrapper_releaseonly_template="${templates_dir}/wrapper-release-only.zsh"
+wrapper_template="${templates_dir}/wrapper.sh"
+wrapper_release_template="${templates_dir}/wrapper-release.sh"
+wrapper_releaseonly_template="${templates_dir}/wrapper-release-only.sh"
 
 machine=${MACHINE:-com.nashspence.scripts}
 podman_cpus=${PODMAN_CPUS:-14}
