@@ -1,121 +1,102 @@
-#!/usr/bin/env zsh
-# podman-machine-agent — socket-activated; starts VM, holds while connected, stops if last client disconnects
+#!/bin/sh
+# podman-machine-agent — socket-activated; starts VM, holds while connected,
+# stops if last client disconnects
 
-set -e
-set -u
-set -o pipefail
-[[ -n "${DEBUG:-}" ]] && set -x
+set -eu
+[ "${DEBUG:-}" ] && set -x
 
-main() {
-  emulate -L zsh
-  set -e
-  set -u
-  set -o pipefail
-  setopt err_return pipefail extended_glob
+# --- PATH (homebrew first), then system -----------------------------------
+PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
-  # --- PATH (homebrew first), then system -----------------------------------
-  export PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# --- deps ------------------------------------------------------------------
+command -v podman >/dev/null 2>&1 || { printf '%s\n' 'podman not found' >&2; exit 127; }
 
-  # --- deps ------------------------------------------------------------------
-  command -v podman >/dev/null 2>&1 || { print -u2 -- "podman not found"; exit 127; }
+# --- Config (globals needed by traps) -------------------------------------
+MACHINE=${MACHINE:-com.nashspence.scripts}
 
-  # --- Config (globals needed by traps) -------------------------------------
-  local MACHINE="${MACHINE:-com.nashspence.scripts}"
+# Guard against REPO_DIR being unset under `set -u`
+_repo_root=${REPO_DIR:-$HOME}
 
-  # Guard against REPO_DIR being unset under `set -u`
-  local _repo_root="${REPO_DIR:-$HOME}"
+STATE_DIR=${STATE_DIR:-${_repo_root}/osx/launch-agents/podman-machine/data}
+HOLDS_DIR=${HOLDS_DIR:-$STATE_DIR/holds}
 
-  typeset -g STATE_DIR
-  typeset -g HOLDS_DIR
-  typeset -g HOLD_FILE
+STOP_GRACE_SECS=${STOP_GRACE_SECS:-1}
+QUIESCE_MS=${QUIESCE_MS:-1500}      # watch briefly for back-to-back clients
+WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-90}
 
-  STATE_DIR="${STATE_DIR:-${_repo_root}/osx/launch-agents/podman-machine/data}"
-  HOLDS_DIR="${HOLDS_DIR:-$STATE_DIR/holds}"
-
-  integer STOP_GRACE_SECS="${STOP_GRACE_SECS:-1}"
-  integer QUIESCE_MS="${QUIESCE_MS:-1500}"      # watch briefly for back-to-back clients
-  integer WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-90}"
-
-  log() { print -r -- "$(date '+%F %T') podman-machine-agent[$$]: $*"; }
-
-  gc_holds() {
-    emulate -L zsh
-    local f pid
-    for f in "$HOLDS_DIR"/*(.N); do
-      pid="${f:t}"
-      # if filename isn't a PID, or PID is dead, remove it
-      if [[ "$pid" != <-> ]]; then
-        rm -f -- "$f" 2>/dev/null || true
-        continue
-      fi
-      kill -0 "$pid" 2>/dev/null || rm -f -- "$f" 2>/dev/null || true
-    done
-  }
-
-  count_holds() {
-    emulate -L zsh
-    # count files matching, with nullglob behavior
-    local -a _hs
-    _hs=("$HOLDS_DIR"/*(.N))
-    print -r -- "${#_hs[@]}"
-  }
-
-  wait_podman_ready() {
-    emulate -L zsh
-    local start now
-    start="$(date +%s)"
-    while :; do
-      if podman --connection "$MACHINE" info >/dev/null 2>&1; then
-        return 0
-      fi
-      sleep 0.5
-      now="$(date +%s)"
-      (( now - start >= WAIT_TIMEOUT_SECS )) && { log "timeout waiting for podman '$MACHINE'"; return 1; }
-    done
-  }
-
-  # --- Main ------------------------------------------------------------------
-  mkdir -p -- "$HOLDS_DIR"
-  gc_holds
-
-  # Register a hold file (global path so traps can see it after `main` returns)
-  HOLD_FILE="$HOLDS_DIR/$$"
-  print -r -- "$$" > "$HOLD_FILE"
-
-  cleanup_hold() {
-    emulate -L zsh
-    # Be defensive in traps; don't let nounset/errexit kill cleanup
-    set +u +e
-    [[ -n "${HOLD_FILE:-}" ]] && rm -f -- "$HOLD_FILE" 2>/dev/null
-    return 0
-  }
-  trap cleanup_hold EXIT TERM HUP INT
-
-  log "connection accepted; ensuring machine '$MACHINE' is running"
-  podman machine start "$MACHINE" >/dev/null 2>&1 || true
-  wait_podman_ready || true
-
-  # Block until client closes (connected socket on stdin)
-  cat >/dev/null || true
-
-  # Client disconnected — debounce, then quiesce-watch for a short window
-  cleanup_hold
-  (( STOP_GRACE_SECS > 0 )) && sleep "$STOP_GRACE_SECS"
-
-  gc_holds
-  integer loops=$(( QUIESCE_MS / 100 ))
-  integer i
-  for (( i=0; i<loops; i++ )); do
-    if [[ "$(count_holds)" != "0" ]]; then
-      log "new connection arrived during quiesce; leaving machine running"
-      exit 0
-    fi
-    sleep 0.1
-  done
-
-  log "no connections after quiesce; stopping machine '$MACHINE'"
-  podman machine stop "$MACHINE" >/dev/null 2>&1 || true
-  exit 0
+log() {
+  printf '%s podman-machine-agent[%s]: %s\n' "$(date '+%F %T')" "$$" "$*"
 }
 
-main "$@"
+gc_holds() {
+  for f in "$HOLDS_DIR"/*; do
+    [ -e "$f" ] || continue
+    pid=${f##*/}
+    case $pid in
+      ''|*[!0-9]*) rm -f "$f" 2>/dev/null ;;
+      *) kill -0 "$pid" 2>/dev/null || rm -f "$f" 2>/dev/null ;;
+    esac
+  done
+}
+
+count_holds() {
+  set -- "$HOLDS_DIR"/*
+  [ -e "$1" ] || set --
+  printf '%s\n' "$#"
+}
+
+wait_podman_ready() {
+  start=$(date +%s)
+  while :; do
+    if podman --connection "$MACHINE" info >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+    now=$(date +%s)
+    if [ $((now - start)) -ge "$WAIT_TIMEOUT_SECS" ]; then
+      log "timeout waiting for podman '$MACHINE'"
+      return 1
+    fi
+  done
+}
+
+# --- Main ------------------------------------------------------------------
+mkdir -p "$HOLDS_DIR"
+gc_holds
+
+# Register a hold file (global path so traps can see it after `main` returns)
+HOLD_FILE="$HOLDS_DIR/$$"
+printf '%s\n' "$$" > "$HOLD_FILE"
+
+cleanup_hold() {
+  rm -f "$HOLD_FILE" 2>/dev/null || true
+}
+trap cleanup_hold EXIT TERM HUP INT
+
+log "connection accepted; ensuring machine '$MACHINE' is running"
+podman machine start "$MACHINE" >/dev/null 2>&1 || true
+wait_podman_ready || true
+
+# Block until client closes (connected socket on stdin)
+cat >/dev/null || true
+
+# Client disconnected — debounce, then quiesce-watch for a short window
+cleanup_hold
+[ "$STOP_GRACE_SECS" -gt 0 ] && sleep "$STOP_GRACE_SECS"
+
+gc_holds
+loops=$((QUIESCE_MS / 100))
+i=0
+while [ "$i" -lt "$loops" ]; do
+  if [ "$(count_holds)" != 0 ]; then
+    log "new connection arrived during quiesce; leaving machine running"
+    exit 0
+  fi
+  sleep 0.1
+  i=$((i + 1))
+done
+
+log "no connections after quiesce; stopping machine '$MACHINE'"
+podman machine stop "$MACHINE" >/dev/null 2>&1 || true
+exit 0
