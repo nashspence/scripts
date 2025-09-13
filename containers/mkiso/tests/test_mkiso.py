@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-import portable.mkiso.script as script  # noqa: E402
+import containers.mkiso.script as script  # noqa: E402
 
 
 def test_stdout_is_output_filename(
