@@ -6,10 +6,7 @@
   <key>ProgramArguments</key><array>
     <string>%REPO_DIR%/osx/launch-agents/on-mount/Scripts - On Mount</string>
   </array>
-  <key>WatchPaths</key>
-  <array>
-    <string>/Volumes</string>
-  </array>
+  <key>StartOnMount</key><true/>
   <key>ThrottleInterval</key><integer>2</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>%REPO_DIR%/osx/launch-agents/on-mount/data/stdout.log</string>
