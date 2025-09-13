@@ -252,9 +252,11 @@ generate_wrappers() {
 }
 
 install_all() {
-    [ -d "${osxbin_dir}" ] || die "required directory missing: ${osxbin_dir} (must contain 'podman-scripts-machine')"
-    [ -f "${osxbin_dir}/podman-scripts-machine" ] || die "required tool missing: ${osxbin_dir}/podman-scripts-machine"
-    chmod +x "${osxbin_dir}/podman-scripts-machine" 2>/dev/null || true
+    [ -d "${osxbin_dir}" ] || die "required directory missing: ${osxbin_dir} (must contain 'use-scripts-machine' and 'nsimg')"
+    [ -f "${osxbin_dir}/use-scripts-machine" ] || die "required tool missing: ${osxbin_dir}/use-scripts-machine"
+    [ -f "${osxbin_dir}/nsimg" ] || die "required tool missing: ${osxbin_dir}/nsimg"
+    chmod +x "${osxbin_dir}/use-scripts-machine" 2>/dev/null || true
+    chmod +x "${osxbin_dir}/nsimg" 2>/dev/null || true
 
     [ -f "${wrapper_template}" ] || die "missing template: ${wrapper_template}"
     [ -f "${wrapper_release_template}" ] || die "missing template: ${wrapper_release_template}"

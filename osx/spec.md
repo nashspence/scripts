@@ -45,32 +45,26 @@
 * And I pass an image path
 * Then the media is not ejected
 
-## Scenario: build and run a Containerfile
-* When I run podman-scripts-machine with "run", "-f", and a directory path
-* Then the container builds and runs without affecting the default machine
+## Scenario: obtain a container image
+* When I run nsimg with a directory name
+* Then an image reference is printed
 
-## Scenario: run a released container image
-* Given a release.yaml describing a released image
-* When I run podman-scripts-machine with "run", "-f" and a directory path and "-r" and the release.yaml path
-* Then the released container runs without building
-
-## Scenario: run a released container image without a Containerfile
-* Given a release.yaml describing a released image
-* When I run podman-scripts-machine with "run", "-r" and a release.yaml path
-* Then the released container runs without building
-
-## Scenario: run an existing image without build options
-* When I run podman-scripts-machine with "run" and an image name
-* And I pass a command to execute
-* Then Podman runs the image on the machine without "--file" or "--release"
+## Scenario: run a container image
+* Given an image reference from nsimg
+* When I start use-scripts-machine for the current process
+* And I run podman
+* And I pass "run"
+* And I pass "--rm"
+* And I pass the image reference
+* And I pass a command
+* Then the container runs without affecting the default machine
 
 ## Scenario: run another Podman subcommand
-* When I run podman-scripts-machine with "secret" and "ls"
+* When I start use-scripts-machine for the current process
+* And I run podman
+* And I pass "secret"
+* And I pass "ls"
 * Then Podman lists secrets from the machine
-
-## Scenario: enable verbose logging
-* When I run podman-scripts-machine with "--verbose", "run" and an image name
-* Then detailed debug logs are printed
 
 ## Scenario: push directory contents excluding dot files
 * When I run rpush
