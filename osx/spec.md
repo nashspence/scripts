@@ -28,8 +28,22 @@
 * Then the machine stops after that timeout
 
 ## Scenario: burn an ISO image
-* When I run burniso with an image path
+* When I run burniso
+* And I pass "--speed"
+* And I pass "4"
+* And I pass "--no-verify"
+* And I pass "--test"
+* And I pass "--eject"
+* And I pass "--verbose"
+* And I pass "--dry-run"
+* And I pass an image path
 * Then the image is written to media with hdiutil
+
+## Scenario: burn an ISO image without ejecting
+* When I run burniso
+* And I pass "--no-eject"
+* And I pass an image path
+* Then the media is not ejected
 
 ## Scenario: build and run a Containerfile
 * When I run podman-scripts-machine with "run", "-f", and a directory path
