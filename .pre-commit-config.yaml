@@ -74,6 +74,6 @@ repos:
               temp_manifest=manifest.json
             fi
             trap "test -n \"$temp_manifest\" && rm -f \"$temp_manifest\"" EXIT
-            exec "$BIN" format "$@"
+            exec env GAUGE_TELEMETRY_ENABLED=false "$BIN" format "$@" < <(printf "y\n")
           ' --
         files: (^|/)spec\.md$
