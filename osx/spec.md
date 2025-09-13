@@ -65,3 +65,16 @@
 * And I pass a directory path ending with "/"
 * And I pass a URL
 * Then dot files are not copied to the destination
+
+## Scenario: store and retrieve a Keychain password
+* Given a password is on the clipboard
+* When I run kc with "add"
+* And I pass a name
+* Then the password is stored under that name
+* When I run kc with "get"
+* And I pass the same name
+* Then the password is printed
+* Given another password is on the clipboard
+* When I run kc with "update"
+* And I pass the same name
+* Then the password is updated
