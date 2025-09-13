@@ -1,329 +1,170 @@
-#!/usr/bin/env zsh
+#!/bin/sh
 # podman-scripts-machine — run Podman subcommands against a machine; builds and
 # runs Containerfiles for the `run` subcommand. Pipe-friendly. By default, only
 # the full Podman command is logged to stderr; pass `--verbose` for detailed
-# debug logging including connection waits and image selection.
+# debug logging.
 
-set -e
-set -u
-set -o pipefail
-[[ -n "${DEBUG:-}" ]] && set -x
+set -eu
+[ "${DEBUG:-}" ] && set -x
 
-main() {
-  emulate -L zsh
-  set -e
-  set -u
-  set -o pipefail
-
-  local verbose=0
-  while (( $# )); do
+verbose=0
+while [ $# -gt 0 ]; do
     case "$1" in
-      --verbose) verbose=1; shift ;;
-      --) shift; break ;;
-      *) break ;;
-    esac
-  done
-
-  # ----- logging (stderr only) ----------------------------------------------
-  log() { if (( verbose )); then printf "%s\n" "$*" >&2; fi; return 0; }
-  cmdlog(){ printf "\n%s\n" "$*" >&2; }
-  fail()  { printf "\nERROR: %s\n" "$*" >&2; }
-
-  # ----- deps ----------------------------------------------------------------
-  for c in podman awk date; do
-    command -v "$c" >/dev/null 2>&1 || { fail "$c not found"; exit 127; }
-  done
-
-  # ----- config --------------------------------------------------------------
-  local DR_MACHINE="${DR_MACHINE:-${MACHINE:-com.nashspence.scripts}}"
-  local DR_IMAGE_PREFIX="${DR_IMAGE_PREFIX:-com.nashspence.scripts.}"
-  local DR_TAG="${DR_TAG:-latest}"
-  local WAKER_LABEL="${WAKER_LABEL:-com.nashspence.scripts.podman-machine}"
-  local SOCK="${PODMAN_MACHINE_SOCK:-/tmp/com.nashspence.scripts.podman-machine.${UID}.sock}"
-
-  # pre-init arrays to avoid set -u surprises
-  typeset -a raw_args=() run_extra=() cmd_args=()
-
-  # ----- podman subcommand ---------------------------------------------------
-  local subcmd="run"
-  if (( $# > 0 )) && [[ "$1" != -* ]]; then
-    subcmd="$1"
-    shift
-  fi
-
-  # ----- run subcommand flags ------------------------------------------------
-  if [[ "$subcmd" == run ]]; then
-    file=""
-    release_yaml=""
-
-    raw_args=("$@")
-    run_extra=()
-    while (( $# )); do
-      case "$1" in
-        -f|--file)
-          file="$2"; shift 2 ;;
-        -r|--release)
-          release_yaml="$2"; shift 2 ;;
+        --verbose)
+            verbose=1
+            shift
+            ;;
         --)
-          shift; break ;;
+            shift
+            break
+            ;;
         *)
-          run_extra+=("$1"); shift ;;
-      esac
-    done
-    cmd_args=("$@")
-    if (( ${#cmd_args[@]} == 0 )); then
-      integer _anyflag=0
-      for _a in "${run_extra[@]}"; do
-        if [[ "$_a" == -* ]]; then _anyflag=1; break; fi
-      done
-      if (( !_anyflag )); then
-        cmd_args=("${run_extra[@]}")
-        run_extra=()
-      fi
-    fi
-
-    if [[ -z "$file" && -z "$release_yaml" ]]; then
-      local -a fullcmd
-      fullcmd=(podman --connection "$DR_MACHINE" run "${raw_args[@]}")
-      cmdlog "${(j: :)fullcmd}"
-      local rc=0
-      set +e
-      "${fullcmd[@]}"; rc=$?
-      set -e
-      exit $rc
-    fi
-
-    if [[ -n "$file" && -d "$file" ]]; then
-      file="$file/Containerfile"
-    fi
-    if [[ -n "$file" && ! -f "$file" ]]; then
-      fail "file not found: $file"; exit 1
-    fi
-    if [[ -n "$release_yaml" && ! -f "$release_yaml" ]]; then
-      fail "file not found: $release_yaml"; exit 1
-    fi
-    if [[ -z "$file" && -n "$release_yaml" ]]; then
-      file="$release_yaml"
-    fi
-  fi
-
-  # ----- hold the launchd socket for our entire lifetime ---------------------
-  typeset -gi DR_SOCK_FD=-1
-  _close_sock_fd() { (( DR_SOCK_FD >= 0 )) && exec {DR_SOCK_FD}>&- 2>/dev/null || true; }
-  trap _close_sock_fd EXIT
-
-  if zmodload zsh/net/socket 2>/dev/null && zsocket "$SOCK" 2>/dev/null; then
-    DR_SOCK_FD=$REPLY
-    if zmodload zsh/system 2>/dev/null; then
-      zsystem fdflags -s cloexec $DR_SOCK_FD 2>/dev/null || true
-    fi
-  fi
-
-  # ----- helpers -------------------------------------------------------------
-  slugify() {
-    emulate -L zsh
-    local s="${1:l}"
-    s="${s//[^a-z0-9._-]/-}"
-    s="${s##-}"; s="${s%%-}"
-    print -r -- "$s"
-  }
-
-  yaml_get_key() {
-    emulate -L zsh
-    local key="$1" yfile="$2"
-    awk -v k="$key" '
-      $0 ~ "^[[:space:]]*"k":" {
-        sub("^[[:space:]]*"k":[[:space:]]*", "", $0)
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
-        gsub(/^"[[:space:]]*|"[[:space:]]*$/,"",$0)
-        gsub(/^'\''[[:space:]]*|'\''[[:space:]]*$/,"",$0)
-        print $0; exit 0
-      }
-    ' "$yfile" 2>/dev/null || true
-  }
-
-  wait_podman() {
-    emulate -L zsh
-    local timeout="${DR_WAIT_SECS:-90}"
-    local start now
-    start="$(date +%s)"
-    log "waiting for podman connection '${DR_MACHINE}' (timeout ${timeout}s)"
-    while :; do
-      if podman --connection "$DR_MACHINE" info >/dev/null 2>&1; then
-        return 0
-      fi
-      sleep 0.5
-      now="$(date +%s)"
-      if (( now - start >= timeout )); then
-        fail "timed out waiting for Podman '${DR_MACHINE}'"
-        exit 2
-      fi
-    done
-  }
-
-  # ----- wait for podman connection (1) -------------------------------------
-  wait_podman
-
-  if [[ "$subcmd" != run ]]; then
-    local -a fullcmd
-    fullcmd=(podman --connection "$DR_MACHINE" "$subcmd" "$@")
-    cmdlog "${(j: :)fullcmd}"
-    local rc=0
-    set +e
-    "${fullcmd[@]}"; rc=$?
-    set -e
-    exit $rc
-  fi
-
-  # ----- derive image/tag ---------------------------------------------------
-  wrapper="${DR_WRAPPER_NAME:-}"
-  if [[ -z "$wrapper" ]]; then
-    dir="$(cd "$(dirname "$file")" && pwd)"
-    base="${file:t}"
-    case "${base:l}" in
-      containerfile|dockerfile|release.yaml) wrapper="${dir:t}" ;;
-      *) wrapper="$base"
-         wrapper="${wrapper%.Containerfile}"; wrapper="${wrapper%.containerfile}"
-         wrapper="${wrapper%.Dockerfile}";    wrapper="${wrapper%.dockerfile}"
-         wrapper="${wrapper%.*}"
-         [[ -z "$wrapper" ]] && wrapper="${dir:t}" ;;
+            break
+            ;;
     esac
-  fi
-  wrapper="$(slugify "$wrapper")"
-  repo="$(slugify "${DR_IMAGE_PREFIX}${wrapper}")"
-  local_image="${repo}:${DR_TAG}"
-  image="$local_image"
+done
 
-  local -a pull_flag=()
-  if [[ -z "${DR_NO_PULL:-}" ]]; then
-    case "${DR_PULL_MODE:-yes}" in
-      always) pull_flag=(--pull-always) ;;
-      never)  pull_flag=(--pull-never)  ;;
-      *)      pull_flag=(--pull) ;;
-    esac
-  fi
-  dir="$(cd "$(dirname "$file")" && pwd)"
+log() {
+    [ "$verbose" -eq 1 ] && printf '%s\n' "$*" >&2
+}
 
-  # ----- choose release image vs build --------------------------------------
-  has_containerfile=1
-  if [[ "$file" == "$release_yaml" ]]; then
-    has_containerfile=0
-  fi
+run_with_sigint() {
+    "$@" &
+    pid=$!
+    trap 'kill -s INT "$pid"' TERM
+    wait $pid
+    rc=$?
+    trap - TERM
+    return $rc
+}
 
-  build_needed=$has_containerfile
-  image_reason="built locally from '${file}'"
+command -v podman >/dev/null 2>&1 || { echo "podman not found" >&2; exit 127; }
+command -v awk >/dev/null 2>&1 || { echo "awk not found" >&2; exit 127; }
 
-  if [[ -n "$release_yaml" && -z "${DR_NO_PULL:-}" ]]; then
-    rel_img="$(yaml_get_key image "$release_yaml")"
-    rel_ver="$(yaml_get_key version "$release_yaml")"
-    if [[ -n "$rel_img" && -n "$rel_ver" ]]; then
-      rel_ref="${rel_img}:${rel_ver}"
-      set +e
-      pull_err="$({ podman --connection "$DR_MACHINE" pull "$rel_ref" 1>/dev/null; } 2>&1)"
-      pull_rc=$?
-      set -e
-      if (( pull_rc == 0 )); then
-        image="$rel_ref"
-        build_needed=0
-        image_reason="release available"
-        log "Using release image: ${rel_ref}"
-      else
-        if (( has_containerfile )); then
-          log "Pull failed for ${rel_ref} (rc=${pull_rc}); falling back to local build"
-          build_needed=1
-        else
-          fail "failed to pull ${rel_ref} (rc=${pull_rc}). Details follow:"
-          printf "%s\n" "$pull_err" >&2
-          exit $pull_rc
+DR_MACHINE=${DR_MACHINE:-${MACHINE:-com.nashspence.scripts}}
+DR_IMAGE_PREFIX=${DR_IMAGE_PREFIX:-com.nashspence.scripts.}
+DR_TAG=${DR_TAG:-latest}
+
+subcmd=run
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+    subcmd=$1
+    shift
+fi
+
+yaml_get_key() {
+    key=$1
+    file=$2
+    awk -F': *' -v k="$key" '$1==k {print $2; exit}' "$file"
+}
+
+if [ "$subcmd" = run ]; then
+    file=
+    release=
+    run_i=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -f|--file)
+                file=$2
+                shift 2
+                ;;
+            -r|--release)
+                release=$2
+                shift 2
+                ;;
+            --)
+                shift
+                break
+                ;;
+            *)
+                run_i=$((run_i + 1))
+                eval "run_$run_i=\$1"
+                shift
+                ;;
+        esac
+    done
+
+    cmd_i=0
+    while [ $# -gt 0 ]; do
+        cmd_i=$((cmd_i + 1))
+        eval "cmd_$cmd_i=\$1"
+        shift
+    done
+
+    if [ -z "$file" ] && [ -n "$release" ]; then
+        file=$release
+    fi
+
+    if [ -z "$file" ] && [ -z "$release" ]; then
+        set -- podman --connection "$DR_MACHINE" run
+        i=1
+        while [ $i -le $run_i ]; do
+            eval "set -- \"\$@\" \"\$run_$i\""
+            i=$((i + 1))
+        done
+        if [ $cmd_i -gt 0 ]; then
+            set -- "$@" --
+            i=1
+            while [ $i -le $cmd_i ]; do
+                eval "set -- \"\$@\" \"\$cmd_$i\""
+                i=$((i + 1))
+            done
         fi
-      fi
+        run_with_sigint "$@"
+        exit $?
     fi
-  fi
 
-  if (( build_needed )); then
-    if (( has_containerfile )); then
-      local -a buildcmd
-      buildcmd=(podman --connection "$DR_MACHINE" build --quiet "${pull_flag[@]}" -f "$file" -t "$local_image" "$dir")
-      cmdlog "${(j: :)buildcmd}"
-      set +e
-      "${buildcmd[@]}" >/dev/null
-      build_rc=$?
-      set -e
-      if (( build_rc != 0 )); then
-        fail "build failed (rc=$build_rc) for '${local_image}' from '${file}' (context '${dir}')"
-        exit $build_rc
-      fi
-      image="$local_image"
-      image_reason="built locally from '${file}'"
-      log "Built local image: ${local_image}"
-    else
-      fail "no release image available and no Containerfile to build"
-      exit 1
+    [ -n "$file" ] && [ -d "$file" ] && file="$file/Containerfile"
+    [ -f "$file" ] || { echo "file not found: $file" >&2; exit 1; }
+    if [ -n "$release" ] && [ ! -f "$release" ]; then
+        echo "file not found: $release" >&2
+        exit 1
     fi
-  fi
 
-  # ----- run (isolated from ERR_EXIT) ---------------------------------------
-  run_container "$DR_MACHINE" "$image" "$verbose" "$@"  # pass-through for completeness
-}
+    build_needed=1
+    image=""
+    if [ -n "$release" ] && [ -z "${DR_NO_PULL:-}" ]; then
+        rel_img=$(yaml_get_key image "$release")
+        rel_ver=$(yaml_get_key version "$release")
+        if [ -n "$rel_img" ] && [ -n "$rel_ver" ]; then
+            rel_ref="$rel_img:$rel_ver"
+            if run_with_sigint podman --connection "$DR_MACHINE" pull "$rel_ref" >/dev/null 2>&1; then
+                image=$rel_ref
+                build_needed=0
+                log "Using release image: $rel_ref"
+            else
+                log "Pull failed for $rel_ref; falling back to build"
+            fi
+        fi
+    fi
 
-# Run phase in a separate function with NO_ERR_EXIT so we always log & exec.
-run_container() {
-  emulate -L zsh
-  set +e
-  setopt localoptions no_errexit localtraps TRAPS_ASYNC
+    if [ "$build_needed" -eq 1 ]; then
+        dir=$(dirname "$file")
+        name=$(basename "$dir")
+        image="${DR_IMAGE_PREFIX}${name}:${DR_TAG}"
+        if ! run_with_sigint podman --connection "$DR_MACHINE" build -q -f "$file" -t "$image" "$dir"; then
+            echo "build failed for $image" >&2
+            exit 1
+        fi
+        log "Built local image: $image"
+    fi
 
-  # Build flags
-  local -a run_flags env_flags _run_elems _cmd_elems fullcmd
-  run_flags=(-i)
-  if [[ -t 0 && -z ${DR_STDIN_PIPE:-} ]]; then
-    run_flags=(-it)
-  elif [[ -z ${DR_NO_TTY:-} ]]; then
-    run_flags+=(-t)
-  fi
+    set -- podman --connection "$DR_MACHINE" run --rm
+    i=1
+    while [ $i -le $run_i ]; do
+        eval "set -- \"\$@\" \"\$run_$i\""
+        i=$((i + 1))
+    done
+    set -- "$@" "$image"
+    if [ $cmd_i -gt 0 ]; then
+        set -- "$@" --
+        i=1
+        while [ $i -le $cmd_i ]; do
+            eval "set -- \"\$@\" \"\$cmd_$i\""
+            i=$((i + 1))
+        done
+    fi
+    run_with_sigint "$@"
+    exit $?
+fi
 
-  env_flags=()
-  if [[ ! -t 1 && -z ${DR_NO_UNBUFFER:-} ]]; then
-    env_flags+=(-e PYTHONUNBUFFERED=1 -e PYTHONIOENCODING=UTF-8)
-  fi
-
-  _run_elems=()
-  (( ${#run_flags[@]} )) && _run_elems+=("${run_flags[@]}")
-  (( ${#env_flags[@]} )) && _run_elems+=("${env_flags[@]}")
-  (( ${#run_extra[@]} )) && _run_elems+=("${run_extra[@]}")
-
-  _cmd_elems=()
-  (( ${#cmd_args[@]} )) && _cmd_elems+=("${cmd_args[@]}")
-
-  fullcmd=(podman --connection "$DR_MACHINE" run --rm "${_run_elems[@]}" "$image" "${_cmd_elems[@]}")
-  cmdlog "${(j: :)fullcmd}"
-  echo ""
-
-  # --- Signal translation: TERM/HUP -> INT (then KILL after a grace) ---
-  # We forward to the terminal's *foreground* process group (the running Podman).
-  _forward_int_to_fgpg() {
-    local pgid tpgid
-    pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
-    tpgid=$(ps -o tpgid= -p $$ 2>/dev/null | tr -d ' ')
-    [[ -n $tpgid && $tpgid != $pgid ]] && /bin/kill -INT -$tpgid 2>/dev/null
-  }
-  _term_then_kill_fgpg() {
-    _forward_int_to_fgpg
-    sleep ${DR_TERM_GRACE:-0.3}
-    local tpgid
-    tpgid=$(ps -o tpgid= -p $$ 2>/dev/null | tr -d ' ')
-    [[ -n $tpgid ]] && /bin/kill -KILL -$tpgid 2>/dev/null
-    exit 143
-  }
-  trap _term_then_kill_fgpg TERM HUP
-  trap _forward_int_to_fgpg INT
-
-  # Run in the foreground (no bg, no fg juggling, no SIGTTIN/EINTR races)
-  local rc=0
-  "${fullcmd[@]}"; rc=$?
-  echo ""
-
-  trap - TERM HUP INT
-  return $rc
-}
-
-main "$@"
+run_with_sigint podman --connection "$DR_MACHINE" "$subcmd" "$@"
