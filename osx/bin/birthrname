@@ -1,68 +1,56 @@
-#!/bin/zsh
+#!/bin/sh
 # Rename files in a directory by prefixing their creation time (APFS "birth time")
 # Format: YYYY-mm-ddTHH_MM_SS±ZZZZ!~filename[~N][.ext]
 
-set -e
-set -u
-set -o pipefail
+set -eu
+[ -n "${DEBUG:-}" ] && set -x
+
+usage() {
+  printf 'Usage: %s <SRC_DIR>\n' "$0" >&2
+  exit 64
+}
+
+rename_files() {
+  dir=$1
+  find "$dir" -maxdepth 1 -type f ! -name '.*' -print |
+    while IFS= read -r filepath; do
+      filename=$(basename "$filepath")
+      creation_date=$(stat -f "%SB" -t "%Y-%m-%dT%H_%M_%S%z" "$filepath" 2>/dev/null) || {
+        printf 'stat failed: %s\n' "$filepath" >&2
+        exit 3
+      }
+      new_filename="${creation_date}!~${filename}"
+      new_filepath="$dir/$new_filename"
+      if [ "$filepath" != "$new_filepath" ]; then
+        if [ -e "$new_filepath" ]; then
+          stem=$filename
+          ext=
+          case $filename in
+            *.*) stem=${filename%.*}; ext=.${filename##*.} ;;
+          esac
+          i=1
+          while [ -e "$dir/${creation_date}!~${stem}~$i$ext" ]; do
+            i=$((i + 1))
+          done
+          new_filename="${creation_date}!~${stem}~$i$ext"
+          new_filepath="$dir/$new_filename"
+        fi
+        if ! mv "$filepath" "$new_filepath"; then
+          printf 'Rename failed: %s\n' "$filepath" >&2
+          exit 3
+        fi
+      fi
+    done
+}
 
 main() {
-  emulate -L zsh
-  set -e
-  set -u
-  set -o pipefail
-
-  if (( $# != 1 )); then
-    print -u2 "Usage: $0 <SRC_DIR>"
-    return 64
-  fi
-
-  local SRC_DIR="$1"
-  [[ -d "$SRC_DIR" ]] || { print -u2 "Not a directory: $SRC_DIR"; return 2; }
-
-  # Only regular files; add D to include dotfiles: *(.ND)
-  setopt local_options null_glob
-
-  local filepath dir filename creation_date new_filename new_filepath
-  local i stem ext
-
-  for filepath in "$SRC_DIR"/*(.N); do
-    dir="${filepath:h}"
-    filename="${filepath:t}"
-
-    # macOS/BSD stat: %SB is birth time, -t sets strftime(3) format
-    # Example output: 2025-09-02T13_47_12-0700
-    creation_date=$(stat -f "%SB" -t "%Y-%m-%dT%H_%M_%S%z" "$filepath" 2>/dev/null) || {
-      print -u2 "stat failed: $filepath"
-      return 3
-    }
-
-    new_filename="${creation_date}!~${filename}"
-    new_filepath="$dir/$new_filename"
-
-    if [[ "$filepath" != "$new_filepath" ]]; then
-      # Avoid overwriting on collision by adding ~N before the extension
-      if [[ -e "$new_filepath" ]]; then
-        i=1
-        if [[ "$filename" == *.* && "$filename" != .* ]]; then
-          stem="${filename%.*}"; ext=".${filename##*.}"
-        else
-          stem="$filename"; ext=""
-        fi
-        while [[ -e "$dir/${creation_date}!~${stem}~$i$ext" ]]; do
-          (( i++ ))
-        done
-        new_filename="${creation_date}!~${stem}~$i$ext"
-        new_filepath="$dir/$new_filename"
-      fi
-
-      # BSD mv (no GNU --). Quoted paths are sufficient here.
-      mv "$filepath" "$new_filepath" || {
-        print -u2 "Rename failed: $filepath"
-        return 3
-      }
-    fi
-  done
+  [ "$#" -eq 1 ] || usage
+  SRC_DIR=$1
+  [ -d "$SRC_DIR" ] || {
+    printf 'Not a directory: %s\n' "$SRC_DIR" >&2
+    exit 2
+  }
+  rename_files "$SRC_DIR"
 }
 
 main "$@"
