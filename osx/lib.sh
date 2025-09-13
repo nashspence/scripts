@@ -5,7 +5,7 @@ if [ -z "${PODMAN_SCRIPTS_DIR:-}" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
-PATH="${PODMAN_SCRIPTS_DIR}/osx/bin:${PATH}"
+PATH="${PODMAN_SCRIPTS_DIR}/bin:${PODMAN_SCRIPTS_DIR}/osx/bin:${PATH}"
 export PATH
 
 warn() { printf '%s\n' "$*" >&2; }

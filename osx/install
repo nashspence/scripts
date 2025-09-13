@@ -14,7 +14,7 @@ repo_dir=${REPO_DIR:-$(cd "${script_dir}/.." && pwd -P)}
 la_dir="${HOME}/Library/LaunchAgents"
 uid_name=$(id -un)
 uid_num=$(id -u)
-osxbin_dir="${script_dir}/bin"
+bin_dir="${repo_dir}/bin"
 
 machine=${MACHINE:-com.nashspence.scripts}
 podman_cpus=${PODMAN_CPUS:-14}
@@ -130,14 +130,16 @@ install_launch_agent() {
         ensure_swiftc
         out="${dir}/on-mount"
         src="${dir}/on-mount.swift"
-        if [ ! -x "${out}" ] || [ "${src}" -nt "${out}" ]; then
-            echo "Compiling $(basename "${src}") → ${out}"
+        src_mtime=$(stat -f %m "$src")
+        out_mtime=$(stat -f %m "$out" 2>/dev/null || echo 0)
+        if [ ! -x "${out}" ] || [ "$src_mtime" -gt "$out_mtime" ]; then
+            echo "Compiling $(basename "$src") → ${out}"
             if command -v xcrun >/dev/null 2>&1; then
-                xcrun swiftc -O -framework AppKit -o "${out}" "${src}"
+                xcrun swiftc -O -framework AppKit -o "$out" "$src"
             else
-                swiftc -O -framework AppKit -o "${out}" "${src}"
+                swiftc -O -framework AppKit -o "$out" "$src"
             fi
-            chmod 0755 "${out}"
+            chmod 0755 "$out"
         fi
     fi
 
@@ -184,11 +186,11 @@ uninstall_launch_agents() {
 
 
 install_all() {
-    [ -d "${osxbin_dir}" ] || die "required directory missing: ${osxbin_dir} (must contain 'use-scripts-machine' and 'nsimg')"
-    [ -f "${osxbin_dir}/use-scripts-machine" ] || die "required tool missing: ${osxbin_dir}/use-scripts-machine"
-    [ -f "${osxbin_dir}/nsimg" ] || die "required tool missing: ${osxbin_dir}/nsimg"
-    chmod +x "${osxbin_dir}/use-scripts-machine" 2>/dev/null || true
-    chmod +x "${osxbin_dir}/nsimg" 2>/dev/null || true
+    [ -d "${bin_dir}" ] || die "required directory missing: ${bin_dir} (must contain 'use-scripts-machine' and 'nsimg')"
+    [ -f "${bin_dir}/use-scripts-machine" ] || die "required tool missing: ${bin_dir}/use-scripts-machine"
+    [ -f "${bin_dir}/nsimg" ] || die "required tool missing: ${bin_dir}/nsimg"
+    chmod +x "${bin_dir}/use-scripts-machine" 2>/dev/null || true
+    chmod +x "${bin_dir}/nsimg" 2>/dev/null || true
 
     [ -d "${script_dir}/launch-agents" ] || die "missing directory: ${script_dir}/launch-agents"
     for dir in "${script_dir}/launch-agents"/*; do

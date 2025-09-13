@@ -5,7 +5,7 @@
 * Then Homebrew is installed
 * And Podman is installed
 * And the com.nashspence.scripts Podman machine exists
-* And the tools directory is added to the shell PATH
+* And the bin directories are added to the shell PATH
 * And the Podman Machine launch agent is loaded
 * And the On Mount launch agent is loaded
 * And the com.nashspence.scripts Podman machine is not running
