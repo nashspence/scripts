@@ -100,7 +100,7 @@ ensure_podman_machine() {
         --memory "${podman_mem}" \
         --disk-size "${podman_disk}" \
         "${machine}"
-    podman machine start "${machine}"
+    # do not start the machine; the launch agent or user will handle it
 }
 
 remove_podman_machine() {

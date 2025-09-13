@@ -8,6 +8,7 @@
 * And the tools directory is added to the shell PATH
 * And the Podman Machine launch agent is loaded
 * And the On Mount launch agent is loaded
+* And the com.nashspence.scripts Podman machine is not running
 
 ## Scenario: uninstall the Podman machine environment
 * Given install has been run
