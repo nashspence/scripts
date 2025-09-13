@@ -1,0 +1,38 @@
+#!/bin/sh
+# Minimal Keychain wrapper
+
+set -eu
+
+usage() {
+    printf 'Usage: %s {add|update|get|delete} <name>\n' "${0##*/}" >&2
+    exit 2
+}
+
+cmd=${1:-}
+name=${2:-}
+
+[ -n "$cmd" ] && [ -n "$name" ] || usage
+
+service="com.nashspence.scripts.kc.$name"
+
+case "$cmd" in
+    add)
+        pw=$(pbpaste)
+        security add-generic-password -a "$USER" -s "$service" -w "$pw"
+        pw=; unset pw
+        ;;
+    update)
+        pw=$(pbpaste)
+        security add-generic-password -U -a "$USER" -s "$service" -w "$pw"
+        pw=; unset pw
+        ;;
+    get)
+        security find-generic-password -s "$service" -w
+        ;;
+    delete)
+        security delete-generic-password -s "$service"
+        ;;
+    *)
+        usage
+        ;;
+esac
