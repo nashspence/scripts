@@ -1,30 +1,22 @@
 #!/bin/sh
 # Send a notification to Home Assistant via its REST API.
-# Usage: ha-notify.sh [-s service] [-d json-data] <title> <message>
+# Usage: ha-notify <service|*> <title> <message> [json-data]
 
 set -eu
 
-svc=notify
-data=
-
 usage() {
-    printf 'Usage: %s [-s service] [-d json-data] <title> <message>\n' "${0##*/}" >&2
+    printf 'Usage: %s <service|*> <title> <message> [json-data]\n' "${0##*/}" >&2
     exit 2
 }
 
-# Parse flags (POSIX getopts)
-while getopts 's:d:h' opt; do
-    case "$opt" in
-        s) svc=$OPTARG ;;
-        d) data=$OPTARG ;;
-        h|\?) usage ;;
-    esac
-done
-shift "$((OPTIND - 1))"
+svc=${1:-}
+title=${2:-}
+msg=${3:-}
+data=${4:-}
 
-title=${1:-}
-msg=${2:-}
-[ -n "$title" ] && [ -n "$msg" ] || usage
+[ -n "$svc" ] && [ -n "$title" ] && [ -n "$msg" ] || usage
+
+[ "$svc" = "*" ] && svc=notify
 
 # Minimal JSON string escaper (quotes + backslashes only)
 esc() {
