@@ -3,7 +3,7 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'portable/**/release.yaml'
+      - 'containers/**/release.yaml'
 
 permissions:
   contents: write
@@ -25,8 +25,8 @@ jobs:
           BASE: ${{ github.event.before }}
         run: |
           BASE=${BASE:-HEAD^}
-          CHANGED=$(git diff --name-only "$BASE" HEAD | grep -E 'portable/.+/release\.yaml' | cut -d/ -f2 || true)
-          for F in portable/*/release.yaml; do
+          CHANGED=$(git diff --name-only "$BASE" HEAD | grep -E 'containers/.+/release\.yaml' | cut -d/ -f2 || true)
+          for F in containers/*/release.yaml; do
             S=$(cut -d/ -f2 <<<"$F")
             V=$(grep '^version:' "$F" | awk '{print $2}')
             if ! git rev-parse -q --verify "refs/tags/$S/$V" >/dev/null; then
@@ -65,7 +65,7 @@ jobs:
       - name: Read release.yaml
         id: rel
         run: |
-          FILE="portable/${{ matrix.service }}/release.yaml"
+          FILE="containers/${{ matrix.service }}/release.yaml"
           IMAGE=$(yq -r '.image' "$FILE")
           VERSION=$(yq -r '.version' "$FILE")
           echo "image=$IMAGE"   >> $GITHUB_OUTPUT
@@ -84,8 +84,8 @@ jobs:
       - name: Build & push
         uses: docker/build-push-action@v6
         with:
-          context: ./portable/${{ matrix.service }}
-          file: ./portable/${{ matrix.service }}/Containerfile
+          context: ./containers/${{ matrix.service }}
+          file: ./containers/${{ matrix.service }}/Containerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

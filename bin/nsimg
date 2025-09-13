@@ -1,5 +1,5 @@
 #!/bin/sh
-# nsimg — output the image reference for a portable container.
+# nsimg — output the image reference for a container.
 # Usage: nsimg name
 
 set -eu
@@ -15,8 +15,8 @@ command -v use-scripts-machine >/dev/null 2>&1 || { echo "use-scripts-machine no
 name=$(basename "$1")
 repo_dir=${PODMAN_SCRIPTS_DIR:-}
 [ -n "$repo_dir" ] || { echo "PODMAN_SCRIPTS_DIR not set" >&2; exit 1; }
-dir="${repo_dir}/portable/${name}"
-[ -d "$dir" ] || { echo "portable directory not found: $name" >&2; exit 1; }
+dir="${repo_dir}/containers/${name}"
+[ -d "$dir" ] || { echo "container directory not found: $name" >&2; exit 1; }
 
 MACHINE=$(use-scripts-machine "$$")
 IMAGE_PREFIX=${DR_IMAGE_PREFIX:-com.nashspence.scripts.}

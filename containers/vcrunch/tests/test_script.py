@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-import portable.vcrunch.script as script  # noqa: E402
+import containers.vcrunch.script as script  # noqa: E402
 
 
 def test_parse_size():
