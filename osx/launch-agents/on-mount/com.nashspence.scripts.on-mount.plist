@@ -1,14 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
- "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.nashspence.scripts.on-mount</string>
+
   <key>ProgramArguments</key><array>
-    <string>%REPO_DIR%/osx/launch-agents/on-mount/Scripts - On Mount</string>
+    <string>%REPO_DIR%/osx/launch-agents/on-mount/on-mount</string>
   </array>
-  <key>StartOnMount</key><true/>
-  <key>ThrottleInterval</key><integer>2</integer>
+
   <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>%REPO_DIR%/osx/launch-agents/on-mount/data/stdout.log</string>
-  <key>StandardErrorPath</key><string>%REPO_DIR%/osx/launch-agents/on-mount/data/stderr.log</string>
+  <key>KeepAlive</key><true/>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+
+  <key>StandardOutPath</key>
+  <string>%REPO_DIR%/osx/launch-agents/on-mount/data/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>%REPO_DIR%/osx/launch-agents/on-mount/data/stderr.log</string>
 </dict></plist>

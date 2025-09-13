@@ -103,6 +103,12 @@ ensure_podman_machine() {
     # do not start the machine; the launch agent or user will handle it
 }
 
+ensure_swiftc() {
+    if command -v swiftc >/dev/null 2>&1; then return 0; fi
+    if command -v xcrun >/dev/null 2>&1 && xcrun -f swiftc >/dev/null 2>&1; then return 0; fi
+    die "swiftc not found. Install Xcode Command Line Tools (xcode-select --install) and re-run."
+}
+
 remove_podman_machine() {
     if podman machine inspect "${machine}" >/dev/null 2>&1; then
         podman machine stop "${machine}" >/dev/null 2>&1 || true
@@ -118,6 +124,22 @@ install_launch_agent() {
     plist="${la_dir}/${label}.plist"
 
     mkdir -p "${la_dir}"
+    mkdir -p "${dir}/data"
+
+    if [ -f "${dir}/on-mount.swift" ]; then
+        ensure_swiftc
+        out="${dir}/on-mount"
+        src="${dir}/on-mount.swift"
+        if [ ! -x "${out}" ] || [ "${src}" -nt "${out}" ]; then
+            echo "Compiling $(basename "${src}") → ${out}"
+            if command -v xcrun >/dev/null 2>&1; then
+                xcrun swiftc -O -framework AppKit -o "${out}" "${src}"
+            else
+                swiftc -O -framework AppKit -o "${out}" "${src}"
+            fi
+            chmod 0755 "${out}"
+        fi
+    fi
 
     sed -e "s|%UID%|$uid_name|g" \
         -e "s|%UID_NUM%|$uid_num|g" \
@@ -186,6 +208,7 @@ install_all() {
     ensure_brew
     ensure_podman
     ensure_podman_machine
+    ensure_swiftc
 
     install_launch_agents
 
