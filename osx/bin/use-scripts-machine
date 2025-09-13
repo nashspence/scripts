@@ -18,7 +18,8 @@ esac
 command -v nc >/dev/null 2>&1 || { echo "nc not found" >&2; exit 127; }
 
 uid=$(id -u)
-sock="${DR_PODMAN_SOCK:-${PODMAN_SOCK:-/tmp/com.nashspence.scripts.podman-machine.${uid}.sock}}"
+machine="${DR_MACHINE:-${MACHINE:-com.nashspence.scripts}}"
+sock="${DR_PODMAN_SOCK:-${PODMAN_SOCK:-/tmp/${machine}.podman-machine.${uid}.sock}}"
 
 fifo=$(mktemp "${TMPDIR:-/tmp}/use-scripts-machine.XXXXXX")
 rm -f "$fifo"
@@ -45,5 +46,5 @@ fi
     kill "$sock_pid" 2>/dev/null || true
     wait "$sock_pid" 2>/dev/null || true
 ) &
-
+printf '%s\n' "$machine"
 exit 0

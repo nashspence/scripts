@@ -18,11 +18,9 @@ repo_dir=${PODMAN_SCRIPTS_DIR:-}
 dir="${repo_dir}/portable/${name}"
 [ -d "$dir" ] || { echo "portable directory not found: $name" >&2; exit 1; }
 
-MACHINE=${DR_MACHINE:-${MACHINE:-com.nashspence.scripts}}
+MACHINE=$(use-scripts-machine "$$")
 IMAGE_PREFIX=${DR_IMAGE_PREFIX:-com.nashspence.scripts.}
 TAG=${DR_TAG:-latest}
-
-use-scripts-machine "$$"
 
 release_file="${dir}/release.yaml"
 containerfile=""
