@@ -53,9 +53,10 @@ for vol in /Volumes/*; do
 
     prev_fsid=$(awk -F'\t' -v u="$uuid" '$1==u{print $2}' "$state")
     if [ "$fsid" != "$prev_fsid" ]; then
-        name=$(head -n 1 "$file" | tr -d '\r\n')
-        prog="$onmount_dir/$(basename "$name")"
         volname=$(basename "$vol")
+        name=$(head -n 1 "$file" 2>/dev/null | tr -d '\r\n' || true)
+        [ -n "$name" ] || continue
+        prog="$onmount_dir/$(basename "$name")"
         if [ -x "$prog" ]; then
             log "Executing \"$prog\" for \"$volname\""
             if ! osascript <<EOF
