@@ -53,6 +53,8 @@
 * Given an image reference from nsimg
 * When I start use-scripts-machine for the current process
 * And I run podman
+* And I pass "--connection"
+* And I pass the machine name
 * And I pass "run"
 * And I pass "--rm"
 * And I pass the image reference
@@ -62,6 +64,8 @@
 ## Scenario: run another Podman subcommand
 * When I start use-scripts-machine for the current process
 * And I run podman
+* And I pass "--connection"
+* And I pass the machine name
 * And I pass "secret"
 * And I pass "ls"
 * Then Podman lists secrets from the machine
