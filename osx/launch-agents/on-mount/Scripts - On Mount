@@ -1,110 +1,83 @@
-#!/bin/zsh
-emulate -L zsh
+#!/bin/sh
+# shellcheck shell=sh
+# Triggered by launchd's StartOnMount event to run per-volume scripts once per mount.
+
 set -eu
-set -o pipefail
-setopt EXTENDED_GLOB NULL_GLOB
 
 marker=".com.nashspence.scripts.on-mount.id"
-onmount_dir="${HOME}/git/osx-on-mount"
+onmount_dir="$HOME/git/osx-on-mount"
 
-base="$(cd "$(dirname "$0")" && pwd)"
-data="${base}/data"
-state="${data}/state.tsv"
-tmp_state="${state}.new"
-lock="${HOME}/Library/Caches/com.nashspence.scripts.on-mount.lock"
+base=$(cd "$(dirname "$0")" && pwd)
+data="$base/data"
+state="$data/state.tsv"
+tmp_state="$state.new"
+lock="$HOME/Library/Caches/com.nashspence.scripts.on-mount.lock"
 
-ts()    { /bin/date '+%Y-%m-%d %H:%M:%S%z'; }
-log()   { print -r -- "[$(ts)] $*"; }
-warn()  { print -u2 -r -- "[$(ts)] $*"; }
+ts() { date '+%Y-%m-%d %H:%M:%S%z'; }
+log() { printf '[%s] %s\n' "$(ts)" "$*"; }
+warn() { printf '[%s] %s\n' "$(ts)" "$*" >&2; }
 
 umask 077
-mkdir -p "${data}"
-[ -e "${state}" ] || : >| "${state}"
+mkdir -p "$data"
+touch "$state"
 
-if ! mkdir "${lock}" 2>/dev/null; then
-  warn "Another instance appears to be running (lock: ${lock}). Exiting."
-  exit 0
+if ! mkdir "$lock" 2>/dev/null; then
+    warn "Another instance appears to be running (lock: $lock). Exiting."
+    exit 0
 fi
-trap 'rm -f "${tmp_state}" 2>/dev/null || true; rmdir "${lock}" 2>/dev/null || true' EXIT
 
-rm -f -- ${state}*.new(N) 2>/dev/null || true
-: >| "${tmp_state}"
-
-# Small settle so /Volumes reflects mounts/unmounts when triggered by WatchPaths
-sleep 0.2
-
-log "Starting on-mount scan (base=${base})"
-[[ -d "${onmount_dir}" ]] || { warn "Action directory not found: ${onmount_dir}. Nothing to execute."; exit 0; }
-
-get_prev_devid() {
-  local volname="$1"
-  /usr/bin/awk -F '\t' -v v="$volname" '$1==v {print $2; exit}' "${state}" 2>/dev/null || true
+cleanup() {
+    rm -f "$tmp_state"
+    rmdir "$lock"
 }
+trap cleanup EXIT
 
-get_devid() {
-  local vol="$1" id=""
-  id=$(/usr/sbin/diskutil info -plist "$vol" 2>/dev/null | /usr/bin/plutil -extract VolumeUUID raw -o - - 2>/dev/null || true)
-  [[ -n $id ]] || id=$(/usr/sbin/diskutil info -plist "$vol" 2>/dev/null | /usr/bin/plutil -extract APFSVolumeUUID raw -o - - 2>/dev/null || true)
-  [[ -n $id ]] || id=$(/usr/bin/stat -f '%d' "$vol" 2>/dev/null || true)
-  print -r -- "$id"
-}
+: >"$tmp_state"
+ran=0
 
-typeset -i ran=0
-typeset -a actions
+for vol in /Volumes/*; do
+    [ -d "$vol" ] || continue
+    file="$vol/$marker"
+    [ -r "$file" ] || continue
 
-# PASS 1: compute new state (ONLY currently mounted + marked volumes)
-for vol in /Volumes/*(/N); do
-  [[ -d $vol ]] || continue
-  volname=${vol:t}
-  file="${vol%/}/${marker}"
-  [[ -r $file ]] || continue
+    uuid=$(/usr/sbin/diskutil info -plist "$vol" 2>/dev/null |
+        /usr/bin/plutil -extract VolumeUUID raw -o - - 2>/dev/null ||
+        /usr/bin/plutil -extract APFSVolumeUUID raw -o - - 2>/dev/null ||
+        true)
+    [ -n "$uuid" ] || continue
 
-  devid="$(get_devid "$vol")"
-  [[ -n $devid ]] || { warn "Could not read device id for ${volname}"; continue; }
+    fsid=$(/usr/bin/stat -f '%d' "$vol" 2>/dev/null || true)
+    [ -n "$fsid" ] || continue
 
-  prev="$(get_prev_devid "$volname")"
+    printf '%s\t%s\n' "$uuid" "$fsid" >>"$tmp_state"
 
-  # record current state
-  /usr/bin/printf '%s\t%s\n' "$volname" "$devid" >> "${tmp_state}"
-
-  # queue action if changed and executable exists
-  name=""
-  IFS= read -r name < "$file" || :    # keep partial line if EOF w/o newline
-  name="${name//$'\r'/}"               # strip CR (if saved with CR or CRLF)
-  name="${name%%$'\n'*}"               # strip any trailing LF (belt & suspenders)
-  name="${name:t}"                     # basename
-  if [[ "$prev" != "$devid" && -n "$name" ]]; then
-    prog="${onmount_dir%/}/${name}"
-    [[ -f "${prog}" && -x "${prog}" ]] && actions+=("${prog}" "$vol" "$volname") \
-      || warn "No executable named \"${name}\" in ${onmount_dir} (missing or not executable); skipping ${volname}."
-  fi
-done
-
-# ALWAYS commit the new snapshot (prunes stale entries on unmount)
-mv -f "${tmp_state}" "${state}"
-log "State updated: $(/usr/bin/wc -l < "${state}" 2>/dev/null | xargs) entries."
-
-# PASS 2: run queued actions
-integer i=1
-while (( i <= ${#actions} )); do
-  prog="${actions[i]}" ; vol="${actions[i+1]}" ; volname="${actions[i+2]}"
-  log "Executing \"${prog}\" in Terminal window for \"${volname}\""
-  if ! osascript <<EOF
+    prev_fsid=$(awk -F'\t' -v u="$uuid" '$1==u{print $2}' "$state")
+    if [ "$fsid" != "$prev_fsid" ]; then
+        name=$(head -n 1 "$file" | tr -d '\r\n')
+        prog="$onmount_dir/$(basename "$name")"
+        volname=$(basename "$vol")
+        if [ -x "$prog" ]; then
+            log "Executing \"$prog\" for \"$volname\""
+            if ! osascript <<EOF
 tell application "Terminal"
-    set t to (do script "exec \"$prog\" \"$vol\"")
-    activate
-    try
-        -- ensure the tab we just opened is selected/focused
-        set selected tab of (front window) to t
-    end try
+  set t to (do script "exec \\\"$prog\\\" \\\"$vol\\\"")
+  activate
+  try
+    set selected tab of (front window) to t
+  end try
 end tell
 EOF
-  then
-    sc=$?
-    warn "osascript exited with status ${sc} for \"${volname}\""
-  fi
-  (( ran++ ))
-  (( i += 3 ))
+            then
+                warn "osascript exited with status $? for \"$volname\""
+            fi
+            ran=$((ran + 1))
+        else
+            warn "No executable named \"$name\" in $onmount_dir; skipping $volname."
+        fi
+    fi
 done
 
-log "Done. Triggered ${ran} time(s)."
+mv -f "$tmp_state" "$state"
+entries=$(wc -l <"$state" | awk '{print $1}')
+log "State updated: $entries entries."
+log "Done. Triggered $ran time(s)."
