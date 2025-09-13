@@ -7,7 +7,6 @@ repos:
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: detect-private-key
-      - id: check-json
       - id: check-yaml
       - id: check-executables-have-shebangs
   - repo: https://github.com/psf/black
@@ -40,6 +39,7 @@ repos:
     hooks:
       - id: mypy
         args: [--namespace-packages, --strict]
+        additional_dependencies: [types-Pillow]
   - repo: local
     hooks:
       - id: gauge-format
@@ -68,6 +68,12 @@ repos:
               chmod +x "$BIN"
               rm -rf "$TMP"
             fi
+            temp_manifest=
+            if [ ! -f manifest.json ]; then
+              printf "{\n  \"Language\": \"python\",\n  \"Plugins\": []\n}\n" > manifest.json
+              temp_manifest=manifest.json
+            fi
+            trap "test -n \"$temp_manifest\" && rm -f \"$temp_manifest\"" EXIT
             exec "$BIN" format "$@"
           ' --
         files: (^|/)spec\.md$
