@@ -59,14 +59,16 @@ for vol in /Volumes/*; do
         prog="$onmount_dir/$(basename "$name")"
         if [ -x "$prog" ]; then
             log "Executing \"$prog\" for \"$volname\""
-            if ! osascript <<EOF
-tell application "Terminal"
-  set t to (do script "exec \\\"$prog\\\" \\\"$vol\\\"")
-  activate
-  try
-    set selected tab of (front window) to t
-  end try
-end tell
+            if ! osascript - "$prog" "$vol" <<'EOF'
+on run argv
+  tell application "Terminal"
+    set t to (do script ("exec " & quoted form of item 1 of argv & " " & quoted form of item 2 of argv))
+    activate
+    try
+      set selected tab of (front window) to t
+    end try
+  end tell
+end run
 EOF
             then
                 warn "osascript exited with status $? for \"$volname\""
