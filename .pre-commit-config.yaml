@@ -39,11 +39,35 @@ repos:
     rev: v1.10.0
     hooks:
       - id: mypy
-        args: [--strict, --namespace-packages]
+        args: [--namespace-packages, --strict]
   - repo: local
     hooks:
       - id: gauge-format
         name: gauge format
-        entry: ./gauge-format.sh
         language: system
+        entry: |
+          bash -euo pipefail -c '
+            VERSION=1.6.20
+            CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/gauge"
+            BIN="$CACHE/gauge"
+            if [ ! -x "$BIN" ]; then
+              TMP=$(mktemp -d)
+              OS=$(uname -s)
+              ARCH=$(uname -m)
+              case "$OS-$ARCH" in
+                Linux-x86_64) SUFFIX=linux.x86_64 ;;
+                Linux-aarch64|Linux-arm64) SUFFIX=linux.arm64 ;;
+                Darwin-x86_64) SUFFIX=darwin.x86_64 ;;
+                Darwin-arm64) SUFFIX=darwin.arm64 ;;
+                *) echo "Unsupported platform: $OS $ARCH" >&2; exit 1 ;;
+              esac
+              URL="https://github.com/getgauge/gauge/releases/download/v${VERSION}/gauge-${VERSION}-${SUFFIX}.zip"
+              curl -fsSL "$URL" -o "$TMP/gauge.zip"
+              mkdir -p "$CACHE"
+              unzip -q "$TMP/gauge.zip" -d "$CACHE"
+              chmod +x "$BIN"
+              rm -rf "$TMP"
+            fi
+            exec "$BIN" format "$@"
+          ' --
         files: (^|/)spec\.md$
