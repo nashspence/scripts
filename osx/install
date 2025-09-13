@@ -1,7 +1,7 @@
 #!/bin/sh
-# install: install / uninstall activation + wrapper tooling + brew/podman/machine
+# install: install / uninstall activation + tooling + brew/podman/machine
 # Usage:
-#   ./install                 # Install everything (activation + wrappers + PATH + brew/podman/machine)
+#   ./install                 # Install everything (activation + PATH + brew/podman/machine)
 #   ./install --uninstall     # Remove EVERYTHING this script installed (incl. Podman machine)
 
 set -eu
@@ -11,17 +11,10 @@ set -eu
 # ---- paths / config ----
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 repo_dir=${REPO_DIR:-$(cd "${script_dir}/.." && pwd -P)}
-wrappers_dir=${WRAPPERS_DIR:-"${repo_dir}/.wrappers"}
-files_dir=${FILES_DIR:-"${repo_dir}"}
 la_dir="${HOME}/Library/LaunchAgents"
 uid_name=$(id -un)
 uid_num=$(id -u)
 osxbin_dir="${script_dir}/bin"
-
-templates_dir="${script_dir}/templates"
-wrapper_template="${templates_dir}/wrapper.sh"
-wrapper_release_template="${templates_dir}/wrapper-release.sh"
-wrapper_releaseonly_template="${templates_dir}/wrapper-release-only.sh"
 
 machine=${MACHINE:-com.nashspence.scripts}
 podman_cpus=${PODMAN_CPUS:-14}
@@ -171,85 +164,6 @@ uninstall_launch_agents() {
     done
 }
 
-make_name() {
-    cf=$1
-    base=$(basename "$cf")
-    dirn=$(basename "$(dirname "$cf")")
-    lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
-    case $lower in
-        containerfile|dockerfile|release.yaml)
-            stem=$dirn
-            ;;
-        *)
-            stem=$base
-            stem=${stem%.Containerfile}
-            stem=${stem%.containerfile}
-            stem=${stem%.Dockerfile}
-            stem=${stem%.dockerfile}
-            stem=${stem%.*}
-            [ -n "$stem" ] || stem=$dirn
-            ;;
-    esac
-    slug=$(printf '%s' "$stem" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/^-*//; s/-*$//')
-    [ -n "$slug" ] || slug=$(printf '%s' "$dirn" | tr '[:upper:]' '[:lower:]')
-    out=$slug
-    i=2
-    while [ -e "$wrappers_dir/$out" ]; do
-        out="$slug-$i"
-        i=$((i+1))
-    done
-    printf '%s\n' "$out"
-}
-
-generate_wrappers() {
-    printf 'Repo:            %s\n' "$repo_dir"
-    printf 'Scan root:       %s\n' "$files_dir"
-    printf 'Wrappers out:    %s\n' "$wrappers_dir"
-    rm -rf "$wrappers_dir"
-    mkdir -p "$wrappers_dir"
-
-    index_file="$wrappers_dir/index.tsv"
-    : >"$index_file"
-
-    find "${files_dir}" -type f \( -name Containerfile -o -name '*.Containerfile' -o -name '*.containerfile' -o -name Dockerfile -o -name '*.Dockerfile' -o -name '*.dockerfile' \) | while IFS= read -r cf; do
-        name=$(make_name "$cf")
-        dir=$(dirname "${cf}")
-        abs=$(cd "${dir}" && pwd)/$(basename "${cf}")
-        rel="${dir}/release.yaml"
-        if [ -f "${rel}" ]; then
-            tpl=${wrapper_release_template}
-            rel=$(cd "${dir}" && pwd)/release.yaml
-        else
-            tpl=${wrapper_template}
-            rel=""
-        fi
-        sed -e "s|%NAME%|$name|g" \
-            -e "s|%ABS%|${abs}|g" \
-            -e "s|%REL%|${rel}|g" \
-            "${tpl}" >"${wrappers_dir}/${name}"
-        chmod +x "${wrappers_dir}/${name}"
-        printf '%s\t%s\n' "${name}" "${abs}" >>"${index_file}"
-        printf '  + %s -> %s\n' "${name}" "${abs}"
-    done
-
-    find "${files_dir}/portable" -type f -name release.yaml | while IFS= read -r relf; do
-        dir=$(dirname "${relf}")
-        if find "${dir}" -maxdepth 1 -type f \( -name Containerfile -o -name '*.Containerfile' -o -name '*.containerfile' -o -name Dockerfile -o -name '*.Dockerfile' -o -name '*.dockerfile' \) | read -r _; then
-            continue
-        fi
-        name=$(make_name "${relf}")
-        abs=$(cd "${dir}" && pwd)/release.yaml
-        sed -e "s|%NAME%|$name|g" \
-            -e "s|%ABS%|${abs}|g" \
-            "${wrapper_releaseonly_template}" >"${wrappers_dir}/${name}"
-        chmod +x "${wrappers_dir}/${name}"
-        printf '%s\t%s\n' "${name}" "${abs}" >>"${index_file}"
-        printf '  + %s -> %s\n' "${name}" "${abs}"
-    done
-
-    printf 'Wrote index: %s\n' "${index_file}"
-    echo "Done generating wrappers."
-}
 
 install_all() {
     [ -d "${osxbin_dir}" ] || die "required directory missing: ${osxbin_dir} (must contain 'use-scripts-machine' and 'nsimg')"
@@ -258,9 +172,6 @@ install_all() {
     chmod +x "${osxbin_dir}/use-scripts-machine" 2>/dev/null || true
     chmod +x "${osxbin_dir}/nsimg" 2>/dev/null || true
 
-    [ -f "${wrapper_template}" ] || die "missing template: ${wrapper_template}"
-    [ -f "${wrapper_release_template}" ] || die "missing template: ${wrapper_release_template}"
-    [ -f "${wrapper_releaseonly_template}" ] || die "missing template: ${wrapper_releaseonly_template}"
     [ -d "${script_dir}/launch-agents" ] || die "missing directory: ${script_dir}/launch-agents"
     for dir in "${script_dir}/launch-agents"/*; do
         [ -d "${dir}" ] || continue
@@ -281,18 +192,12 @@ install_all() {
     ensure_podman_machine
 
     install_launch_agents
-    generate_wrappers
 
     echo "Install complete."
 }
 
 uninstall_all() {
     echo "Uninstalling EVERYTHING this script installed…"
-
-    if [ -d "${wrappers_dir}" ]; then
-        echo "Deleting generated wrappers directory: ${wrappers_dir}"
-        rm -rf "${wrappers_dir}"
-    fi
 
     uninstall_launch_agents
 
@@ -314,7 +219,7 @@ elif [ "$#" -eq 0 ]; then
 else
     cat <<USAGE >&2
 Usage:
-  $0                 Install activation + generate wrappers + add paths + brew/podman/machine
+  $0                 Install activation + add paths + brew/podman/machine
   $0 --uninstall     Remove EVERYTHING this script installed (incl. Podman machine)
 USAGE
     exit 2
