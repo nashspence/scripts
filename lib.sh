@@ -19,16 +19,6 @@ abort() {
     exit "$code"
 }
 
-pause() {
-    msg=${1:-}; delay=${2:-5}
-    if [ -t 0 ]; then
-        [ -n "$msg" ] && printf '%s' "$msg" >&2
-        IFS= read -r _ || return 130
-    else
-        sleep "$delay"
-    fi
-}
-
 onfail() {
     handler=$1; shift
     [ "x$1" = "x--" ] || { warn "usage: onfail handler -- cmd ..."; return 2; }
@@ -39,36 +29,13 @@ onfail() {
 }
 
 retry() {
-    delay=5; max=; prompt=; hook=
-    while [ $# -gt 0 ]; do
-        case $1 in
-            -d) delay=$2; shift 2 ;;
-            -n) max=$2; shift 2 ;;
-            -p) prompt=$2; shift 2 ;;
-            --hook|-H) hook=$2; shift 2 ;;
-            --) shift; break ;;
-            *) break ;;
-        esac
-    done
-    [ $# -gt 0 ] || { warn "usage: retry [-d secs] [-n max] [-p prompt] [--hook handler] -- cmd ..."; return 2; }
-
-    tries=0
     while :; do
-        "$@"; rc=$?
-        [ "$rc" -eq 0 ] && return 0
-        tries=$((tries + 1))
-        [ -n "$hook" ] && "$hook" "$rc" "$@"
-        [ -n "$max" ] && [ "$tries" -ge "$max" ] && return "$rc"
-        if [ -t 0 ]; then
-            if [ -n "$prompt" ]; then
-                printf '%s' "$prompt" >&2
-            else
-                printf 'Command failed (rc=%s). Press Enter to retry (Ctrl-C to abort)...' "$rc" >&2
-            fi
-            IFS= read -r _ || return 130
-        else
-            sleep "$delay"
-        fi
+        "$@" && return 0
+        s=$?
+        [ -t 0 ] || return "$s"
+        printf 'Failed (exit %d). Retry? [y/N] ' "$s" >&2
+        IFS= read -r yn || return "$s"
+        case $yn in [Yy]*) ;; *) return "$s";; esac
     done
 }
 
