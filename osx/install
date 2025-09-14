@@ -24,7 +24,8 @@ podman_disk=${PODMAN_DISK:-40}
 path_begin="# >>> podman-scripts PATH >>>"
 path_end="# <<< podman-scripts PATH <<<"
 export_repo_line="export PODMAN_SCRIPTS_DIR=\"${repo_dir}\""
-source_lib_line=". \"\${PODMAN_SCRIPTS_DIR}/osx/lib.sh\""
+source_repo_line=". \"\${PODMAN_SCRIPTS_DIR}/lib.sh\""
+source_osx_line=". \"\${PODMAN_SCRIPTS_DIR}/osx/lib.sh\""
 
 die() {
     printf 'ERROR: %s\n' "$*" >&2
@@ -38,7 +39,8 @@ add_path_block() {
         {
             printf '\n%s\n' "${path_begin}"
             printf '%s\n' "${export_repo_line}"
-            printf '%s\n' "${source_lib_line}"
+            printf '%s\n' "${source_repo_line}"
+            printf '%s\n' "${source_osx_line}"
             printf '%s\n' "${path_end}"
         } >>"${file}"
         printf '  + added PATH block to %s\n' "${file#"${HOME}/"}"
