@@ -4,11 +4,18 @@
 * When I run install
 * Then Homebrew is installed
 * And Podman is installed
+* And pass is installed
+* And the secrets repository exists
 * And the com.nashspence.scripts Podman machine exists
 * And the bin directories are added to the shell PATH
 * And the Podman Machine launch agent is loaded
 * And the On Mount launch agent is loaded
 * And the com.nashspence.scripts Podman machine is not running
+
+## Scenario: initialise pass from a remote
+* When I run install
+* And I pass a remote URL
+* Then the secrets repository is synced from that remote
 
 ## Scenario: uninstall the Podman machine environment
 * Given install has been run
@@ -79,16 +86,18 @@
 * And I pass a URL
 * Then dot files are not copied to the destination
 
-## Scenario: store and retrieve a Keychain password
-* Given a password is on the clipboard
+## Scenario: store and retrieve a password
+* Given a password is on stdin
 * When I run kc with "add"
+* And I pass "--stdin"
 * And I pass a name
 * Then the password is stored under that name
 * When I run kc with "get"
 * And I pass the same name
 * Then the password is printed
-* Given another password is on the clipboard
+* Given another password is on stdin
 * When I run kc with "update"
+* And I pass "--stdin"
 * And I pass the same name
 * Then the password is updated
 * When I run kc with "delete"
