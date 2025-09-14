@@ -1,38 +1,103 @@
 #!/bin/sh
-# Minimal Keychain wrapper
-
 set -eu
+umask 077
 
 usage() {
-    printf 'Usage: %s {add|update|get|delete} <name>\n' "${0##*/}" >&2
-    exit 2
+  printf 'Usage:\n' >&2
+  printf '  %s {add|update} [-n|--stdin] <name>\n' "${0##*/}" >&2
+  printf '  %s {get|delete} <name>\n' "${0##*/}" >&2
+  printf '  %s get-secret <name> <pid>\n' "${0##*/}" >&2
+  exit 2
+}
+
+trimmed_stdin_secret() {
+  secret=$(cat)
+  if [ -z "$secret" ]; then
+    printf 'error: empty secret on stdin\n' >&2
+    exit 3
+  fi
+  printf %s "$secret"
 }
 
 cmd=${1:-}
-name=${2:-}
+[ -n "${cmd:-}" ] || usage
 
-[ -n "$cmd" ] && [ -n "$name" ] || usage
+force_stdin=0
+case "$cmd" in
+  add|update)
+    shift
+    case "${1:-}" in
+      -n|--stdin) force_stdin=1; shift ;;
+    esac
+    name=${1:-}
+    [ -n "$name" ] || usage
+    ;;
+  get|delete)
+    shift
+    name=${1:-}
+    [ -n "$name" ] || usage
+    ;;
+  get-secret)
+    shift
+    name=${1:-}
+    pid=${2:-}
+    [ -n "$name" ] && [ -n "$pid" ] || usage
+    case "$pid" in ''|*[!0-9]*)
+      printf 'error: pid must be numeric\n' >&2; exit 2;;
+    esac
+    ;;
+  *) usage ;;
+esac
 
-service="com.nashspence.scripts.kc.$name"
+service="com.nashspence.scripts.kc.${name}"
+
+: "${TMPDIR:=/tmp}"
 
 case "$cmd" in
-    add)
-        pw=$(pbpaste)
-        security add-generic-password -a "$USER" -s "$service" -w "$pw"
-        pw=; unset pw
-        ;;
-    update)
-        pw=$(pbpaste)
-        security add-generic-password -U -a "$USER" -s "$service" -w "$pw"
-        pw=; unset pw
-        ;;
-    get)
-        security find-generic-password -s "$service" -w
-        ;;
-    delete)
-        security delete-generic-password -s "$service"
-        ;;
-    *)
-        usage
-        ;;
+  add)
+    if [ "$force_stdin" -eq 1 ] || ! [ -t 0 ]; then
+      s=$(trimmed_stdin_secret)
+      security -q add-generic-password -a "$USER" -s "$service" -w "$s"
+      unset s
+    else
+      security -q add-generic-password -a "$USER" -s "$service" -w
+    fi
+    ;;
+
+  update)
+    if [ "$force_stdin" -eq 1 ] || ! [ -t 0 ]; then
+      s=$(trimmed_stdin_secret)
+      security -q add-generic-password -U -a "$USER" -s "$service" -w "$s"
+      unset s
+    else
+      security -q add-generic-password -U -a "$USER" -s "$service" -w
+    fi
+    ;;
+
+  get)
+    printf %s "$(security -q find-generic-password -a "$USER" -s "$service" -w)"
+    ;;
+
+  get-secret)
+    tmp="$(mktemp "${TMPDIR%/}/XXXXXXXX")"
+    chmod 600 "$tmp"
+    printf %s "$(security -q find-generic-password -a "$USER" -s "$service" -w)" >"$tmp" || {
+      rm -f "$tmp"; exit 1; }
+
+    MON_PID=$pid MON_FILE=$tmp nohup sh -c '
+      # Remove file when (and only while) the exact process is alive (guard PID reuse)
+      start="$(ps -o lstart= -p "$MON_PID" 2>/dev/null)"
+      while :; do
+        cur="$(ps -o lstart= -p "$MON_PID" 2>/dev/null)" || break
+        [ "$cur" = "$start" ] || break
+        sleep 1
+      done
+      rm -f -- "$MON_FILE"
+    ' >/dev/null 2>&1 &
+    printf '%s\n' "$tmp"
+    ;;
+
+  delete)
+    security -q delete-generic-password -a "$USER" -s "$service" || true
+    ;;
 esac
