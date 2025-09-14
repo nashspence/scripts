@@ -50,6 +50,16 @@ repos:
             VERSION=1.6.20
             CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/gauge"
             BIN="$CACHE/gauge"
+            GAUGE_HOME="$CACHE/home"
+            bin_version=""
+            if [ -x "$BIN" ]; then
+              set +o pipefail
+              bin_version="$($BIN --version 2>/dev/null | head -n1 | cut -d" " -f3)" || true
+              set -o pipefail
+            fi
+            if [ "$bin_version" != "$VERSION" ]; then
+              rm -f "$BIN"
+            fi
             if [ ! -x "$BIN" ]; then
               TMP=$(mktemp -d)
               OS=$(uname -s)
@@ -64,16 +74,18 @@ repos:
               URL="https://github.com/getgauge/gauge/releases/download/v${VERSION}/gauge-${VERSION}-${SUFFIX}.zip"
               curl -fsSL "$URL" -o "$TMP/gauge.zip"
               mkdir -p "$CACHE"
-              unzip -q "$TMP/gauge.zip" -d "$CACHE"
+              unzip -oq "$TMP/gauge.zip" -d "$CACHE"
               chmod +x "$BIN"
               rm -rf "$TMP"
             fi
+            mkdir -p "$GAUGE_HOME"
+            "$BIN" config check_updates false >/dev/null 2>&1 || true
             temp_manifest=
             if [ ! -f manifest.json ]; then
               printf "{\n  \"Language\": \"python\",\n  \"Plugins\": []\n}\n" > manifest.json
               temp_manifest=manifest.json
             fi
             trap "test -n \"$temp_manifest\" && rm -f \"$temp_manifest\"" EXIT
-            exec env GAUGE_TELEMETRY_ENABLED=false "$BIN" format "$@" < <(printf "y\n")
+            exec env GAUGE_TELEMETRY_ENABLED=false GAUGE_HOME="$GAUGE_HOME" "$BIN" format "$@"
           ' --
         files: (^|/)spec\.md$

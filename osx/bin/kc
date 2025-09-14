@@ -10,13 +10,20 @@ usage() {
   exit 2
 }
 
-trimmed_stdin_secret() {
-  secret=$(cat)
-  if [ -z "$secret" ]; then
-    printf 'error: empty secret on stdin\n' >&2
-    exit 3
+warn() {
+  printf '%s\n' "$*" >&2
+}
+
+pass_git_pull() {
+  if ! pass git pull --rebase >/dev/null 2>&1; then
+    warn 'warning: pass git pull failed; run "pass git pull --rebase"'
   fi
-  printf %s "$secret"
+}
+
+pass_git_push() {
+  if ! pass git push >/dev/null 2>&1; then
+    warn 'warning: pass git push failed; run "pass git push"'
+  fi
 }
 
 cmd=${1:-}
@@ -43,49 +50,53 @@ case "$cmd" in
     pid=${2:-}
     [ -n "$name" ] && [ -n "$pid" ] || usage
     case "$pid" in ''|*[!0-9]*)
-      printf 'error: pid must be numeric\n' >&2; exit 2;;
+      warn 'error: pid must be numeric'; exit 2;;
     esac
     ;;
   *) usage ;;
 esac
 
-service="com.nashspence.scripts.kc.${name}"
+: "${PASSWORD_STORE_DIR:=$HOME/git/secrets}"
+export PASSWORD_STORE_DIR
+
+service="kc/${name}"
 
 : "${TMPDIR:=/tmp}"
 
 case "$cmd" in
   add)
+    pass_git_pull
     if [ "$force_stdin" -eq 1 ] || ! [ -t 0 ]; then
-      s=$(trimmed_stdin_secret)
-      security -q add-generic-password -a "$USER" -s "$service" -w "$s"
-      unset s
+      pass insert -m "$service" >/dev/null
     else
-      security -q add-generic-password -a "$USER" -s "$service" -w
+      pass insert "$service" >/dev/null
     fi
+    pass_git_push
     ;;
 
   update)
+    pass_git_pull
     if [ "$force_stdin" -eq 1 ] || ! [ -t 0 ]; then
-      s=$(trimmed_stdin_secret)
-      security -q add-generic-password -U -a "$USER" -s "$service" -w "$s"
-      unset s
+      pass insert -fm "$service" >/dev/null
     else
-      security -q add-generic-password -U -a "$USER" -s "$service" -w
+      pass insert -f "$service" >/dev/null
     fi
+    pass_git_push
     ;;
 
   get)
-    printf %s "$(security -q find-generic-password -a "$USER" -s "$service" -w)"
+    pass_git_pull
+    pass show "$service" | head -n1
     ;;
 
   get-secret)
+    pass_git_pull
     tmp="$(mktemp "${TMPDIR%/}/XXXXXXXX")"
     chmod 600 "$tmp"
-    printf %s "$(security -q find-generic-password -a "$USER" -s "$service" -w)" >"$tmp" || {
-      rm -f "$tmp"; exit 1; }
-
+    if ! pass show "$service" >"$tmp"; then
+      rm -f "$tmp"; exit 1
+    fi
     MON_PID=$pid MON_FILE=$tmp nohup sh -c '
-      # Remove file when (and only while) the exact process is alive (guard PID reuse)
       start="$(ps -o lstart= -p "$MON_PID" 2>/dev/null)"
       while :; do
         cur="$(ps -o lstart= -p "$MON_PID" 2>/dev/null)" || break
@@ -98,6 +109,8 @@ case "$cmd" in
     ;;
 
   delete)
-    security -q delete-generic-password -a "$USER" -s "$service" || true
+    pass_git_pull
+    pass rm -f "$service" >/dev/null 2>&1 || true
+    pass_git_push
     ;;
 esac
