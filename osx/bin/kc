@@ -14,20 +14,20 @@ warn() {
   printf '%s\n' "$*" >&2
 }
 
-pass_git_pull() {
-  if ! pass git pull --rebase >/dev/null 2>&1; then
-    warn 'warning: pass git pull failed; run "pass git pull --rebase"'
-  fi
-}
-
-pass_git_push() {
-  if ! pass git push >/dev/null 2>&1; then
-    warn 'warning: pass git push failed; run "pass git push"'
+read_secret() {
+  if [ "$force_stdin" -eq 1 ] || ! [ -t 0 ]; then
+    secret=$(cat)
+  else
+    printf 'Password: ' >&2
+    stty -echo
+    IFS= read -r secret
+    stty echo
+    printf '\n' >&2
   fi
 }
 
 cmd=${1:-}
-[ -n "${cmd:-}" ] || usage
+[ -n "$cmd" ] || usage
 
 force_stdin=0
 case "$cmd" in
@@ -56,44 +56,21 @@ case "$cmd" in
   *) usage ;;
 esac
 
-: "${PASSWORD_STORE_DIR:=$HOME/git/secrets}"
-export PASSWORD_STORE_DIR
-
 service="kc/${name}"
-
 : "${TMPDIR:=/tmp}"
 
 case "$cmd" in
-  add)
-    pass_git_pull
-    if [ "$force_stdin" -eq 1 ] || ! [ -t 0 ]; then
-      pass insert -m "$service" >/dev/null
-    else
-      pass insert "$service" >/dev/null
-    fi
-    pass_git_push
+  add|update)
+    read_secret
+    security add-generic-password -a "$name" -s "$service" -w "$secret" -U >/dev/null
     ;;
-
-  update)
-    pass_git_pull
-    if [ "$force_stdin" -eq 1 ] || ! [ -t 0 ]; then
-      pass insert -fm "$service" >/dev/null
-    else
-      pass insert -f "$service" >/dev/null
-    fi
-    pass_git_push
-    ;;
-
   get)
-    pass_git_pull
-    pass show "$service" | head -n1
+    security find-generic-password -a "$name" -s "$service" -w
     ;;
-
   get-secret)
-    pass_git_pull
     tmp="$(mktemp "${TMPDIR%/}/XXXXXXXX")"
     chmod 600 "$tmp"
-    if ! pass show "$service" >"$tmp"; then
+    if ! security find-generic-password -a "$name" -s "$service" -w >"$tmp"; then
       rm -f "$tmp"; exit 1
     fi
     MON_PID=$pid MON_FILE=$tmp nohup sh -c '
@@ -107,10 +84,7 @@ case "$cmd" in
     ' >/dev/null 2>&1 &
     printf '%s\n' "$tmp"
     ;;
-
   delete)
-    pass_git_pull
-    pass rm -f "$service" >/dev/null 2>&1 || true
-    pass_git_push
+    security delete-generic-password -a "$name" -s "$service" >/dev/null 2>&1 || true
     ;;
 esac

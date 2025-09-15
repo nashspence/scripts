@@ -4,18 +4,11 @@
 * When I run install
 * Then Homebrew is installed
 * And Podman is installed
-* And pass is installed
-* And the secrets repository exists
 * And the com.nashspence.scripts Podman machine exists
 * And the bin directories are added to the shell PATH
 * And the Podman Machine launch agent is loaded
 * And the On Mount launch agent is loaded
 * And the com.nashspence.scripts Podman machine is not running
-
-## Scenario: initialise pass from a remote
-* When I run install
-* And I pass a remote URL
-* Then the secrets repository is synced from that remote
 
 ## Scenario: uninstall the Podman machine environment
 * Given install has been run
