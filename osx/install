@@ -21,8 +21,14 @@ podman_cpus=${PODMAN_CPUS:-14}
 podman_mem=${PODMAN_MEM:-20480}
 podman_disk=${PODMAN_DISK:-40}
 
-path_begin="# >>> podman-scripts PATH >>>"
-path_end="# <<< podman-scripts PATH <<<"
+# Markers for POSIX env block (in ~/.profile)
+env_begin="# >>> podman-scripts ENV >>>"
+env_end="# <<< podman-scripts ENV <<<"
+
+# Markers for zsh source-from-profile shim
+zsrc_begin="# >>> podman-scripts: source ~/.profile >>>"
+zsrc_end="# <<< podman-scripts: source ~/.profile <<<"
+
 export_repo_line="export PODMAN_SCRIPTS_DIR=\"${repo_dir}\""
 source_repo_line=". \"\${PODMAN_SCRIPTS_DIR}/lib.sh\""
 source_osx_line=". \"\${PODMAN_SCRIPTS_DIR}/osx/lib.sh\""
@@ -32,31 +38,65 @@ die() {
     exit 1
 }
 
-add_path_block() {
+# --- generic block removers ---
+remove_block() {
+    # remove a [[begin,end]] delimited block from file if present
+    file=$1 begin=$2 end=$3
+    [ -f "${file}" ] || return 0
+    tmp=$(mktemp)
+    awk -v b="${begin}" -v e="${end}" '
+        $0==b {skip=1; next}
+        skip && $0==e {skip=0; next}
+        !skip {print}
+    ' "${file}" >"${tmp}"
+    mv "${tmp}" "${file}"
+}
+
+# --- POSIX ~/.profile env block ---
+ensure_profile_env_block() {
     file=$1
     [ -f "${file}" ] || : >"${file}"
-    if ! grep -Fqx "${path_begin}" "${file}" 2>/dev/null; then
+    if ! grep -Fqx "${env_begin}" "${file}" 2>/dev/null; then
         {
-            printf '\n%s\n' "${path_begin}"
+            printf '\n%s\n' "${env_begin}"
             printf '%s\n' "${export_repo_line}"
             printf '%s\n' "${source_repo_line}"
             printf '%s\n' "${source_osx_line}"
-            printf '%s\n' "${path_end}"
+            printf '%s\n' "${env_end}"
         } >>"${file}"
-        printf '  + added PATH block to %s\n' "${file#"${HOME}/"}"
+        printf '  + added podman-scripts ENV block to %s\n' "${file#"${HOME}/"}"
     fi
 }
 
-remove_path_block() {
+remove_profile_env_block() {
+    remove_block "${HOME}/.profile" "${env_begin}" "${env_end}"
+}
+
+# --- zsh shim: source ~/.profile from zsh startup files ---
+ensure_zsh_sources_profile() {
     file=$1
-    [ -f "${file}" ] || return 0
-    tmp=$(mktemp)
-    awk -v b="${path_begin}" -v e="${path_end}" '
-        $0==b {skip=1}
-        !skip {print}
-        $0==e {skip=0}
-    ' "${file}" >"${tmp}"
-    mv "${tmp}" "${file}"
+    [ -f "${file}" ] || : >"${file}"
+
+    # If an older direct block (from previous versions) exists, remove it
+    # Common old markers were "# >>> podman-scripts PATH >>>" etc.
+    remove_block "${file}" "# >>> podman-scripts PATH >>>" "# <<< podman-scripts PATH <<<"
+
+    if ! grep -Fqx "${zsrc_begin}" "${file}" 2>/dev/null; then
+        {
+            printf '\n%s\n' "${zsrc_begin}"
+            printf '[ -r "$HOME/.profile" ] && . "$HOME/.profile"\n'
+            printf '%s\n' "${zsrc_end}"
+        } >>"${file}"
+        printf '  + ensured %s sources ~/.profile\n' "${file#"${HOME}/"}"
+    fi
+}
+
+remove_zsh_source_blocks() {
+    remove_block "${HOME}/.zprofile" "${zsrc_begin}" "${zsrc_end}"
+    remove_block "${HOME}/.zshrc"    "${zsrc_begin}" "${zsrc_end}"
+    # Also remove any legacy direct blocks we used to add:
+    remove_block "${HOME}/.zprofile" "# >>> podman-scripts PATH >>>" "# <<< podman-scripts PATH <<<"
+    remove_block "${HOME}/.zshrc"    "# >>> podman-scripts PATH >>>" "# <<< podman-scripts PATH <<<"
 }
 
 ensure_brew() {
@@ -186,7 +226,6 @@ uninstall_launch_agents() {
     done
 }
 
-
 install_all() {
     [ -d "${bin_dir}" ] || die "required directory missing: ${bin_dir} (must contain 'use-scripts-machine' and 'nsimg')"
     [ -f "${bin_dir}/use-scripts-machine" ] || die "required tool missing: ${bin_dir}/use-scripts-machine"
@@ -206,8 +245,12 @@ install_all() {
 
     mkdir -p "${la_dir}"
 
-    add_path_block "${HOME}/.zprofile"
-    add_path_block "${HOME}/.zshrc"
+    # Ensure ~/.profile has a POSIX env block for these scripts
+    ensure_profile_env_block "${HOME}/.profile"
+
+    # Ensure zsh files *source* ~/.profile (idempotent)
+    ensure_zsh_sources_profile "${HOME}/.zprofile"
+    ensure_zsh_sources_profile "${HOME}/.zshrc"
 
     ensure_brew
     ensure_podman
@@ -227,8 +270,9 @@ uninstall_all() {
     sock="/tmp/com.nashspence.scripts.podman-machine.${uid_num}.sock"
     [ -S "${sock}" ] && rm -f "${sock}"
 
-    remove_path_block "${HOME}/.zprofile"
-    remove_path_block "${HOME}/.zshrc"
+    # Remove our blocks from shells
+    remove_zsh_source_blocks
+    remove_profile_env_block
 
     remove_podman_machine
 
@@ -242,7 +286,7 @@ elif [ "$#" -eq 0 ]; then
 else
     cat <<USAGE >&2
 Usage:
-  $0                 Install activation + add paths + brew/podman/machine
+  $0                 Install activation + add env block + brew/podman/machine
   $0 --uninstall     Remove EVERYTHING this script installed (incl. Podman machine)
 USAGE
     exit 2
