@@ -301,6 +301,12 @@ def main() -> None:
         help="Local work dir inside the container; inputs are staged here before encoding.",
     )
     ap.add_argument(
+        "--svt-lp",
+        type=int,
+        default=int(os.getenv("SVT_LP", "5")),
+        help="Number of SVT-AV1 lookahead processes (lp parameter).",
+    )
+    ap.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -558,7 +564,7 @@ def main() -> None:
             "-preset",
             "5",
             "-svtav1-params",
-            "lp=5",
+            f"lp={args.svt_lp}",
             "-c:a",
             "libopus",
             "-b:a",

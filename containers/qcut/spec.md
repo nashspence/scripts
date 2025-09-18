@@ -5,9 +5,11 @@
 * And an output directory "<out>"
 * When I pass --src-dir "<src>"
 * And I pass --autoedit-dir "<out>"
+* And I pass --svt-lp "<lp>"
 * And I run qcut
 * Then qcut writes the final video to "<out>"
 * And the final video shows timestamp overlays
+* And the encode uses SVT-AV1 lp "<lp>"
 
 ## Scenario: enable verbose logging
 * Given a directory "<src>" containing videos
