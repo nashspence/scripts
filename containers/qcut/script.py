@@ -356,6 +356,12 @@ def main() -> None:
     )
     ap.add_argument("--svt-preset", type=int, default=int(os.getenv("SVT_PRESET", "5")))
     ap.add_argument("--svt-crf", type=int, default=int(os.getenv("SVT_CRF", "32")))
+    ap.add_argument(
+        "--svt-lp",
+        type=int,
+        default=int(os.getenv("SVT_LP", "5")),
+        help="Number of SVT-AV1 lookahead processes (lp parameter).",
+    )
     ap.add_argument("--opus-br", default=os.getenv("OPUS_BR", "128k"))
     # IMPORTANT: tp has no default; if omitted -> no limiter
     ap.add_argument(
@@ -468,6 +474,7 @@ def main() -> None:
             "max_sec": args.max,
             "svt_preset": args.svt_preset,
             "svt_crf": args.svt_crf,
+            "svt_lp": args.svt_lp,
             "opus_br": args.opus_br,
             "tp": args.tp,  # None -> no limiter
             "fontfile": args.fontfile,
@@ -534,6 +541,10 @@ def main() -> None:
         )
     else:
         log(f"Plan loaded: {len(m['clips'])} clips")
+
+    if m.get("plan") and "svt_lp" not in m["plan"]:
+        m["plan"]["svt_lp"] = args.svt_lp
+        save_manifest(args.autoedit_dir, m)
 
     # 2) Encode pending clips
     done = sum(
@@ -610,7 +621,7 @@ def main() -> None:
                 "-crf",
                 str(m["plan"]["svt_crf"]),
                 "-svtav1-params",
-                "lp=5",
+                f"lp={m['plan']['svt_lp']}",
                 "-c:a",
                 "libopus",
                 "-b:a",

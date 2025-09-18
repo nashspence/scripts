@@ -10,6 +10,7 @@
 * And I pass --output-dir "<out>"
 * And I pass --manifest-name "<manifest>"
 * And I pass --name-suffix "<suffix>"
+* And I pass --svt-lp "<lp>"
 * And I run vcrunch
 * Then vcrunch creates an AV1 file in "<out>"
 * And the file name ends with "<suffix>.mkv"
@@ -17,6 +18,7 @@
 * And the encode respects the target size
 * And the encode respects the audio bitrate
 * And the encode respects the safety overhead
+* And the encode uses the SVT-AV1 lp "<lp>"
 
 ## Scenario: skip already encoded videos
 * Given an MP4 file "<src>"
