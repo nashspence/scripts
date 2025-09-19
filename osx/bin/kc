@@ -2,89 +2,19 @@
 set -eu
 umask 077
 
-usage() {
-  printf 'Usage:\n' >&2
-  printf '  %s {add|update} [-n|--stdin] <name>\n' "${0##*/}" >&2
-  printf '  %s {get|delete} <name>\n' "${0##*/}" >&2
-  printf '  %s get-secret <name> <pid>\n' "${0##*/}" >&2
-  exit 2
-}
-
-warn() {
-  printf '%s\n' "$*" >&2
-}
-
-read_secret() {
-  if [ "$force_stdin" -eq 1 ] || ! [ -t 0 ]; then
-    secret=$(cat)
-  else
-    printf 'Password: ' >&2
-    stty -echo
-    IFS= read -r secret
-    stty echo
-    printf '\n' >&2
-  fi
-}
-
-cmd=${1:-}
-[ -n "$cmd" ] || usage
-
-force_stdin=0
-case "$cmd" in
-  add|update)
-    shift
-    case "${1:-}" in
-      -n|--stdin) force_stdin=1; shift ;;
-    esac
-    name=${1:-}
-    [ -n "$name" ] || usage
-    ;;
-  get|delete)
-    shift
-    name=${1:-}
-    [ -n "$name" ] || usage
-    ;;
-  get-secret)
-    shift
-    name=${1:-}
-    pid=${2:-}
-    [ -n "$name" ] && [ -n "$pid" ] || usage
-    case "$pid" in ''|*[!0-9]*)
-      warn 'error: pid must be numeric'; exit 2;;
-    esac
-    ;;
-  *) usage ;;
-esac
-
-service="kc/${name}"
+service="com.nashspence.scripts.kc.${1:-}"
 : "${TMPDIR:=/tmp}"
 
 case "$cmd" in
-  add|update)
-    read_secret
-    security add-generic-password -a "$name" -s "$service" -w "$secret" -U >/dev/null
+  add)
+    secret=$(cat)
+    [ -n "$secret" ] || security add-generic-password -s "$service" -a "$USER" -Uw && exit 0
+    security add-generic-password -s "$service" -a "$USER" -w "$secret" -U >/dev/null
     ;;
   get)
-    security find-generic-password -a "$name" -s "$service" -w
-    ;;
-  get-secret)
-    tmp="$(mktemp "${TMPDIR%/}/XXXXXXXX")"
-    chmod 600 "$tmp"
-    if ! security find-generic-password -a "$name" -s "$service" -w >"$tmp"; then
-      rm -f "$tmp"; exit 1
-    fi
-    MON_PID=$pid MON_FILE=$tmp nohup sh -c '
-      start="$(ps -o lstart= -p "$MON_PID" 2>/dev/null)"
-      while :; do
-        cur="$(ps -o lstart= -p "$MON_PID" 2>/dev/null)" || break
-        [ "$cur" = "$start" ] || break
-        sleep 1
-      done
-      rm -f -- "$MON_FILE"
-    ' >/dev/null 2>&1 &
-    printf '%s\n' "$tmp"
+    security find-generic-password -s "$service" -a "$USER" -w
     ;;
   delete)
-    security delete-generic-password -a "$name" -s "$service" >/dev/null 2>&1 || true
+    security delete-generic-password -s "$service" -a "$USER" >/dev/null 2>&1 || true
     ;;
 esac
