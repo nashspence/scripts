@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 if "dateutil" not in sys.modules:
@@ -101,3 +103,308 @@ def test_choose_and_output_prints_top_choice_when_not_tty(capsys: Any) -> None:
     captured = capsys.readouterr()
     assert rc == 0
     assert captured.out == dt.isoformat()
+
+
+@pytest.mark.parametrize(
+    ("path", "expected", "tz_present", "has_fraction"),
+    [
+        (
+            "/archive/20240102T030405+0230!~/clip.mp4",
+            datetime(
+                2024,
+                1,
+                2,
+                3,
+                4,
+                5,
+                tzinfo=timezone(timedelta(hours=2, minutes=30)),
+            ),
+            True,
+            False,
+        ),
+        (
+            "/archive/20240102T030405+0230/clip.mp4",
+            datetime(
+                2024,
+                1,
+                2,
+                3,
+                4,
+                5,
+                tzinfo=timezone(timedelta(hours=2, minutes=30)),
+            ),
+            True,
+            False,
+        ),
+        (
+            "/archive/2024-07-16_09_10_15Z.mov",
+            datetime(2024, 7, 16, 9, 10, 15, tzinfo=timezone.utc),
+            True,
+            False,
+        ),
+        (
+            "/archive/2024-07-16_09_10_15.123456Z.mov",
+            datetime(2024, 7, 16, 9, 10, 15, 123456, tzinfo=timezone.utc),
+            True,
+            True,
+        ),
+        (
+            "/archive/2024-07-16_09_10_15.123456789.mov",
+            datetime(2024, 7, 16, 9, 10, 15, 123456),
+            False,
+            True,
+        ),
+        (
+            "/snapshots/20240102T030405.5+02:30.mp4",
+            datetime(
+                2024,
+                1,
+                2,
+                3,
+                4,
+                5,
+                500000,
+                tzinfo=timezone(timedelta(hours=2, minutes=30)),
+            ),
+            True,
+            True,
+        ),
+        (
+            "/snapshots/20240102T030405-05:00.mp4",
+            datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone(-timedelta(hours=5))),
+            True,
+            False,
+        ),
+        (
+            "/snapshots/20240716T0910.mp4",
+            datetime(2024, 7, 16, 9, 10),
+            False,
+            False,
+        ),
+        (
+            "/snapshots/202407.mov",
+            datetime(2024, 7, 1),
+            False,
+            False,
+        ),
+        (
+            "/snapshots/2024.mov",
+            datetime(2024, 1, 1),
+            False,
+            False,
+        ),
+        (
+            "/snapshots/20240102T030405+02_30.mov",
+            datetime(
+                2024,
+                1,
+                2,
+                3,
+                4,
+                5,
+                tzinfo=timezone(timedelta(hours=2, minutes=30)),
+            ),
+            True,
+            False,
+        ),
+    ],
+)
+def test_extract_datetime_from_path_rigid_variants(
+    path: str, expected: datetime, tz_present: bool, has_fraction: bool
+) -> None:
+    result = script._extract_rigid_path_datetime(path)
+    assert result is not None
+    dt, tz, fraction = result
+    assert dt == expected
+    assert tz is tz_present
+    assert fraction is has_fraction
+
+
+def test_extract_datetime_from_path_rigid_invalid_day() -> None:
+    assert script._extract_rigid_path_datetime("/broken/20240230.mov") is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/broken/2024-00-01.mp4",
+        "/broken/2024-13-01/clip.mp4",
+    ],
+)
+def test_extract_datetime_from_path_rigid_invalid_month_defaults_to_year(
+    path: str,
+) -> None:
+    result = script._extract_rigid_path_datetime(path)
+    assert result is not None
+    dt, tz, fraction = result
+    assert dt == datetime(2024, 1, 1)
+    assert not tz
+    assert not fraction
+
+
+@pytest.mark.parametrize(
+    ("path", "expected", "tz_present", "has_fraction"),
+    [
+        (
+            "photos/20230505T111530Z.jpg",
+            datetime(2023, 5, 5, 11, 15, 30, tzinfo=timezone.utc),
+            True,
+            False,
+        ),
+        (
+            "photos/2023-05-05 21:15:30+02:30.jpg",
+            datetime(
+                2023,
+                5,
+                5,
+                21,
+                15,
+                30,
+                tzinfo=timezone(timedelta(hours=2, minutes=30)),
+            ),
+            True,
+            False,
+        ),
+        (
+            "photos/2023-05-05 21:15:30.654321-05:00.jpg",
+            datetime(
+                2023,
+                5,
+                5,
+                21,
+                15,
+                30,
+                654321,
+                tzinfo=timezone(-timedelta(hours=5)),
+            ),
+            True,
+            True,
+        ),
+        (
+            "photos/05-31-2023 11_15_30 PM-0500.jpg",
+            datetime(2023, 5, 31, 23, 15, 30, tzinfo=timezone(-timedelta(hours=5))),
+            True,
+            False,
+        ),
+        (
+            "photos/May 05, 2023 11-15-30 AM.jpg",
+            datetime(2023, 5, 5, 11, 15, 30),
+            False,
+            False,
+        ),
+        (
+            "photos/05-Jun-2022 23:59:59.png",
+            datetime(2022, 6, 5, 23, 59, 59),
+            False,
+            False,
+        ),
+        (
+            "photos/2024/July/04 04:05:06.mov",
+            datetime(2024, 7, 4, 4, 5, 6),
+            False,
+            False,
+        ),
+        (
+            "photos/31-12-2022.gif",
+            datetime(2022, 12, 31),
+            False,
+            False,
+        ),
+        (
+            "photos/2022-31-12.raw",
+            datetime(2022, 12, 31),
+            False,
+            False,
+        ),
+        (
+            "photos/12-31-2022.heic",
+            datetime(2022, 12, 31),
+            False,
+            False,
+        ),
+        (
+            "photos/2023-15-01 10:00:00.jpg",
+            datetime(2023, 1, 15, 10, 0, 0),
+            False,
+            False,
+        ),
+        (
+            "photos/2024-05/clip.mp4",
+            datetime(2024, 5, 1),
+            False,
+            False,
+        ),
+        (
+            "photos/April 2024/clip.mp4",
+            datetime(2024, 4, 1),
+            False,
+            False,
+        ),
+        (
+            "photos/2023/clip.mp4",
+            datetime(2023, 1, 1),
+            False,
+            False,
+        ),
+    ],
+)
+def test_extract_datetime_from_path_relaxed_variants(
+    path: str, expected: datetime, tz_present: bool, has_fraction: bool
+) -> None:
+    # Force relaxed extraction directly to ensure the broad pattern is exercised.
+    result = script._extract_relaxed_path_datetime(path)
+    assert result is not None
+    dt, tz, fraction = result
+    assert dt == expected
+    assert tz is tz_present
+    assert fraction is has_fraction
+
+
+@pytest.mark.parametrize(
+    ("path", "year"),
+    [
+        ("photos/32-12-2022.jpg", 2022),
+        ("photos/Febtober 2023.png", 2023),
+    ],
+)
+def test_extract_datetime_from_path_relaxed_unrecognized_tokens_default(
+    path: str, year: int
+) -> None:
+    result = script._extract_relaxed_path_datetime(path)
+    assert result is not None
+    dt, tz, fraction = result
+    assert dt == datetime(year, 1, 1)
+    assert not tz
+    assert not fraction
+
+
+def test_file_system_candidates_use_path_over_mtime(monkeypatch: Any) -> None:
+    class DummyStat:
+        st_mtime = datetime(2024, 2, 3, 12, 0, 0).timestamp()
+        st_ctime = datetime(2024, 2, 4, 12, 0, 0).timestamp()
+
+    monkeypatch.setattr("containers.guess_date.script.os.stat", lambda _: DummyStat())
+
+    path = "/media/2024-02-03!~/example.jpg"
+    candidates = script.file_system_candidates(path)
+    sources = {candidate[0] for candidate in candidates}
+    assert "fs:path" in sources
+    assert "fs:mtime" not in sources
+
+    aggregated = script.cluster_and_score(candidates)
+    assert aggregated
+    assert aggregated[0].representative.src == "fs:path"
+
+
+def test_file_system_candidates_falls_back_to_mtime(monkeypatch: Any) -> None:
+    class DummyStat:
+        st_mtime = datetime(2024, 5, 6, 7, 8, 9).timestamp()
+        st_ctime = datetime(2024, 5, 6, 8, 8, 9).timestamp()
+
+    monkeypatch.setattr("containers.guess_date.script.os.stat", lambda _: DummyStat())
+
+    path = "/media/example.jpg"
+    candidates = script.file_system_candidates(path)
+    sources = {candidate[0] for candidate in candidates}
+    assert "fs:mtime" in sources
+    assert "fs:path" not in sources
