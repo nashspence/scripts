@@ -235,16 +235,177 @@ def _short_hash(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:8]
 
 
-def copy_assets(assets: List[str], out_dir: str) -> None:
+def copy_assets(assets: List[str], out_dir: str) -> list[tuple[str, str]]:
+    copied: list[tuple[str, str]] = []
     for src in assets:
-        dest = os.path.join(out_dir, os.path.basename(src))
+        dest_name = os.path.basename(src)
+        dest = os.path.join(out_dir, dest_name)
         if os.path.abspath(src) == os.path.abspath(dest):
             continue
         try:
             shutil.copy2(src, dest)
             logging.info("copied asset: %s -> %s", src, dest)
+            copied.append((src, dest_name))
         except Exception as e:
             logging.error("failed to copy asset %s -> %s: %s", src, dest, e)
+    return copied
+
+
+def group_outputs_by_target_size(
+    output_dir: str,
+    manifest: dict[str, Any],
+    manifest_name: str,
+    target_bytes: int,
+    ordered_relpaths: Sequence[str],
+) -> None:
+    if target_bytes <= 0:
+        logging.warning("target bytes <= 0; skipping grouping into directories")
+        return
+
+    files: list[tuple[str, int]] = []
+    for root, _, filenames in os.walk(output_dir):
+        for name in filenames:
+            rel = os.path.relpath(os.path.join(root, name), output_dir)
+            norm_rel = os.path.normpath(rel)
+            if os.path.normpath(manifest_name) == norm_rel:
+                continue
+            if name.endswith(".part"):
+                continue
+            path = os.path.join(output_dir, rel)
+            try:
+                size = os.path.getsize(path)
+            except FileNotFoundError:
+                continue
+            files.append((rel, size))
+
+    if not files:
+        return
+
+    order_map: dict[str, int] = {}
+    for idx, rel in enumerate(ordered_relpaths):
+        norm = os.path.normpath(rel)
+        if norm not in order_map:
+            order_map[norm] = idx
+
+    def sort_key(item: tuple[str, int]) -> tuple[int, int | str, str]:
+        rel, _size = item
+        norm_rel = os.path.normpath(rel)
+        if norm_rel in order_map:
+            return (0, order_map[norm_rel], norm_rel)
+        return (1, norm_rel.lower(), norm_rel)
+
+    files.sort(key=sort_key)
+
+    filtered_files: list[tuple[str, int]] = []
+    seen_names: set[str] = set()
+    for rel, size in files:
+        base = pathlib.Path(rel).name
+        if base in seen_names:
+            try:
+                os.remove(os.path.join(output_dir, rel))
+            except OSError:
+                pass
+            continue
+        seen_names.add(base)
+        filtered_files.append((rel, size))
+
+    files = filtered_files
+
+    groups: list[list[tuple[str, int]]] = []
+    current: list[tuple[str, int]] = []
+    current_size = 0
+    for rel, size in files:
+        if current and current_size + size > target_bytes:
+            groups.append(current)
+            current = []
+            current_size = 0
+        current.append((rel, size))
+        current_size += size
+    if current:
+        groups.append(current)
+
+    tmp_base = os.path.join(output_dir, ".vcrunch_grouping")
+    if os.path.exists(tmp_base):
+        shutil.rmtree(tmp_base)
+    os.makedirs(tmp_base, exist_ok=True)
+
+    dest_rel_map: dict[str, str] = {}
+    used_names: set[str] = set()
+
+    def unique_name(name: str) -> str:
+        if name not in used_names:
+            used_names.add(name)
+            return name
+        stem, ext = os.path.splitext(name)
+        idx = 1
+        while True:
+            candidate = f"{stem}_{idx}{ext}"
+            if candidate not in used_names:
+                used_names.add(candidate)
+                return candidate
+            idx += 1
+
+    for idx, group in enumerate(groups, start=1):
+        subdir_name = f"{idx:02d}"
+        subdir_tmp = os.path.join(tmp_base, subdir_name)
+        os.makedirs(subdir_tmp, exist_ok=True)
+        for rel, _ in group:
+            src = os.path.join(output_dir, rel)
+            if not os.path.exists(src):
+                continue
+            dest_name = unique_name(os.path.basename(rel))
+            dest_rel = os.path.normpath(os.path.join(subdir_name, dest_name))
+            dest_path = os.path.join(subdir_tmp, dest_name)
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
+            shutil.move(src, dest_path)
+            dest_rel_map[os.path.normpath(rel)] = dest_rel
+
+    for root_dir, dirs, _ in os.walk(output_dir, topdown=False):
+        if os.path.normpath(root_dir) == os.path.normpath(tmp_base):
+            continue
+        if os.path.normpath(root_dir) == os.path.normpath(output_dir):
+            continue
+        for d in dirs:
+            d_path = os.path.join(root_dir, d)
+            if os.path.normpath(d_path) == os.path.normpath(tmp_base):
+                continue
+            try:
+                os.rmdir(d_path)
+            except OSError:
+                pass
+
+    for idx, _ in enumerate(groups, start=1):
+        subdir_name = f"{idx:02d}"
+        src_dir = os.path.join(tmp_base, subdir_name)
+        dest_dir = os.path.join(output_dir, subdir_name)
+        if os.path.exists(dest_dir):
+            shutil.rmtree(dest_dir)
+        if os.path.exists(src_dir):
+            shutil.move(src_dir, dest_dir)
+
+    shutil.rmtree(tmp_base, ignore_errors=True)
+
+    manifest_items = manifest.get("items", {})
+    output_map: dict[str, dict[str, Any]] = {}
+    for rec in manifest_items.values():
+        if rec.get("type") != "video":
+            continue
+        output_rel = rec.get("output")
+        if not output_rel:
+            continue
+        output_map[os.path.normpath(output_rel)] = rec
+
+    for original_rel, new_rel in dest_rel_map.items():
+        rec = output_map.get(original_rel)
+        if rec is not None:
+            rec["output"] = new_rel
+
+    logging.info(
+        "grouped outputs into %d director%s",
+        len(groups),
+        "y" if len(groups) == 1 else "ies",
+    )
 
 
 def main() -> None:
@@ -269,6 +430,12 @@ def main() -> None:
         "--target-size",
         default=None,
         help="Total target size (e.g., 23.30G, 7.95G, 650M).",
+    )
+    ap.add_argument(
+        "--constant-quality",
+        type=int,
+        default=None,
+        help="Use SVT-AV1 constant quality (CRF) instead of computing a target bitrate.",
     )
     ap.add_argument(
         "--audio-bitrate", default="128k", help="Per-title audio bitrate (e.g., 128k)."
@@ -323,6 +490,10 @@ def main() -> None:
     logging.basicConfig(
         level=level, stream=sys.stderr, format="%(levelname)s: %(message)s"
     )
+
+    if args.constant_quality is not None and args.constant_quality < 0:
+        logging.error("--constant-quality must be non-negative")
+        sys.exit(2)
 
     canon_media = _normalize_media(args.media)
     if args.media and not canon_media:
@@ -429,58 +600,70 @@ def main() -> None:
         total_duration += d
         total_audio_bytes += int((audio_bps / 8.0) * d)
 
-    reserved = int(target_bytes * safety_overhead) + 20_000_000
-    video_budget_bytes = target_bytes - asset_bytes - total_audio_bytes - reserved
-    if video_budget_bytes <= 0 and videos:
-        logging.error("assets + audio + overhead exceed target size; no room for video")
-        sys.exit(1)
-
-    avg_video_bps = 0
-    if videos:
-        if total_duration <= 0:
-            logging.error("total video duration is zero; cannot compute bitrate")
+    use_constant_quality = args.constant_quality is not None
+    global_video_kbps = 0
+    if use_constant_quality:
+        logging.info("using constant quality: CRF=%s", args.constant_quality)
+        if videos and total_duration <= 0:
+            logging.error("total video duration is zero; cannot proceed")
             sys.exit(1)
-        avg_video_bps = int((video_budget_bytes * 8) / total_duration)
-        if avg_video_bps < 50_000:
-            logging.error("computed video bitrate unrealistically low")
-            sys.exit(1)
-
-    computed_kbps = max(1, int(avg_video_bps / 1000)) if avg_video_bps else 1
-    if computed_kbps > MAX_SVT_KBPS:
-        logging.warning(
-            "computed average video bitrate %s kbps exceeds SVT-AV1 max %s kbps; clamping; final size will undershoot",
-            computed_kbps,
-            MAX_SVT_KBPS,
-        )
-        global_video_kbps = MAX_SVT_KBPS
     else:
-        global_video_kbps = computed_kbps
+        reserved = int(target_bytes * safety_overhead) + 20_000_000
+        video_budget_bytes = target_bytes - asset_bytes - total_audio_bytes - reserved
+        if video_budget_bytes <= 0 and videos:
+            logging.error(
+                "assets + audio + overhead exceed target size; no room for video"
+            )
+            sys.exit(1)
+
+        avg_video_bps = 0
+        if videos:
+            if total_duration <= 0:
+                logging.error("total video duration is zero; cannot compute bitrate")
+                sys.exit(1)
+            avg_video_bps = int((video_budget_bytes * 8) / total_duration)
+            if avg_video_bps < 50_000:
+                logging.error("computed video bitrate unrealistically low")
+                sys.exit(1)
+
+        computed_kbps = max(1, int(avg_video_bps / 1000)) if avg_video_bps else 1
+        if computed_kbps > MAX_SVT_KBPS:
+            logging.warning(
+                "computed average video bitrate %s kbps exceeds SVT-AV1 max %s kbps; clamping; final size will undershoot",
+                computed_kbps,
+                MAX_SVT_KBPS,
+            )
+            global_video_kbps = MAX_SVT_KBPS
+        else:
+            global_video_kbps = computed_kbps
 
     logging.info("target bytes: %s", f"{target_bytes:,}")
     logging.info("asset bytes: %s", f"{asset_bytes:,}")
     logging.info(
         "video duration hours: %.2f; audio bytes: %s",
-        total_duration / 3600,
+        total_duration / 3600 if videos else 0.0,
         f"{total_audio_bytes:,}",
     )
     if videos:
-        logging.info(
-            "video budget bytes: %s; avg video bitrate: %s kbps (using %s kbps)",
-            f"{max(0, video_budget_bytes):,}",
-            f"{computed_kbps:,}",
-            f"{global_video_kbps:,}",
-        )
+        if use_constant_quality:
+            logging.info("constant quality mode: files will be grouped by target size")
+        else:
+            logging.info(
+                "video budget bytes: %s; avg video bitrate: %s kbps (using %s kbps)",
+                f"{max(0, video_budget_bytes):,}",
+                f"{computed_kbps:,}",
+                f"{global_video_kbps:,}",
+            )
     else:
         logging.info("no videos to encode")
 
+    output_by_input: dict[str, str] = {}
     encoded_count = 0
-    for src, dur in zip(videos, durations):
+    for src, _dur in zip(videos, durations):
         st = os.stat(src)
         stem = sanitize_base(pathlib.Path(src).stem)
         ext = pathlib.Path(src).suffix
         out_name = f"{stem}{args.name_suffix}{OUT_EXT}"
-        final_path = os.path.join(args.output_dir, out_name)
-        part_path = final_path + ".part"
         h = _short_hash(os.path.abspath(src))
         stage_src = os.path.join(args.stage_dir, f"{stem}.{h}{ext}")
         stage_part = os.path.join(args.stage_dir, out_name + ".part")
@@ -488,6 +671,15 @@ def main() -> None:
         rec = manifest["items"].get(
             key, {"type": "video", "src": src, "output": out_name, "status": "pending"}
         )
+
+        output_rel = rec.get("output") or out_name
+        rec["output"] = output_rel
+        output_by_input[os.path.abspath(src)] = os.path.normpath(output_rel)
+        final_path = os.path.join(args.output_dir, output_rel)
+        final_dir = os.path.dirname(final_path)
+        if final_dir and not os.path.exists(final_dir):
+            os.makedirs(final_dir, exist_ok=True)
+        part_path = final_path + ".part"
 
         for stale in (part_path, stage_part):
             if os.path.exists(stale):
@@ -523,7 +715,6 @@ def main() -> None:
             logging.error("failed to stage source %s -> %s: %s", src, stage_src, e)
             continue
 
-        video_kbps = global_video_kbps
         audio_kbps = max(1, int(audio_bps / 1000))
         ff = [
             "ffmpeg",
@@ -557,8 +748,12 @@ def main() -> None:
             "passthrough",
             "-c:v",
             "libsvtav1",
-            "-b:v",
-            f"{video_kbps}k",
+        ]
+        if use_constant_quality:
+            ff += ["-crf", str(args.constant_quality), "-b:v", "0"]
+        else:
+            ff += ["-b:v", f"{global_video_kbps}k"]
+        ff += [
             "-g",
             "240",
             "-preset",
@@ -584,7 +779,7 @@ def main() -> None:
             {
                 "status": "encoding_started",
                 "started_at": now_utc_iso(),
-                "output": out_name,
+                "output": output_rel,
             }
         )
         manifest["items"][key] = rec
@@ -628,7 +823,25 @@ def main() -> None:
                 except FileNotFoundError:
                     pass
 
-    copy_assets(assets, args.output_dir)
+    copied_assets = copy_assets(assets, args.output_dir)
+    for asset_src, dest_name in copied_assets:
+        output_by_input[os.path.abspath(asset_src)] = os.path.normpath(dest_name)
+
+    ordered_outputs: list[str] = []
+    for src in all_files:
+        dest_rel = output_by_input.get(os.path.abspath(src))
+        if dest_rel:
+            ordered_outputs.append(dest_rel)
+
+    if use_constant_quality:
+        group_outputs_by_target_size(
+            args.output_dir,
+            manifest,
+            args.manifest_name,
+            target_bytes,
+            ordered_outputs,
+        )
+        save_manifest(manifest, manifest_path)
     logging.warning("videos encoded (this run): %d / %d", encoded_count, len(videos))
     if all_videos_done(manifest, args.output_dir):
         logging.warning("all videos complete; manifest retained at %s", manifest_path)

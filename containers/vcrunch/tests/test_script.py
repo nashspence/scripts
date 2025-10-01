@@ -4,6 +4,7 @@
 
 import io
 import json
+import os
 import sys
 import types
 from datetime import datetime
@@ -236,3 +237,105 @@ def test_move_if_fits(monkeypatch, tmp_path):
     script.main()
     assert not video.exists()
     assert (out_dir / "a.mp4").exists()
+
+
+def test_group_outputs_by_target_size(tmp_path):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    files = {
+        "a.mkv": 400_000,
+        "b.mkv": 400_000,
+        "c.txt": 300_000,
+    }
+    for name, size in files.items():
+        path = out_dir / name
+        path.write_bytes(b"x" * size)
+    manifest = {
+        "items": {
+            "1": {"type": "video", "output": "a.mkv"},
+            "2": {"type": "video", "output": "b.mkv"},
+        }
+    }
+    script.group_outputs_by_target_size(
+        str(out_dir),
+        manifest,
+        ".job.json",
+        700_000,
+        ["a.mkv", "b.mkv", "c.txt"],
+    )
+    dir1 = out_dir / "01"
+    dir2 = out_dir / "02"
+    assert dir1.is_dir()
+    assert dir2.is_dir()
+    assert sorted(p.name for p in dir1.iterdir()) == ["a.mkv"]
+    assert sorted(p.name for p in dir2.iterdir()) == ["b.mkv", "c.txt"]
+    assert os.path.normpath(manifest["items"]["1"]["output"]) == os.path.join(
+        "01", "a.mkv"
+    )
+    assert os.path.normpath(manifest["items"]["2"]["output"]) == os.path.join(
+        "02", "b.mkv"
+    )
+
+
+def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    video = src_dir / "a.mp4"
+    video.write_bytes(b"v" * (2 * 1024 * 1024))
+    asset = src_dir / "notes.txt"
+    asset.write_text("notes")
+    out_dir = tmp_path / "out"
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+
+    argv = [
+        "script.py",
+        "--input",
+        str(src_dir),
+        "--target-size",
+        "1M",
+        "--output-dir",
+        str(out_dir),
+        "--stage-dir",
+        str(stage_dir),
+        "--constant-quality",
+        "32",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
+
+    captured_cmds = []
+
+    def fake_run(cmd, env=None):
+        captured_cmds.append(cmd)
+        stage_part = Path(cmd[-1])
+        stage_part.write_bytes(b"encoded")
+
+        class R:
+            returncode = 0
+
+        return R()
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+    monkeypatch.setattr(script, "is_valid_media", lambda path: True)
+
+    script.main()
+
+    dirs = sorted(p.name for p in out_dir.iterdir() if p.is_dir())
+    assert dirs == ["01"]
+    bundle = out_dir / "01"
+    video_out = bundle / "a_vcrunch_av1.mkv"
+    asset_out = bundle / "notes.txt"
+    assert video_out.exists()
+    assert asset_out.exists()
+
+    manifest_data = json.loads((out_dir / ".job.json").read_text())
+    rec = next(iter(manifest_data["items"].values()))
+    assert rec["output"].startswith("01" + os.sep)
+    cmd = captured_cmds[0]
+    assert "-crf" in cmd
+    idx = cmd.index("-crf")
+    assert cmd[idx + 1] == "32"
+    assert cmd[idx + 2] == "-b:v"
+    assert cmd[idx + 3] == "0"
