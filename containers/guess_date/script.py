@@ -22,6 +22,443 @@ from typing import Any, Iterable, Sequence, TextIO
 
 from dateutil import parser as dateparser
 
+RIGID_FILEPATH_DATETIME_REGEX_PATTERN = r"""(?x)
+    (?P<year>\d{4})
+    (?:
+        [ _:-]*
+        (?P<month>0[1-9]|1[0-2])
+        (?:
+            [ _:-]*
+            (?P<day>0[1-9]|[12]\d|3[01])
+            (?:
+                (?:[ _:-]*|T)
+                (?P<hour>0[0-9]|1[0-9]|2[0-3])
+                (?:
+                    [ _:]*
+                    (?P<minute>[0-5]\d)
+                    (?:
+                        [ _:]*
+                        (?P<second>[0-5]\d)
+                        (?:
+                            [ ._:]*
+                            (?P<microsecond>\d+)
+                        )?
+                    )?
+                )?
+                (?:
+                    [ _]*
+                    (?P<offset>Z|[+-](?:0[0-9]|1[0-9]|2[0-3])[_:]?[0-5]\d)?
+                )?
+            )?
+        )?
+    )?
+    (?P<type>(?:!|&)~)?
+"""
+
+RELAXED_FILEPATH_DATETIME_REGEX_PATTERN = r"""(?ix)  # Verbose and case-insensitive mode
+
+# ----------------------- Date and Time Patterns -----------------------
+
+(?:
+    # Dates that allow time
+    (?:
+        # ISO 8601 Date: YYYY-MM-DD or YYYYMMDD
+        (?P<date_iso>
+            (?P<year_iso>\d{4})
+            (?P<sep_date>[-_./: ]?)  # Optional separator
+            (?P<month_iso>0[1-9]|1[0-2])
+            (?P=sep_date)
+            (?P<day_iso>0[1-9]|[12]\d|3[01])
+        )
+        |
+        # US Date Format: MM-DD-YYYY or MMDDYYYY
+        (?P<date_us>
+            (?P<month_us>0[1-9]|1[0-2])
+            (?P=sep_date)
+            (?P<day_us>0[1-9]|[12]\d|3[01])
+            (?P=sep_date)
+            (?P<year_us>\d{4})
+        )
+        |
+        # Month Name Format: Month DD, YYYY
+        (?P<date_month_name>
+            \b(?P<monthname>
+                Jan(?:uary)?|
+                Feb(?:ruary)?|
+                Mar(?:ch)?|
+                Apr(?:il)?|
+                May|
+                Jun(?:e)?|
+                Jul(?:y)?|
+                Aug(?:ust)?|
+                Sep(?:t(?:ember)?)?|
+                Oct(?:ober)?|
+                Nov(?:ember)?|
+                Dec(?:ember)?
+            )\b
+            \.?\s+
+            (?P<dayname>\d{1,2}),?\s+
+            (?P<yearname>\d{4})
+        )
+        |
+        # New Pattern: DD-Mon-YYYY
+        (?P<date_dmy>
+            (?P<day_dmy>0[1-9]|[12]\d|3[01])
+            (?P<sep_dmy>[-_./: ])
+            (?P<month_dmy>
+                Jan(?:uary)?|
+                Feb(?:ruary)?|
+                Mar(?:ch)?|
+                Apr(?:il)?|
+                May|
+                Jun(?:e)?|
+                Jul(?:y)?|
+                Aug(?:ust)?|
+                Sep(?:t(?:ember)?)?|
+                Oct(?:ober)?|
+                Nov(?:ember)?|
+                Dec(?:ember)?
+            )
+            (?P=sep_dmy)
+            (?P<year_dmy>\d{4})
+        )
+        |
+        # New Pattern: YYYY/MonthName/DD
+        (?P<date_ymd>
+            (?P<year_ymd>\d{4})
+            (?P<sep_ymd>[-_./: ])
+            (?P<month_ymd>
+                Jan(?:uary)?|
+                Feb(?:ruary)?|
+                Mar(?:ch)?|
+                Apr(?:il)?|
+                May|
+                Jun(?:e)?|
+                Jul(?:y)?|
+                Aug(?:ust)?|
+                Sep(?:t(?:ember)?)?|
+                Oct(?:ober)?|
+                Nov(?:ember)?|
+                Dec(?:ember)?
+            )
+            (?P=sep_ymd)
+            (?P<day_ymd>0[1-9]|[12]\d|3[01])
+        )
+        |
+        # New Pattern: DD-MM-YYYY (numeric)
+        (?P<date_dmy_numeric>
+            (?P<day_dmy_n>0[1-9]|[12]\d|3[01])
+            (?P<sep_dmy_n>[-_./: ]?)
+            (?P<month_dmy_n>0[1-9]|1[0-2])
+            (?P=sep_dmy_n)
+            (?P<year_dmy_n>\d{4})
+        )
+        |
+        # New Pattern: YYYY-DD-MM (numeric)
+        (?P<date_ydm_numeric>
+            (?P<year_ydm_n>\d{4})
+            (?P<sep_ydm_n>[-_./: ]?)
+            (?P<day_ydm_n>0[1-9]|[12]\d|3[01])
+            (?P=sep_ydm_n)
+            (?P<month_ydm_n>0[1-9]|1[0-2])
+        )
+        |
+        # New Pattern: MM-DD-YYYY (numeric)
+        (?P<date_mdy_numeric>
+            (?P<month_mdy_n>0[1-9]|1[0-2])
+            (?P<sep_mdy_n>[-_./: ]?)
+            (?P<day_mdy_n>0[1-9]|[12]\d|3[01])
+            (?P=sep_mdy_n)
+            (?P<year_mdy_n>\d{4})
+        )
+    )
+    # Optional Time Patterns
+    (?:
+        [T ./_:-]*?
+        (?:
+            (?P<time12>
+                # 12-hour format with AM/PM (AM/PM is now mandatory)
+                (?P<hour12>0?[1-9]|1[0-2])
+                (?P<sep_time2>[-_./: ]?)(?P<minute12>[0-5]\d)
+                (?:
+                    (?P=sep_time2)(?P<second12>[0-5]\d)
+                    (?:[.,]?(?P<millisecond12>\d+))?
+                )?
+                [-_./ ]*(?P<ampm>[AP][M])  # AM/PM is required
+                (?P<timezone12>
+                    Z|
+                    [+-](?:[01]\d|2[0-3])[ _:]?(?::?[0-5]\d)?
+                )?
+            )
+            |
+            (?P<time24>
+                # 24-hour format (won't match if AM/PM is present)
+                (?P<hour24>0\d|1\d|2[0-3])
+                (?P<sep_time1>[-_./: ]?)(?P<minute24>[0-5]\d)
+                (?:
+                    (?P=sep_time1)(?P<second24>[0-5]\d)
+                    (?:[.,]?(?P<millisecond24>\d+))?
+                )?
+                (?P<timezone24>
+                    Z|
+                    [+-](?:[01]\d|2[0-3])[ _:]?(?::?[0-5]\d)?
+                )?
+                (?!\s*[AP][M])  # Negative lookahead to ensure AM/PM is not present
+            )
+        )
+    )?
+    |
+    # Dates that do NOT allow time
+    (?:
+        # Year-Month Numeric or Month Name
+        (?P<year_month>
+            (?P<year_ym>(?:19\d{2}|20\d{2}))
+            (?P<sep_ym>[-_./: ])
+            (?P<month_ym>
+                0[1-9]|1[0-2]|
+                Jan(?:uary)?|
+                Feb(?:ruary)?|
+                Mar(?:ch)?|
+                Apr(?:il)?|
+                May|
+                Jun(?:e)?|
+                Jul(?:y)?|
+                Aug(?:ust)?|
+                Sep(?:t(?:ember)?)?|
+                Oct(?:ober)?|
+                Nov(?:ember)?|
+                Dec(?:ember)?
+            )
+        )
+        |
+        # Month Name and Year
+        (?P<month_year>
+            \b(?P<month_my>
+                Jan(?:uary)?|
+                Feb(?:ruary)?|
+                Mar(?:ch)?|
+                Apr(?:il)?|
+                May|
+                Jun(?:e)?|
+                Jul(?:y)?|
+                Aug(?:ust)?|
+                Sep(?:t(?:ember)?)?|
+                Oct(?:ober)?|
+                Nov(?:ember)?|
+                Dec(?:ember)?
+            )\b
+            \.?\s*
+            (?P<year_my>(?:19\d{2}|20\d{2}))
+        )
+        |
+        # Year Only
+        (?P<year_only>
+            \b(?P<year_only_value>(?:19\d{2}|20\d{2}))\b
+        )
+    )
+)
+"""
+
+_MONTH_NAME_MAP = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+
+_RIGID_FILEPATH_REGEX = re.compile(RIGID_FILEPATH_DATETIME_REGEX_PATTERN)
+_RELAXED_FILEPATH_REGEX = re.compile(RELAXED_FILEPATH_DATETIME_REGEX_PATTERN)
+
+
+def _parse_month_token(value: str) -> int:
+    token = re.sub(r"[.,]", "", value.strip())
+    if not token:
+        raise ValueError("empty month token")
+    if token.isdigit():
+        month = int(token)
+    else:
+        key = token.lower()[:3]
+        if key not in _MONTH_NAME_MAP:
+            raise ValueError(f"unknown month token: {value!r}")
+        month = _MONTH_NAME_MAP[key]
+    if not 1 <= month <= 12:
+        raise ValueError(f"month out of range: {month}")
+    return month
+
+
+def _microseconds_from_fragment(value: str | None) -> tuple[int, bool]:
+    if not value:
+        return 0, False
+    digits = value.strip()
+    if not digits:
+        return 0, False
+    padded = digits[:6].ljust(6, "0")
+    return int(padded), True
+
+
+def _parse_timezone_fragment(value: str | None) -> timezone | None:
+    if not value:
+        return None
+    if value == "Z":
+        return timezone.utc
+    sign = 1 if value.startswith("+") else -1
+    digits = re.sub(r"[^0-9]", "", value[1:])
+    if not digits:
+        return None
+    hours = int(digits[:2]) if len(digits) >= 2 else int(digits)
+    minutes = int(digits[2:4]) if len(digits) >= 4 else 0
+    delta = timedelta(hours=hours, minutes=minutes)
+    return timezone(delta if sign > 0 else -delta)
+
+
+def _extract_rigid_path_datetime(path: str) -> tuple[datetime, bool, bool] | None:
+    match = _RIGID_FILEPATH_REGEX.search(path)
+    if not match:
+        return None
+
+    year = int(match.group("year"))
+    month = int(match.group("month")) if match.group("month") else 1
+    day = int(match.group("day")) if match.group("day") else 1
+    hour = int(match.group("hour")) if match.group("hour") else 0
+    minute = int(match.group("minute")) if match.group("minute") else 0
+    second = int(match.group("second")) if match.group("second") else 0
+    microsecond, has_fraction = _microseconds_from_fragment(match.group("microsecond"))
+    tzinfo = _parse_timezone_fragment(match.group("offset"))
+
+    try:
+        dt = datetime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            microsecond,
+            tzinfo=tzinfo,
+        )
+    except ValueError:
+        return None
+    return dt, tzinfo is not None, has_fraction
+
+
+def _extract_relaxed_path_datetime(path: str) -> tuple[datetime, bool, bool] | None:
+    match = _RELAXED_FILEPATH_REGEX.search(path)
+    if not match:
+        return None
+
+    year: int
+    month: int
+    day: int
+
+    if match.group("date_iso"):
+        year = int(match.group("year_iso"))
+        month = int(match.group("month_iso"))
+        day = int(match.group("day_iso"))
+    elif match.group("date_us"):
+        month = int(match.group("month_us"))
+        day = int(match.group("day_us"))
+        year = int(match.group("year_us"))
+    elif match.group("date_month_name"):
+        month = _parse_month_token(match.group("monthname"))
+        day = int(match.group("dayname"))
+        year = int(match.group("yearname"))
+    elif match.group("date_dmy"):
+        day = int(match.group("day_dmy"))
+        month = _parse_month_token(match.group("month_dmy"))
+        year = int(match.group("year_dmy"))
+    elif match.group("date_ymd"):
+        year = int(match.group("year_ymd"))
+        month = _parse_month_token(match.group("month_ymd"))
+        day = int(match.group("day_ymd"))
+    elif match.group("date_dmy_numeric"):
+        day = int(match.group("day_dmy_n"))
+        month = int(match.group("month_dmy_n"))
+        year = int(match.group("year_dmy_n"))
+    elif match.group("date_ydm_numeric"):
+        year = int(match.group("year_ydm_n"))
+        day = int(match.group("day_ydm_n"))
+        month = int(match.group("month_ydm_n"))
+    elif match.group("date_mdy_numeric"):
+        month = int(match.group("month_mdy_n"))
+        day = int(match.group("day_mdy_n"))
+        year = int(match.group("year_mdy_n"))
+    elif match.group("year_month"):
+        year = int(match.group("year_ym"))
+        month = _parse_month_token(match.group("month_ym"))
+        day = 1
+    elif match.group("month_year"):
+        month = _parse_month_token(match.group("month_my"))
+        year = int(match.group("year_my"))
+        day = 1
+    elif match.group("year_only"):
+        year = int(match.group("year_only_value"))
+        month = 1
+        day = 1
+    else:
+        return None
+
+    hour = 0
+    minute = 0
+    second = 0
+    microsecond = 0
+    has_fraction = False
+    tzinfo: timezone | None = None
+
+    if match.group("time12"):
+        hour = int(match.group("hour12"))
+        minute = int(match.group("minute12"))
+        if match.group("second12"):
+            second = int(match.group("second12"))
+        microsecond, has_fraction = _microseconds_from_fragment(
+            match.group("millisecond12")
+        )
+        ampm = match.group("ampm").upper()
+        if ampm == "AM" and hour == 12:
+            hour = 0
+        elif ampm == "PM" and hour != 12:
+            hour += 12
+        tzinfo = _parse_timezone_fragment(match.group("timezone12"))
+    elif match.group("time24"):
+        hour = int(match.group("hour24"))
+        minute = int(match.group("minute24"))
+        if match.group("second24"):
+            second = int(match.group("second24"))
+        microsecond, has_fraction = _microseconds_from_fragment(
+            match.group("millisecond24")
+        )
+        tzinfo = _parse_timezone_fragment(match.group("timezone24"))
+
+    try:
+        dt = datetime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            microsecond,
+            tzinfo=tzinfo,
+        )
+    except ValueError:
+        return None
+    return dt, tzinfo is not None, has_fraction
+
+
+def extract_datetime_from_path(path: str) -> tuple[datetime, bool, bool] | None:
+    rigid = _extract_rigid_path_datetime(path)
+    if rigid:
+        return rigid
+    return _extract_relaxed_path_datetime(path)
+
+
 Candidate = tuple[str, datetime, int, bool, bool]
 
 
@@ -530,8 +967,13 @@ def file_system_candidates(path: str) -> list[Candidate]:
         birth = datetime.fromtimestamp(birthtime)
         result.append(("fs:birthtime", birth, 85, False, False))
 
-    mtime = datetime.fromtimestamp(stat.st_mtime)
-    result.append(("fs:mtime", mtime, 60, False, False))
+    path_candidate = extract_datetime_from_path(os.fspath(path))
+    if path_candidate is not None:
+        dt, tz_present, has_fraction = path_candidate
+        result.append(("fs:path", dt, 62, tz_present, has_fraction))
+    else:
+        mtime = datetime.fromtimestamp(stat.st_mtime)
+        result.append(("fs:mtime", mtime, 60, False, False))
 
     ctime = datetime.fromtimestamp(stat.st_ctime)
     result.append(("fs:ctime", ctime, 55, False, False))

@@ -42,6 +42,7 @@ repos:
         additional_dependencies:
           - types-Pillow
           - types-python-dateutil
+          - pytest>=8
   - repo: local
     hooks:
       - id: gauge-format
