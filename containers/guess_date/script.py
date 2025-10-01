@@ -8,6 +8,7 @@ heuristic to pick the most trustworthy candidate.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import plistlib
@@ -1092,10 +1093,25 @@ def choose_and_output(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = sys.argv[1:] if argv is None else argv
-    if not args:
-        return 2
-    path = args[0]
+    raw_args = sys.argv[1:] if argv is None else argv
+
+    parser = argparse.ArgumentParser(
+        prog="guess_date",
+        description="Determine the most likely creation date for a media file.",
+    )
+    parser.add_argument(
+        "--fail-on-mtime-only",
+        action="store_true",
+        help="exit with status 1 when filesystem mtime is the only available timestamp",
+    )
+    parser.add_argument("path", help="path to the media file to inspect")
+
+    try:
+        options = parser.parse_args(raw_args)
+    except SystemExit as exc:  # pragma: no cover - argparse handles messaging
+        return int(exc.code or 2)
+
+    path = options.path
     if not os.path.exists(path):
         return 2
 
@@ -1105,6 +1121,14 @@ def main(argv: list[str] | None = None) -> int:
     candidates.extend(extract_from_mediainfo(path))
     candidates.extend(extract_sidecars(path))
     candidates.extend(file_system_candidates(path))
+
+    if options.fail_on_mtime_only:
+        has_mtime = any(source == "fs:mtime" for source, *_ in candidates)
+        has_non_filesystem_fallback = any(
+            source not in {"fs:mtime", "fs:ctime"} for source, *_ in candidates
+        )
+        if has_mtime and not has_non_filesystem_fallback:
+            return 1
 
     aggregated = cluster_and_score(candidates)
     return choose_and_output(aggregated)
