@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -408,3 +409,64 @@ def test_file_system_candidates_falls_back_to_mtime(monkeypatch: Any) -> None:
     sources = {candidate[0] for candidate in candidates}
     assert "fs:mtime" in sources
     assert "fs:path" not in sources
+
+
+def test_main_fails_when_mtime_is_only_source(monkeypatch: Any, tmp_path: Path) -> None:
+    file_path = tmp_path / "example.mov"
+    file_path.write_bytes(b"data")
+
+    monkeypatch.setattr(
+        "containers.guess_date.script.extract_from_exiftool", lambda _: []
+    )
+    monkeypatch.setattr(
+        "containers.guess_date.script.extract_from_ffprobe", lambda _: []
+    )
+    monkeypatch.setattr(
+        "containers.guess_date.script.extract_from_mediainfo", lambda _: []
+    )
+    monkeypatch.setattr("containers.guess_date.script.extract_sidecars", lambda _: [])
+
+    dt = datetime(2024, 5, 6, 7, 8, 9)
+    monkeypatch.setattr(
+        "containers.guess_date.script.file_system_candidates",
+        lambda _: [
+            ("fs:mtime", dt, 60, False, False),
+            ("fs:ctime", dt, 55, False, False),
+        ],
+    )
+
+    rc = script.main(["--fail-on-mtime-only", os.fspath(file_path)])
+    assert rc == 1
+
+
+def test_main_allows_other_sources_with_mtime(
+    monkeypatch: Any, tmp_path: Path, capsys: Any
+) -> None:
+    file_path = tmp_path / "example.mov"
+    file_path.write_bytes(b"data")
+
+    dt = datetime(2024, 5, 6, 7, 8, 9, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        "containers.guess_date.script.extract_from_exiftool",
+        lambda _: [("exif:DateTimeOriginal", dt, 98, True, False)],
+    )
+    monkeypatch.setattr(
+        "containers.guess_date.script.extract_from_ffprobe", lambda _: []
+    )
+    monkeypatch.setattr(
+        "containers.guess_date.script.extract_from_mediainfo", lambda _: []
+    )
+    monkeypatch.setattr("containers.guess_date.script.extract_sidecars", lambda _: [])
+
+    monkeypatch.setattr(
+        "containers.guess_date.script.file_system_candidates",
+        lambda _: [
+            ("fs:mtime", dt.replace(tzinfo=None), 60, False, False),
+            ("fs:ctime", dt.replace(tzinfo=None), 55, False, False),
+        ],
+    )
+
+    rc = script.main(["--fail-on-mtime-only", os.fspath(file_path)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out == dt.isoformat()
