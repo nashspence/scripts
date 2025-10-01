@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import math
-import os
+import io
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -55,6 +54,13 @@ def test_parse_datetime_value_supports_exif_format() -> None:
     assert not frac
 
 
+def test_parse_datetime_value_supports_zulu_isoformat() -> None:
+    dt, tz_present, frac = script.parse_datetime_value("2024-01-02T03:04:05Z")
+    assert dt == datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    assert tz_present
+    assert not frac
+
+
 def test_cluster_and_score_groups_close_timestamps() -> None:
     base = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
     candidates = [
@@ -70,64 +76,28 @@ def test_cluster_and_score_groups_close_timestamps() -> None:
     assert top.tz
 
 
-def test_process_directory_copies_with_timestamp(tmp_path: Path) -> None:
-    input_dir = tmp_path / "input"
-    output_dir = tmp_path / "output"
-    photos = input_dir / "photos"
-    photos.mkdir(parents=True)
-    file_path = photos / "image.jpg"
-    file_path.write_bytes(b"data")
-    ts = datetime(2024, 1, 2, 3, 4, 5).timestamp()
-    os.utime(file_path, (ts, ts))
-
-    script.process_directory(input_dir, output_dir)
-
-    files = sorted(output_dir.iterdir())
-    assert len(files) == 1
-    renamed = files[0]
-    assert renamed.name == "2024-01-02T03-04-05 photos__image.jpg"
-    assert renamed.read_bytes() == b"data"
-    assert math.isclose(renamed.stat().st_mtime, ts, abs_tol=1)
-
-
-def test_process_directory_places_unknown_when_no_timestamp(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
-    input_dir = tmp_path / "input"
-    output_dir = tmp_path / "output"
-    input_dir.mkdir()
-    file_path = input_dir / "clip.mov"
-    file_path.write_bytes(b"x")
-
-    monkeypatch.setattr(script, "extract_from_exiftool", lambda path: [])
-    monkeypatch.setattr(script, "extract_from_ffprobe", lambda path: [])
-    monkeypatch.setattr(script, "extract_from_mediainfo", lambda path: [])
-    monkeypatch.setattr(script, "extract_sidecars", lambda path: [])
-    monkeypatch.setattr(script, "file_system_candidates", lambda path: [])
-
-    script.process_directory(input_dir, output_dir)
-
-    unknown_dir = output_dir / "unknown"
-    files = sorted(unknown_dir.iterdir())
-    assert [item.name for item in files] == ["clip.mov"]
-
-
-def test_process_directory_copies_sidecars(tmp_path: Path) -> None:
-    input_dir = tmp_path / "input"
-    output_dir = tmp_path / "output"
-    photos = input_dir / "photos"
-    photos.mkdir(parents=True)
-    main = photos / "image.jpg"
-    sidecar = photos / "image.xmp"
-    main.write_bytes(b"main")
-    sidecar.write_bytes(b"sidecar")
-    ts = datetime(2022, 7, 8, 9, 10, 11).timestamp()
-    os.utime(main, (ts, ts))
-
-    script.process_directory(input_dir, output_dir)
-
-    files = sorted(item.name for item in output_dir.iterdir())
-    assert files == [
-        "2022-07-08T09-10-11 photos__image.jpg",
-        "2022-07-08T09-10-11 photos__image.xmp",
+def test_choose_and_output_prints_top_choice_when_not_tty(capsys: Any) -> None:
+    dt = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    rep1 = script.CandidateRecord("exif:DateTimeOriginal", dt, dt, True, 10.0)
+    rep2 = script.CandidateRecord(
+        "ffprobe:format",
+        dt + timedelta(seconds=90),
+        dt + timedelta(seconds=90),
+        True,
+        10.0,
+    )
+    aggregated = [
+        script.AggregatedGroup(rep1, [rep1], 10.0),
+        script.AggregatedGroup(rep2, [rep2], 10.0),
     ]
+
+    class NonTTY(io.StringIO):
+        def isatty(self) -> bool:  # pragma: no cover - simple shim
+            return False
+
+    dummy_stdin = NonTTY("")
+
+    rc = script.choose_and_output(aggregated, stdin=dummy_stdin)
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out == dt.isoformat()

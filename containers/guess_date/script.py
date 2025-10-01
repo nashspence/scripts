@@ -8,19 +8,17 @@ heuristic to pick the most trustworthy candidate.
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import plistlib
 import re
-import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Sequence, TextIO
 
 from dateutil import parser as dateparser
 
@@ -608,171 +606,66 @@ def format_output(representative: CandidateRecord) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-SAFE_FILENAME_RE = re.compile(r"[^0-9A-Za-z._()+@-]+")
-
-
-def sanitize_component(value: str) -> str:
-    """Return *value* normalized for safe filename usage."""
-
-    sanitized = value.replace(os.sep, "_").replace("\\", "_")
-    sanitized = sanitized.replace(":", "-")
-    sanitized = SAFE_FILENAME_RE.sub("_", sanitized)
-    sanitized = sanitized.strip(" ._-")
-    return sanitized or "_"
-
-
-def sanitize_relative_path(relative: Path) -> str:
-    """Normalize a relative path so it can be embedded in a filename."""
-
-    parts = [sanitize_component(part) for part in relative.parts]
-    return "__".join(parts)
-
-
-def sanitize_timestamp(value: str) -> str:
-    """Return a sanitized representation of a timestamp string."""
-
-    return sanitize_component(value)
-
-
-def ensure_unique_name(
-    directory: Path, file_name: str, used: dict[Path, set[str]]
-) -> Path:
-    """Ensure the resulting filename in *directory* is unique."""
-
-    candidates = used.setdefault(directory, set())
-    candidate = file_name
-    stem, suffix = os.path.splitext(file_name)
-    counter = 1
-    while candidate in candidates or (directory / candidate).exists():
-        candidate = f"{stem}__{counter}{suffix}"
-        counter += 1
-    candidates.add(candidate)
-    return directory / candidate
-
-
-def copy_preserving_metadata(source: Path, destination: Path) -> None:
-    """Copy *source* to *destination* preserving metadata where possible."""
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
-
-
-def gather_candidates_for(path: Path) -> list[Candidate]:
-    """Collect timestamp candidates for *path* using all extractors."""
-
-    target = str(path)
-    candidates: list[Candidate] = []
-    candidates.extend(extract_from_exiftool(target))
-    candidates.extend(extract_from_ffprobe(target))
-    candidates.extend(extract_from_mediainfo(target))
-    candidates.extend(extract_sidecars(target))
-    candidates.extend(file_system_candidates(target))
-    return candidates
-
-
-def choose_best_candidate(path: Path) -> CandidateRecord | None:
-    """Return the highest ranked timestamp candidate for *path*."""
-
-    aggregated = cluster_and_score(gather_candidates_for(path))
+def choose_and_output(
+    aggregated: Sequence[AggregatedGroup],
+    *,
+    stdin: TextIO | None = None,
+) -> int:
     if not aggregated:
-        return None
-    return aggregated[0].representative
+        return 1
 
+    input_stream = stdin or sys.stdin
+    top = aggregated[0]
+    if len(aggregated) == 1:
+        print(format_output(top.representative), end="")
+        return 0
 
-def rename_group(
-    main_file: Path,
-    sidecars: Sequence[Path],
-    input_dir: Path,
-    output_dir: Path,
-    used_names: dict[Path, set[str]],
-) -> None:
-    """Copy *main_file* and *sidecars* into *output_dir* with new names."""
+    if abs(aggregated[0].score - aggregated[1].score) > 3:
+        print(format_output(top.representative), end="")
+        return 0
 
-    best = choose_best_candidate(main_file)
-    if best is None:
-        unknown_dir = output_dir / "unknown"
-        relative_main = main_file.relative_to(input_dir)
-        target_main = sanitize_relative_path(relative_main)
-        copy_preserving_metadata(
-            main_file,
-            ensure_unique_name(unknown_dir, target_main, used_names),
-        )
-        for sidecar in sidecars:
-            relative_sidecar = sidecar.relative_to(input_dir)
-            target_sidecar = sanitize_relative_path(relative_sidecar)
-            copy_preserving_metadata(
-                sidecar,
-                ensure_unique_name(unknown_dir, target_sidecar, used_names),
-            )
-        return
+    if not input_stream.isatty():
+        print(format_output(top.representative), end="")
+        return 0
 
-    iso_component = sanitize_timestamp(format_output(best))
-    relative_main = main_file.relative_to(input_dir)
-    target_main = f"{iso_component} {sanitize_relative_path(relative_main)}"
-    copy_preserving_metadata(
-        main_file,
-        ensure_unique_name(output_dir, target_main, used_names),
-    )
+    options = [entry.representative for entry in aggregated[:3]]
+    for idx, option in enumerate(options, start=1):
+        dt = option.dt
+        pretty = dt.isoformat() if dt.tzinfo else dt.strftime("%Y-%m-%dT%H:%M:%S")
+        print(f"{idx}: {pretty} [{option.src}]", file=sys.stderr)
+    print(f"Select 1-{len(options)}: ", end="", file=sys.stderr, flush=True)
 
-    for sidecar in sidecars:
-        relative_sidecar = sidecar.relative_to(input_dir)
-        target_sidecar = f"{iso_component} {sanitize_relative_path(relative_sidecar)}"
-        copy_preserving_metadata(
-            sidecar,
-            ensure_unique_name(output_dir, target_sidecar, used_names),
-        )
+    try:
+        choice = input_stream.readline().strip()
+        selected = int(choice)
+    except ValueError:
+        print(format_output(top.representative), end="")
+        return 0
 
-
-def process_directory(input_dir: Path, output_dir: Path) -> None:
-    """Walk *input_dir* and copy renamed files into *output_dir*."""
-
-    if not input_dir.is_dir():
-        raise ValueError("input directory must exist and be a directory")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    used_names: dict[Path, set[str]] = {}
-    processed: set[Path] = set()
-    for path in sorted(p for p in input_dir.rglob("*") if p.is_file()):
-        if path in processed:
-            continue
-        sidecars = [
-            candidate for candidate in find_sidecars(path) if candidate.exists()
-        ]
-        processed.add(path)
-        processed.update(sidecars)
-        rename_group(path, sidecars, input_dir, output_dir, used_names)
+    if 1 <= selected <= len(options):
+        print(format_output(options[selected - 1]), end="")
+    else:
+        print(format_output(top.representative), end="")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Rename media files into a flat directory using guessed timestamps."
-        )
-    )
-    parser.add_argument("input_dir", help="directory containing files to rename")
-    parser.add_argument(
-        "output_dir",
-        help="directory where renamed files will be written",
-    )
-
-    parsed = parser.parse_args(argv)
-    input_dir = Path(parsed.input_dir)
-    output_dir = Path(parsed.output_dir)
-
-    if not input_dir.is_dir():
-        print(
-            "input directory must exist and be a directory",
-            file=sys.stderr,
-        )
+    args = sys.argv[1:] if argv is None else argv
+    if not args:
+        return 2
+    path = args[0]
+    if not os.path.exists(path):
         return 2
 
-    try:
-        process_directory(input_dir, output_dir)
-    except OSError as exc:
-        print(f"error copying files: {exc}", file=sys.stderr)
-        return 1
+    candidates: list[Candidate] = []
+    candidates.extend(extract_from_exiftool(path))
+    candidates.extend(extract_from_ffprobe(path))
+    candidates.extend(extract_from_mediainfo(path))
+    candidates.extend(extract_sidecars(path))
+    candidates.extend(file_system_candidates(path))
 
-    return 0
+    aggregated = cluster_and_score(candidates)
+    return choose_and_output(aggregated)
 
 
 if __name__ == "__main__":
