@@ -2,8 +2,8 @@
 set -eu
 umask 077
 
-service="com.nashspence.scripts.kc.${1:-}"
-: "${TMPDIR:=/tmp}"
+cmd="${1:?usage: $0 <add|get|delete> <name>}"
+service="com.nashspence.scripts.kc.${2:?usage: $0 <add|get|delete> <name>}"
 
 case "$cmd" in
   add)
