@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        exiftool \
+        ffmpeg \
+        mediainfo \
+        tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir python-dateutil
+
+WORKDIR /app
+COPY script.py /app/guess_date.py
+ENTRYPOINT ["python", "/app/guess_date.py"]

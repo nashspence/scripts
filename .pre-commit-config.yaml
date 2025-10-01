@@ -39,7 +39,9 @@ repos:
     hooks:
       - id: mypy
         args: [--namespace-packages, --strict]
-        additional_dependencies: [types-Pillow]
+        additional_dependencies:
+          - types-Pillow
+          - types-python-dateutil
   - repo: local
     hooks:
       - id: gauge-format
