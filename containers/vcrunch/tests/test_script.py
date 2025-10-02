@@ -70,6 +70,59 @@ def test_is_valid_media(monkeypatch):
     assert script.is_valid_media("file") is False
 
 
+def test_has_video_stream(monkeypatch):
+    expected = [
+        "ffprobe",
+        "-hide_banner",
+        "-v",
+        "error",
+        "-select_streams",
+        "v",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "json",
+        "-i",
+        "path",
+    ]
+
+    def fake_ffprobe_json(cmd):
+        assert cmd == expected
+        return {"streams": [{"codec_type": "video"}]}
+
+    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
+    assert script.has_video_stream("path") is True
+
+    monkeypatch.setattr(script, "ffprobe_json", lambda cmd: {"streams": []})
+    assert script.has_video_stream("path") is False
+
+    monkeypatch.setattr(
+        script,
+        "ffprobe_json",
+        lambda cmd: (_ for _ in ()).throw(Exception("ffprobe")),
+    )
+    assert script.has_video_stream("path") is False
+
+
+def test_is_video_file(monkeypatch):
+    calls: list[str] = []
+
+    def fake_has_video_stream(path: str) -> bool:
+        calls.append(path)
+        return path.endswith(".custom")
+
+    monkeypatch.setattr(script, "has_video_stream", fake_has_video_stream)
+
+    assert script.is_video_file("/tmp/video.mp4") is False
+    assert script.is_video_file("/tmp/video.custom") is True
+    assert script.is_video_file("/tmp/asset.bin") is False
+    assert calls == [
+        "/tmp/video.mp4",
+        "/tmp/video.custom",
+        "/tmp/asset.bin",
+    ]
+
+
 def test_run_success(monkeypatch, capsys):
     def fake_run(cmd):
         class R:
@@ -199,6 +252,7 @@ def test_copy_if_fits(monkeypatch, tmp_path):
         str(out_dir),
     ]
     monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(script, "has_video_stream", lambda path: path.endswith(".mp4"))
     monkeypatch.setattr(
         script,
         "ffprobe_duration",
@@ -302,6 +356,7 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
         "32",
     ]
     monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(script, "has_video_stream", lambda path: path.endswith(".mp4"))
 
     monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
 
