@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional, Sequence, TypedDict, cast
 
 OUT_EXT = ".mkv"
-DEFAULT_SUFFIX = "_vcrunch_av1"
+DEFAULT_SUFFIX = ""
 MANIFEST_NAME = ".job.json"
 MAX_SVT_KBPS = 100_000
 DEFAULT_TARGET_SIZE = "23.30G"
@@ -256,10 +256,13 @@ def _short_hash(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:8]
 
 
-def copy_assets(assets: List[str], out_dir: str) -> list[tuple[str, str]]:
+def copy_assets(
+    assets: List[str], out_dir: str, rename_map: Optional[dict[str, str]] = None
+) -> list[tuple[str, str]]:
     copied: list[tuple[str, str]] = []
+    rename_map = rename_map or {}
     for src in assets:
-        dest_name = os.path.basename(src)
+        dest_name = rename_map.get(src, os.path.basename(src))
         dest = os.path.join(out_dir, dest_name)
         if os.path.abspath(src) == os.path.abspath(dest):
             continue
@@ -681,12 +684,21 @@ def main() -> None:
         logging.info("no videos to encode")
 
     output_by_input: dict[str, str] = {}
+    video_metadata: list[dict[str, Any]] = []
     encoded_count = 0
     for src, _dur in zip(videos, durations):
         st = os.stat(src)
         stem = sanitize_base(pathlib.Path(src).stem)
         ext = pathlib.Path(src).suffix
         out_name = f"{stem}{args.name_suffix}{OUT_EXT}"
+        video_metadata.append(
+            {
+                "dir": os.path.abspath(os.path.dirname(src)),
+                "original": os.path.basename(src),
+                "desired": out_name,
+                "ext_changed": ext.lower() != OUT_EXT.lower(),
+            }
+        )
         h = _short_hash(os.path.abspath(src))
         stage_src = os.path.join(args.stage_dir, f"{stem}.{h}{ext}")
         stage_part = os.path.join(args.stage_dir, out_name + ".part")
@@ -846,7 +858,25 @@ def main() -> None:
                 except FileNotFoundError:
                     pass
 
-    copied_assets = copy_assets(assets, args.output_dir)
+    videos_by_dir: dict[str, list[dict[str, Any]]] = {}
+    for info in video_metadata:
+        videos_by_dir.setdefault(info["dir"], []).append(info)
+
+    asset_renames: dict[str, str] = {}
+    for asset in assets:
+        asset_dir = os.path.abspath(os.path.dirname(asset))
+        asset_base = os.path.basename(asset)
+        for info in videos_by_dir.get(asset_dir, []):
+            if not info["ext_changed"]:
+                continue
+            original_name = info["original"]
+            if original_name and original_name in asset_base:
+                new_base = asset_base.replace(original_name, info["desired"], 1)
+                if new_base != asset_base:
+                    asset_renames[asset] = new_base
+                break
+
+    copied_assets = copy_assets(assets, args.output_dir, asset_renames)
     for asset_src, dest_name in copied_assets:
         output_by_input[os.path.abspath(asset_src)] = os.path.normpath(dest_name)
 

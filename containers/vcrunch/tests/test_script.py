@@ -380,7 +380,7 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     dirs = sorted(p.name for p in out_dir.iterdir() if p.is_dir())
     assert dirs == ["01"]
     bundle = out_dir / "01"
-    video_out = bundle / "a_vcrunch_av1.mkv"
+    video_out = bundle / "a.mkv"
     asset_out = bundle / "notes.txt"
     assert video_out.exists()
     assert asset_out.exists()
@@ -394,3 +394,62 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     assert cmd[idx + 1] == "32"
     assert cmd[idx + 2] == "-b:v"
     assert cmd[idx + 3] == "0"
+
+
+def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    video = src_dir / "a.mp4"
+    video.write_bytes(b"v" * (2 * 1024 * 1024))
+    sidecar1 = src_dir / "a.mp4.srt"
+    sidecar1.write_text("subs")
+    sidecar2 = src_dir / "a.mp4.nfo"
+    sidecar2.write_text("info")
+    other_asset = src_dir / "other.txt"
+    other_asset.write_text("other")
+
+    out_dir = tmp_path / "out"
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+
+    argv = [
+        "script.py",
+        "--input",
+        str(src_dir),
+        "--target-size",
+        "1M",
+        "--output-dir",
+        str(out_dir),
+        "--stage-dir",
+        str(stage_dir),
+        "--constant-quality",
+        "30",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(script, "has_video_stream", lambda path: path.endswith(".mp4"))
+    monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
+
+    def fake_run(cmd, env=None):
+        stage_part = Path(cmd[-1])
+        stage_part.write_bytes(b"encoded")
+
+        class R:
+            returncode = 0
+
+        return R()
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+    monkeypatch.setattr(script, "is_valid_media", lambda path: True)
+
+    script.main()
+
+    bundles = sorted(p for p in out_dir.iterdir() if p.is_dir())
+    assert len(bundles) == 1
+    bundle = bundles[0]
+
+    assert (bundle / "a.mkv").exists()
+    assert (bundle / "a.mkv.srt").exists()
+    assert (bundle / "a.mkv.nfo").exists()
+    assert (bundle / "other.txt").exists()
+    assert not (bundle / "a.mp4.srt").exists()
+    assert not (bundle / "a.mp4.nfo").exists()
