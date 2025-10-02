@@ -12,18 +12,6 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Sequence, TypedDict, cast
 
-VIDEO_EXTS = {
-    ".mp4",
-    ".mov",
-    ".mkv",
-    ".avi",
-    ".m4v",
-    ".webm",
-    ".mpg",
-    ".mpeg",
-    ".wmv",
-    ".flv",
-}
 OUT_EXT = ".mkv"
 DEFAULT_SUFFIX = "_vcrunch_av1"
 MANIFEST_NAME = ".job.json"
@@ -152,6 +140,39 @@ def is_valid_media(path: str) -> bool:
         return ffprobe_duration(path) > 0.0
     except Exception:
         return False
+
+
+def has_video_stream(path: str) -> bool:
+    try:
+        data = ffprobe_json(
+            [
+                "ffprobe",
+                "-hide_banner",
+                "-v",
+                "error",
+                "-select_streams",
+                "v",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "json",
+                "-i",
+                path,
+            ]
+        )
+    except Exception:
+        return False
+    streams = data.get("streams")
+    if not isinstance(streams, list):
+        return False
+    return any(
+        isinstance(stream, dict) and stream.get("codec_type") == "video"
+        for stream in streams
+    )
+
+
+def is_video_file(path: str) -> bool:
+    return has_video_stream(path)
 
 
 def collect_all_files(paths: List[str], pattern: Optional[str]) -> List[str]:
@@ -535,8 +556,10 @@ def main() -> None:
         logging.error("no input files found")
         sys.exit(1)
 
-    videos = [p for p in all_files if pathlib.Path(p).suffix.lower() in VIDEO_EXTS]
-    assets = [p for p in all_files if pathlib.Path(p).suffix.lower() not in VIDEO_EXTS]
+    video_flags: dict[str, bool] = {path: is_video_file(path) for path in all_files}
+    videos = [p for p in all_files if video_flags[p]]
+    assets = [p for p in all_files if not video_flags[p]]
+    video_set = {p for p, is_video in video_flags.items() if is_video}
 
     logging.info("media preset: %s", canon_media or "none")
     logging.info("outputs: %s", args.output_dir)
@@ -570,7 +593,7 @@ def main() -> None:
             except Exception as e:
                 logging.error("%s failed %s -> %s: %s", action, src, dest, e)
                 sys.exit(1)
-            if pathlib.Path(src).suffix.lower() in VIDEO_EXTS:
+            if src in video_set:
                 key = src_key(os.path.abspath(src), st)
                 manifest["items"][key] = {
                     "type": "video",
