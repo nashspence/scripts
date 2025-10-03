@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional, Sequence, TypedDict, cast
 
 OUT_EXT = ".mkv"
+AV1_COMPATIBLE_MUXERS = {"matroska", "webm", "mp4", "mov"}
 DEFAULT_SUFFIX = ""
 MANIFEST_NAME = ".job.json"
 MAX_SVT_KBPS = 100_000
@@ -307,6 +308,12 @@ def _muxer_for_extension(ext: str) -> Optional[str]:
     if ext in {"mxf"}:
         return "mxf"
     return ext
+
+
+def _muxer_supports_av1(muxer: Optional[str]) -> bool:
+    if not muxer:
+        return False
+    return muxer.lower() in AV1_COMPATIBLE_MUXERS
 
 
 def _should_ignore_name(name: str) -> bool:
@@ -899,10 +906,13 @@ def main() -> None:
         st = os.stat(src)
         stem = sanitize_base(pathlib.Path(src).stem)
         ext = pathlib.Path(src).suffix
-        has_data = has_data_stream(src)
+        has_data_streams = has_data_stream(src)
+        muxer_for_src = _muxer_for_extension(ext) if ext else None
+        preserve_data_streams = False
         output_ext = OUT_EXT
-        if has_data and ext:
+        if has_data_streams and ext and _muxer_supports_av1(muxer_for_src):
             output_ext = ext
+            preserve_data_streams = True
         out_name = f"{stem}{args.name_suffix}{output_ext}"
         metadata = {
             "dir": os.path.abspath(os.path.dirname(src)),
@@ -984,7 +994,7 @@ def main() -> None:
 
         audio_kbps = max(1, int(audio_bps / 1000))
         muxer: Optional[str] = "matroska"
-        if has_data:
+        if preserve_data_streams:
             muxer_candidate = _muxer_for_extension(output_ext)
             muxer = muxer_candidate if muxer_candidate else None
         ff = [
@@ -1003,7 +1013,7 @@ def main() -> None:
                 "warning",
             ]
         ff.append("-y")
-        if not has_data:
+        if not preserve_data_streams:
             ff.append("-ignore_unknown")
         ff += [
             "-i",
@@ -1015,7 +1025,7 @@ def main() -> None:
             "-map",
             "0:s?",
         ]
-        if has_data:
+        if preserve_data_streams:
             ff += [
                 "-map",
                 "0:d?",
@@ -1038,7 +1048,7 @@ def main() -> None:
             "-svtav1-params",
             f"lp={args.svt_lp}",
         ]
-        if has_data:
+        if preserve_data_streams:
             ff += [
                 "-c:a",
                 "copy",
@@ -1054,12 +1064,12 @@ def main() -> None:
             "-c:s",
             "copy",
         ]
-        if has_data:
+        if preserve_data_streams:
             ff += [
                 "-c:d",
                 "copy",
             ]
-        if has_data:
+        if preserve_data_streams:
             ff.append("-copy_unknown")
         if muxer == "matroska":
             ff += [
