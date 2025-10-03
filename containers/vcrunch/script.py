@@ -186,51 +186,45 @@ def _parse_duration_value(value: Any) -> Optional[float]:
 
 def probe_media_info(path: str) -> MediaProbeResult:
     cmd = [
-        "ffprobe",
-        "-hide_banner",
-        "-v",
-        "error",
-        "-select_streams",
-        "v",
-        "-show_entries",
-        "stream=codec_type,duration,disposition",
-        "-of",
-        "json",
+        "ffprobe", "-v", "error",
+        "-print_format", "json",
+        "-show_streams", "-show_format",  # add format section
         path,
     ]
     try:
         data = ffprobe_json(cmd)
     except subprocess.CalledProcessError as exc:
-        err = ""
-        if getattr(exc, "stderr", None):
-            err = exc.stderr.decode("utf-8", "replace").strip()
+        err = exc.stderr.decode("utf-8", "replace").strip() if getattr(exc, "stderr", None) else ""
         failure: MediaProbeResult = {"is_video": False, "duration": None}
         if err:
             failure["error"] = err
         return failure
 
+    # 1) First, classify by container/demuxer
+    fmt = data.get("format") or {}
+    fmt_names = {n.strip() for n in (fmt.get("format_name") or "").split(",")}
+    is_image_container = any(n.endswith("_pipe") or n.startswith("image2") for n in fmt_names)
+    if is_image_container:
+        return {"is_video": False, "duration": None}  # single still image
+
+    # 2) Then apply your stream/duration heuristic for real containers
     has_video_stream = False
     positive_stream_durations: list[float] = []
-    streams = data.get("streams")
-    if isinstance(streams, list):
-        for stream in streams:
-            if not isinstance(stream, dict):
-                continue
-            if stream.get("codec_type") != "video":
-                continue
-            disposition = stream.get("disposition")
-            if isinstance(disposition, dict) and disposition.get("attached_pic") == 1:
-                continue
-            has_video_stream = True
-            stream_duration = _parse_duration_value(stream.get("duration"))
-            if stream_duration is not None and stream_duration > 0:
-                positive_stream_durations.append(stream_duration)
+    for stream in data.get("streams") or []:
+        if not isinstance(stream, dict):
+            continue
+        if stream.get("codec_type") != "video":
+            continue
+        if isinstance(stream.get("disposition"), dict) and stream["disposition"].get("attached_pic") == 1:
+            continue  # skip cover art
+        has_video_stream = True
+        d = _parse_duration_value(stream.get("duration"))
+        if d is not None and d > 0:
+            positive_stream_durations.append(d)
 
     has_video = has_video_stream and bool(positive_stream_durations)
-
     duration = positive_stream_durations[0] if positive_stream_durations else None
-    success: MediaProbeResult = {"is_video": has_video, "duration": duration}
-    return success
+    return {"is_video": has_video, "duration": duration}
 
 
 def ffprobe_duration(path: str) -> float:
