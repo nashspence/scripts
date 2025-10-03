@@ -409,19 +409,78 @@ def _short_hash(s: str) -> str:
 
 
 def copy_assets(
-    assets: List[str], out_dir: str, rename_map: Optional[dict[str, str]] = None
+    assets: List[str],
+    out_dir: str,
+    rename_map: Optional[dict[str, str]] = None,
+    manifest: Optional[dict[str, Any]] = None,
+    manifest_path: Optional[str] = None,
 ) -> list[tuple[str, str]]:
     copied: list[tuple[str, str]] = []
     rename_map = rename_map or {}
+    manifest_dict = manifest if isinstance(manifest, dict) else None
+    manifest_items = manifest_dict.get("items") if manifest_dict else None
+
     for src in assets:
         dest_name = rename_map.get(src, os.path.basename(src))
+        dest_name = os.path.normpath(dest_name)
         dest = os.path.join(out_dir, dest_name)
         if os.path.abspath(src) == os.path.abspath(dest):
             continue
+
+        key: Optional[str] = None
+        record: Optional[dict[str, Any]] = None
+        if manifest_items is not None:
+            try:
+                st = os.stat(src)
+            except FileNotFoundError:
+                logging.warning("asset missing, skipping: %s", src)
+                continue
+            key = src_key(os.path.abspath(src), st)
+            rec_val = manifest_items.get(key)
+            if isinstance(rec_val, dict):
+                record = rec_val
+
+            if record and record.get("status") == "done":
+                recorded_output = os.path.normpath(record.get("output") or dest_name)
+                output_path = os.path.join(out_dir, recorded_output)
+                if os.path.exists(output_path):
+                    logging.info("skip asset done: %s -> %s", src, output_path)
+                    copied.append((src, recorded_output))
+                    if manifest_dict is not None and recorded_output != record.get(
+                        "output"
+                    ):
+                        record["output"] = recorded_output
+                        manifest_items[key] = record
+                        if manifest_path:
+                            save_manifest(manifest_dict, manifest_path)
+                    continue
+                logging.warning(
+                    "manifest marks asset done but output missing: %s", output_path
+                )
+                record = None
+
+        dest_dir = os.path.dirname(dest)
+        if dest_dir and not os.path.exists(dest_dir):
+            os.makedirs(dest_dir, exist_ok=True)
+
         try:
             shutil.copy2(src, dest)
             logging.info("copied asset: %s -> %s", src, dest)
             copied.append((src, dest_name))
+            if (
+                manifest_items is not None
+                and key is not None
+                and manifest_dict is not None
+            ):
+                manifest_items[key] = {
+                    "type": "asset",
+                    "src": src,
+                    "output": dest_name,
+                    "status": "done",
+                    "finished_at": now_utc_iso(),
+                }
+                if manifest_path:
+                    save_manifest(manifest_dict, manifest_path)
         except Exception as e:
             logging.error("failed to copy asset %s -> %s: %s", src, dest, e)
     return copied
@@ -968,13 +1027,25 @@ def main() -> None:
                 except FileNotFoundError:
                     pass
 
-        if (
-            os.path.exists(final_path)
-            and rec.get("status") == "done"
-            and is_valid_media(final_path)
-        ):
-            logging.info("skip done: %s", final_path)
-            continue
+        if rec.get("status") == "done":
+            if os.path.exists(final_path):
+                try:
+                    if not is_valid_media(final_path):
+                        logging.debug(
+                            "manifest marks video done but validation failed: %s",
+                            final_path,
+                        )
+                except Exception:
+                    logging.debug(
+                        "manifest marks video done but validation errored: %s",
+                        final_path,
+                    )
+                logging.info("skip done: %s", final_path)
+                continue
+            logging.warning(
+                "manifest marks video done but output missing: %s", final_path
+            )
+            mark_pending("output missing")
 
         if os.path.exists(final_path) and not is_valid_media(final_path):
             try:
@@ -1185,7 +1256,13 @@ def main() -> None:
                     asset_renames[asset] = new_base
                 break
 
-    copied_assets = copy_assets(assets, args.output_dir, asset_renames)
+    copied_assets = copy_assets(
+        assets,
+        args.output_dir,
+        asset_renames,
+        manifest=manifest,
+        manifest_path=manifest_path,
+    )
     for asset_src, dest_name in copied_assets:
         output_by_input[os.path.abspath(asset_src)] = os.path.normpath(dest_name)
 

@@ -204,6 +204,41 @@ def test_is_video_file(monkeypatch):
     ]
 
 
+def test_copy_assets_skips_done(tmp_path):
+    src = tmp_path / "asset.bin"
+    src.write_text("source-new")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    dest = out_dir / "asset.bin"
+    dest.write_text("existing")
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest = {
+        "items": {},
+        "probes": {},
+    }
+
+    st = src.stat()
+    key = script.src_key(str(src.resolve()), st)
+    manifest["items"][key] = {
+        "type": "asset",
+        "src": str(src),
+        "output": "asset.bin",
+        "status": "done",
+        "finished_at": "2024-01-01T00:00:00Z",
+    }
+
+    results = script.copy_assets(
+        [str(src)],
+        str(out_dir),
+        manifest=manifest,
+        manifest_path=str(manifest_path),
+    )
+
+    assert dest.read_text() == "existing"
+    assert results == [(str(src), "asset.bin")]
+
+
 def test_has_data_stream(monkeypatch):
     expected_cmd = [
         "ffprobe",
