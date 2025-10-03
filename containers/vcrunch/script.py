@@ -933,6 +933,21 @@ def main() -> None:
             os.makedirs(final_dir, exist_ok=True)
         part_path = final_path + ".part"
 
+        def mark_pending(error: Optional[str] = None) -> None:
+            rec["status"] = "pending"
+            rec.pop("started_at", None)
+            rec.pop("finished_at", None)
+            if error:
+                rec["error"] = error
+            else:
+                rec.pop("error", None)
+            manifest["items"][key] = rec
+            save_manifest(manifest, manifest_path)
+
+        if rec.get("status") == "encoding_started":
+            logging.info("retrying previously started encode for %s", src)
+            mark_pending()
+
         for stale in (part_path, stage_part):
             if os.path.exists(stale):
                 try:
@@ -987,11 +1002,10 @@ def main() -> None:
                 "-loglevel",
                 "warning",
             ]
+        ff.append("-y")
+        if not has_data:
+            ff.append("-ignore_unknown")
         ff += [
-            "-y",
-            "-ignore_unknown",
-            "-ignore_editlist",
-            "1",
             "-i",
             stage_src,
             "-map",
@@ -1045,6 +1059,8 @@ def main() -> None:
                 "-c:d",
                 "copy",
             ]
+        if has_data:
+            ff.append("-copy_unknown")
         if muxer == "matroska":
             ff += [
                 "-cues_to_front",
@@ -1059,6 +1075,7 @@ def main() -> None:
             ]
         ff.append(stage_part)
 
+        rec.pop("error", None)
         rec.update(
             {
                 "status": "encoding_started",
@@ -1081,10 +1098,12 @@ def main() -> None:
             p = subprocess.run(ff, env=env)
             if p.returncode != 0:
                 logging.error("ffmpeg failed for %s", src)
+                mark_pending(f"ffmpeg exited with code {p.returncode}")
                 continue
 
             if not os.path.exists(stage_part):
                 logging.error("expected encoded output missing for %s", src)
+                mark_pending("encoded output missing")
                 continue
 
             use_original_output = False
@@ -1092,6 +1111,7 @@ def main() -> None:
                 encoded_size = os.path.getsize(stage_part)
             except OSError as e:
                 logging.error("failed to stat encoded output for %s: %s", src, e)
+                mark_pending("failed to stat encoded output")
                 continue
 
             if encoded_size > st.st_size:
@@ -1111,6 +1131,7 @@ def main() -> None:
                     shutil.copy2(stage_part, part_path)
                 except Exception as e:
                     logging.error("failed to copy staged result to output: %s", e)
+                    mark_pending("failed to copy staged result")
                     continue
 
                 os.replace(part_path, final_path)
