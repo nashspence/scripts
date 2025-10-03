@@ -216,6 +216,15 @@ def _duration_from_frames(stream: dict[str, Any]) -> Optional[float]:
     return frames / fps
 
 
+def _parse_frame_count(value: Any) -> Optional[float]:
+    if value in (None, "N/A"):
+        return None
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def probe_media_info(path: str) -> MediaProbeResult:
     cmd = [
         "ffprobe",
@@ -243,19 +252,8 @@ def probe_media_info(path: str) -> MediaProbeResult:
             failure["error"] = err
         return failure
 
-    format_info = data.get("format")
-    durations: list[float] = []
-    if isinstance(format_info, dict):
-        fmt_duration = _parse_duration_value(format_info.get("duration"))
-        if fmt_duration is not None:
-            durations.append(fmt_duration)
-        tags = format_info.get("tags")
-        if isinstance(tags, dict):
-            tag_duration = _parse_duration_value(tags.get("DURATION"))
-            if tag_duration is not None:
-                durations.append(tag_duration)
-
-    has_video = False
+    has_video_stream = False
+    positive_stream_durations: list[float] = []
     streams = data.get("streams")
     if isinstance(streams, list):
         for stream in streams:
@@ -263,7 +261,8 @@ def probe_media_info(path: str) -> MediaProbeResult:
                 continue
             if stream.get("codec_type") != "video":
                 continue
-            has_video = True
+            has_video_stream = True
+            frame_count = _parse_frame_count(stream.get("nb_frames"))
             stream_duration = _parse_duration_value(stream.get("duration"))
             if stream_duration is None:
                 stream_duration = _duration_from_timebase(
@@ -271,10 +270,16 @@ def probe_media_info(path: str) -> MediaProbeResult:
                 )
             if stream_duration is None:
                 stream_duration = _duration_from_frames(stream)
-            if stream_duration is not None:
-                durations.append(stream_duration)
+            if (
+                stream_duration is not None
+                and stream_duration > 0
+                and (frame_count is None or frame_count > 1)
+            ):
+                positive_stream_durations.append(stream_duration)
 
-    duration = durations[0] if durations else None
+    has_video = has_video_stream and bool(positive_stream_durations)
+
+    duration = positive_stream_durations[0] if positive_stream_durations else None
     success: MediaProbeResult = {"is_video": has_video, "duration": duration}
     return success
 
