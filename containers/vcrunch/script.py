@@ -184,63 +184,18 @@ def _parse_duration_value(value: Any) -> Optional[float]:
     return None
 
 
-def _duration_from_timebase(duration_ts: Any, time_base: Any) -> Optional[float]:
-    if duration_ts is None or time_base is None:
-        return None
-    try:
-        ts = float(duration_ts)
-    except (TypeError, ValueError):
-        try:
-            ts = float(str(duration_ts).strip())
-        except (ValueError, TypeError):
-            return None
-    base = _parse_fraction(time_base)
-    if base is None:
-        return None
-    return ts * base
-
-
-def _duration_from_frames(stream: dict[str, Any]) -> Optional[float]:
-    nb_frames = stream.get("nb_frames")
-    if nb_frames in (None, "N/A"):
-        return None
-    try:
-        frames = float(str(nb_frames))
-    except (TypeError, ValueError):
-        return None
-    fps = _parse_fraction(stream.get("avg_frame_rate"))
-    if fps is None or fps <= 0:
-        fps = _parse_fraction(stream.get("r_frame_rate"))
-    if fps is None or fps <= 0:
-        return None
-    return frames / fps
-
-
-def _parse_frame_count(value: Any) -> Optional[float]:
-    if value in (None, "N/A"):
-        return None
-    try:
-        return float(str(value))
-    except (TypeError, ValueError):
-        return None
-
-
 def probe_media_info(path: str) -> MediaProbeResult:
     cmd = [
         "ffprobe",
-        "-count_frames",
         "-hide_banner",
-        "-loglevel",
+        "-v",
         "error",
+        "-select_streams",
+        "v",
         "-show_entries",
-        (
-            "format=duration:format_tags=DURATION:stream="
-            "codec_type,duration,duration_ts,time_base,avg_frame_rate,nb_frames,"
-            "nb_read_frames,r_frame_rate"
-        ),
+        "stream=codec_type,duration,disposition",
         "-of",
         "json",
-        "-i",
         path,
     ]
     try:
@@ -263,22 +218,12 @@ def probe_media_info(path: str) -> MediaProbeResult:
                 continue
             if stream.get("codec_type") != "video":
                 continue
+            disposition = stream.get("disposition")
+            if isinstance(disposition, dict) and disposition.get("attached_pic") == 1:
+                continue
             has_video_stream = True
-            frame_count = _parse_frame_count(stream.get("nb_frames"))
-            if frame_count is None:
-                frame_count = _parse_frame_count(stream.get("nb_read_frames"))
             stream_duration = _parse_duration_value(stream.get("duration"))
-            if stream_duration is None:
-                stream_duration = _duration_from_timebase(
-                    stream.get("duration_ts"), stream.get("time_base")
-                )
-            if stream_duration is None:
-                stream_duration = _duration_from_frames(stream)
-            if (
-                stream_duration is not None
-                and stream_duration > 0
-                and (frame_count is None or frame_count > 1)
-            ):
+            if stream_duration is not None and stream_duration > 0:
                 positive_stream_durations.append(stream_duration)
 
     has_video = has_video_stream and bool(positive_stream_durations)
