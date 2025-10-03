@@ -62,27 +62,25 @@ def test_ffprobe_duration(monkeypatch):
 def test_probe_media_info_uses_stream_duration(monkeypatch):
     expected = [
         "ffprobe",
-        "-hide_banner",
         "-v",
         "error",
-        "-select_streams",
-        "v",
-        "-show_entries",
-        "stream=codec_type,duration,disposition",
-        "-of",
+        "-print_format",
         "json",
+        "-show_streams",
+        "-show_format",
         "path",
     ]
 
     def fake_ffprobe_json(cmd):
         assert cmd == expected
         return {
+            "format": {"format_name": "matroska"},
             "streams": [
                 {
                     "codec_type": "video",
                     "duration": "12.5",
                 }
-            ]
+            ],
         }
 
     monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
@@ -106,6 +104,35 @@ def test_probe_media_info_zero_duration_is_still(monkeypatch):
     info = script.probe_media_info("photo.jpg")
     assert info["is_video"] is False
     assert info["duration"] is None
+
+
+def test_probe_media_info_detects_image_container(monkeypatch):
+    expected = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-show_format",
+        "still.png",
+    ]
+
+    def fake_ffprobe_json(cmd):
+        assert cmd == expected
+        return {
+            "format": {"format_name": "image2"},
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "duration": "1.0",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
+    info = script.probe_media_info("still.png")
+    assert info == {"is_video": False, "duration": None}
 
 
 def test_probe_media_info_attached_picture(monkeypatch):
