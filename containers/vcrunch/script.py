@@ -228,13 +228,15 @@ def _parse_frame_count(value: Any) -> Optional[float]:
 def probe_media_info(path: str) -> MediaProbeResult:
     cmd = [
         "ffprobe",
+        "-count_frames",
         "-hide_banner",
         "-loglevel",
         "error",
         "-show_entries",
         (
             "format=duration:format_tags=DURATION:stream="
-            "codec_type,duration,duration_ts,time_base,avg_frame_rate,nb_frames,r_frame_rate"
+            "codec_type,duration,duration_ts,time_base,avg_frame_rate,nb_frames,"
+            "nb_read_frames,r_frame_rate"
         ),
         "-of",
         "json",
@@ -263,6 +265,8 @@ def probe_media_info(path: str) -> MediaProbeResult:
                 continue
             has_video_stream = True
             frame_count = _parse_frame_count(stream.get("nb_frames"))
+            if frame_count is None:
+                frame_count = _parse_frame_count(stream.get("nb_read_frames"))
             stream_duration = _parse_duration_value(stream.get("duration"))
             if stream_duration is None:
                 stream_duration = _duration_from_timebase(

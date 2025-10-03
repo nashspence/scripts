@@ -62,13 +62,15 @@ def test_ffprobe_duration(monkeypatch):
 def test_probe_media_info_uses_format_duration(monkeypatch):
     expected = [
         "ffprobe",
+        "-count_frames",
         "-hide_banner",
         "-loglevel",
         "error",
         "-show_entries",
         (
             "format=duration:format_tags=DURATION:stream="
-            "codec_type,duration,duration_ts,time_base,avg_frame_rate,nb_frames,r_frame_rate"
+            "codec_type,duration,duration_ts,time_base,avg_frame_rate,nb_frames,"
+            "nb_read_frames,r_frame_rate"
         ),
         "-of",
         "json",
@@ -124,6 +126,26 @@ def test_probe_media_info_still_image(monkeypatch):
                     "r_frame_rate": "25/1",
                 }
             ],
+        }
+
+    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
+    info = script.probe_media_info("photo.jpg")
+    assert info["is_video"] is False
+    assert info["duration"] is None
+
+
+def test_probe_media_info_still_image_counts_frames(monkeypatch):
+    def fake_ffprobe_json(cmd):
+        return {
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "duration": "0.04",
+                    "nb_frames": "N/A",
+                    "nb_read_frames": "1",
+                    "avg_frame_rate": "25/1",
+                }
+            ]
         }
 
     monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
