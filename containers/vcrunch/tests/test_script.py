@@ -80,7 +80,12 @@ def test_probe_media_info_uses_format_duration(monkeypatch):
         assert cmd == expected
         return {
             "format": {"duration": "12.5"},
-            "streams": [{"codec_type": "video"}],
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "duration": "12.5",
+                }
+            ],
         }
 
     monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
@@ -105,6 +110,26 @@ def test_probe_media_info_duration_fallback(monkeypatch):
     info = script.probe_media_info("clip")
     assert info["is_video"] is True
     assert info["duration"] == pytest.approx(3.0)
+
+
+def test_probe_media_info_still_image(monkeypatch):
+    def fake_ffprobe_json(cmd):
+        return {
+            "format": {"format_name": "image2"},
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "nb_frames": "1",
+                    "avg_frame_rate": "25/1",
+                    "r_frame_rate": "25/1",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
+    info = script.probe_media_info("photo.jpg")
+    assert info["is_video"] is False
+    assert info["duration"] is None
 
 
 def test_probe_media_info_failure(monkeypatch):
@@ -146,10 +171,12 @@ def test_is_video_file(monkeypatch):
 
     monkeypatch.setattr(script, "has_video_stream", fake_has_video_stream)
 
+    assert script.is_video_file("/tmp/image.JPG") is False
     assert script.is_video_file("/tmp/video.mp4") is False
     assert script.is_video_file("/tmp/video.custom") is True
     assert script.is_video_file("/tmp/asset.bin") is False
     assert calls == [
+        "/tmp/image.JPG",
         "/tmp/video.mp4",
         "/tmp/video.custom",
         "/tmp/asset.bin",
