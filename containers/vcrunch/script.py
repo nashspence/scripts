@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,15 @@ MANIFEST_NAME = ".job.json"
 MAX_SVT_KBPS = 100_000
 DEFAULT_TARGET_SIZE = "23.30G"
 DEFAULT_SAFETY_OVERHEAD = 0.012
+
+VERBOSE_LEVEL = 0
+
+
+def _print_command(cmd: Sequence[str]) -> None:
+    if not VERBOSE_LEVEL:
+        return
+    cmdline = " ".join(shlex.quote(str(part)) for part in cmd)
+    print(cmdline, file=sys.stderr)
 
 
 class MediaPreset(TypedDict):
@@ -127,6 +137,7 @@ def kbps_to_bps(s: str) -> int:
 
 
 def ffprobe_json(cmd: Sequence[str]) -> dict[str, Any]:
+    _print_command(cmd)
     proc = subprocess.run(
         cmd,
         check=True,
@@ -722,6 +733,8 @@ def main() -> None:
         if args.verbose == 0
         else (logging.INFO if args.verbose == 1 else logging.DEBUG)
     )
+    global VERBOSE_LEVEL
+    VERBOSE_LEVEL = args.verbose
     logging.basicConfig(
         level=level, stream=sys.stderr, format="%(levelname)s: %(message)s"
     )
@@ -1187,6 +1200,7 @@ def main() -> None:
             else:
                 env["SVT_LOG"] = "4"
 
+            _print_command(ff)
             p = subprocess.run(ff, env=env)
             if p.returncode != 0:
                 logging.error("ffmpeg failed for %s", src)
