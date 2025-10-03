@@ -257,6 +257,53 @@ def is_video_file(path: str) -> bool:
     return has_video_stream(path)
 
 
+def has_data_stream(path: str) -> bool:
+    cmd = [
+        "ffprobe",
+        "-hide_banner",
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "json",
+        path,
+    ]
+    try:
+        data = ffprobe_json(cmd)
+    except subprocess.CalledProcessError:
+        return False
+
+    streams = data.get("streams")
+    if not isinstance(streams, list):
+        return False
+    for stream in streams:
+        if isinstance(stream, dict) and stream.get("codec_type") == "data":
+            return True
+    return False
+
+
+def _muxer_for_extension(ext: str) -> Optional[str]:
+    ext = ext.lower().lstrip(".")
+    if not ext:
+        return None
+    if ext in {"mkv", "mk3d", "webm"}:
+        return "matroska" if ext != "webm" else "webm"
+    if ext in {"mp4", "m4v"}:
+        return "mp4"
+    if ext in {"mov"}:
+        return "mov"
+    if ext in {"ts", "m2ts", "mts"}:
+        return "mpegts"
+    if ext in {"avi"}:
+        return "avi"
+    if ext in {"flv"}:
+        return "flv"
+    if ext in {"mxf"}:
+        return "mxf"
+    return ext
+
+
 def _should_ignore_name(name: str) -> bool:
     return name.startswith("._")
 
@@ -847,15 +894,19 @@ def main() -> None:
         st = os.stat(src)
         stem = sanitize_base(pathlib.Path(src).stem)
         ext = pathlib.Path(src).suffix
-        out_name = f"{stem}{args.name_suffix}{OUT_EXT}"
-        video_metadata.append(
-            {
-                "dir": os.path.abspath(os.path.dirname(src)),
-                "original": os.path.basename(src),
-                "desired": out_name,
-                "ext_changed": ext.lower() != OUT_EXT.lower(),
-            }
-        )
+        has_data = has_data_stream(src)
+        output_ext = OUT_EXT
+        if has_data and ext:
+            output_ext = ext
+        out_name = f"{stem}{args.name_suffix}{output_ext}"
+        metadata = {
+            "dir": os.path.abspath(os.path.dirname(src)),
+            "original": os.path.basename(src),
+            "desired": out_name,
+            "ext_changed": ext.lower() != output_ext.lower(),
+            "used_original": False,
+        }
+        video_metadata.append(metadata)
         h = _short_hash(os.path.abspath(src))
         stage_src = os.path.join(args.stage_dir, f"{stem}.{h}{ext}")
         stage_part = os.path.join(args.stage_dir, out_name + ".part")
@@ -865,6 +916,10 @@ def main() -> None:
         )
 
         output_rel = rec.get("output") or out_name
+        desired_ext_lower = output_ext.lower()
+        current_ext = os.path.splitext(output_rel)[1].lower()
+        if current_ext != desired_ext_lower:
+            output_rel = out_name
         rec["output"] = output_rel
         output_by_input[os.path.abspath(src)] = os.path.normpath(output_rel)
         final_path = os.path.join(args.output_dir, output_rel)
@@ -908,6 +963,10 @@ def main() -> None:
             continue
 
         audio_kbps = max(1, int(audio_bps / 1000))
+        muxer: Optional[str] = "matroska"
+        if has_data:
+            muxer_candidate = _muxer_for_extension(output_ext)
+            muxer = muxer_candidate if muxer_candidate else None
         ff = [
             "ffmpeg",
         ]
@@ -936,6 +995,13 @@ def main() -> None:
             "0:a?",
             "-map",
             "0:s?",
+        ]
+        if has_data:
+            ff += [
+                "-map",
+                "0:d?",
+            ]
+        ff += [
             "-fps_mode",
             "passthrough",
             "-c:v",
@@ -952,20 +1018,41 @@ def main() -> None:
             "5",
             "-svtav1-params",
             f"lp={args.svt_lp}",
-            "-c:a",
-            "libopus",
-            "-b:a",
-            f"{audio_kbps}k",
+        ]
+        if has_data:
+            ff += [
+                "-c:a",
+                "copy",
+            ]
+        else:
+            ff += [
+                "-c:a",
+                "libopus",
+                "-b:a",
+                f"{audio_kbps}k",
+            ]
+        ff += [
             "-c:s",
             "copy",
-            "-cues_to_front",
-            "1",
-            "-reserve_index_space",
-            "200k",
-            "-f",
-            "matroska",
-            stage_part,
         ]
+        if has_data:
+            ff += [
+                "-c:d",
+                "copy",
+            ]
+        if muxer == "matroska":
+            ff += [
+                "-cues_to_front",
+                "1",
+                "-reserve_index_space",
+                "200k",
+            ]
+        if muxer:
+            ff += [
+                "-f",
+                muxer,
+            ]
+        ff.append(stage_part)
 
         rec.update(
             {
@@ -991,17 +1078,45 @@ def main() -> None:
                 logging.error("ffmpeg failed for %s", src)
                 continue
 
-            try:
-                shutil.copy2(stage_part, part_path)
-            except Exception as e:
-                logging.error("failed to copy staged result to output: %s", e)
+            if not os.path.exists(stage_part):
+                logging.error("expected encoded output missing for %s", src)
                 continue
 
-            os.replace(part_path, final_path)
+            use_original_output = False
+            try:
+                encoded_size = os.path.getsize(stage_part)
+            except OSError as e:
+                logging.error("failed to stat encoded output for %s: %s", src, e)
+                continue
+
+            if encoded_size > st.st_size:
+                logging.info(
+                    "encoded output larger than source; keeping original for %s", src
+                )
+                try:
+                    shutil.copy2(src, final_path)
+                    use_original_output = True
+                except Exception as e:
+                    logging.error(
+                        "failed to copy original source to output for %s: %s", src, e
+                    )
+                    continue
+            else:
+                try:
+                    shutil.copy2(stage_part, part_path)
+                except Exception as e:
+                    logging.error("failed to copy staged result to output: %s", e)
+                    continue
+
+                os.replace(part_path, final_path)
+
             rec.update({"status": "done", "finished_at": now_utc_iso()})
             manifest["items"][key] = rec
             save_manifest(manifest, manifest_path)
-            encoded_count += 1
+            if not use_original_output:
+                encoded_count += 1
+            else:
+                metadata["used_original"] = True
 
         finally:
             for pth in (stage_part, stage_src):
@@ -1020,6 +1135,8 @@ def main() -> None:
         asset_dir = os.path.abspath(os.path.dirname(asset))
         asset_base = os.path.basename(asset)
         for info in videos_by_dir.get(asset_dir, []):
+            if info.get("used_original"):
+                continue
             if not info["ext_changed"]:
                 continue
             original_name = info["original"]
