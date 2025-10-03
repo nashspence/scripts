@@ -975,6 +975,14 @@ def main() -> None:
             else:
                 output_ext = ext
             preserve_data_streams = True
+        should_copy_unknown = preserve_data_streams
+        if (
+            has_data_streams
+            and ext
+            and ext.lower() == ".mov"
+            and output_ext.lower() == ".mp4"
+        ):
+            should_copy_unknown = True
         out_name = f"{stem}{args.name_suffix}{output_ext}"
         metadata = {
             "dir": os.path.abspath(os.path.dirname(src)),
@@ -1087,7 +1095,7 @@ def main() -> None:
                 "warning",
             ]
         ff.append("-y")
-        if not preserve_data_streams:
+        if not preserve_data_streams and not should_copy_unknown:
             ff.append("-ignore_unknown")
         ff += [
             "-i",
@@ -1143,7 +1151,7 @@ def main() -> None:
                 "-c:d",
                 "copy",
             ]
-        if preserve_data_streams:
+        if should_copy_unknown:
             ff.append("-copy_unknown")
         if muxer == "matroska":
             ff += [
