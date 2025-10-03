@@ -59,35 +59,30 @@ def test_ffprobe_duration(monkeypatch):
         script.ffprobe_duration("path")
 
 
-def test_probe_media_info_uses_format_duration(monkeypatch):
+def test_probe_media_info_uses_stream_duration(monkeypatch):
     expected = [
         "ffprobe",
-        "-count_frames",
         "-hide_banner",
-        "-loglevel",
+        "-v",
         "error",
+        "-select_streams",
+        "v",
         "-show_entries",
-        (
-            "format=duration:format_tags=DURATION:stream="
-            "codec_type,duration,duration_ts,time_base,avg_frame_rate,nb_frames,"
-            "nb_read_frames,r_frame_rate"
-        ),
+        "stream=codec_type,duration,disposition",
         "-of",
         "json",
-        "-i",
         "path",
     ]
 
     def fake_ffprobe_json(cmd):
         assert cmd == expected
         return {
-            "format": {"duration": "12.5"},
             "streams": [
                 {
                     "codec_type": "video",
                     "duration": "12.5",
                 }
-            ],
+            ]
         }
 
     monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
@@ -96,36 +91,15 @@ def test_probe_media_info_uses_format_duration(monkeypatch):
     assert info["duration"] == pytest.approx(12.5)
 
 
-def test_probe_media_info_duration_fallback(monkeypatch):
+def test_probe_media_info_zero_duration_is_still(monkeypatch):
     def fake_ffprobe_json(cmd):
         return {
             "streams": [
                 {
                     "codec_type": "video",
-                    "duration_ts": "1800",
-                    "time_base": "1/600",
+                    "duration": "0",
                 }
             ]
-        }
-
-    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
-    info = script.probe_media_info("clip")
-    assert info["is_video"] is True
-    assert info["duration"] == pytest.approx(3.0)
-
-
-def test_probe_media_info_still_image(monkeypatch):
-    def fake_ffprobe_json(cmd):
-        return {
-            "format": {"format_name": "image2"},
-            "streams": [
-                {
-                    "codec_type": "video",
-                    "nb_frames": "1",
-                    "avg_frame_rate": "25/1",
-                    "r_frame_rate": "25/1",
-                }
-            ],
         }
 
     monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
@@ -134,22 +108,20 @@ def test_probe_media_info_still_image(monkeypatch):
     assert info["duration"] is None
 
 
-def test_probe_media_info_still_image_counts_frames(monkeypatch):
+def test_probe_media_info_attached_picture(monkeypatch):
     def fake_ffprobe_json(cmd):
         return {
             "streams": [
                 {
                     "codec_type": "video",
-                    "duration": "0.04",
-                    "nb_frames": "N/A",
-                    "nb_read_frames": "1",
-                    "avg_frame_rate": "25/1",
+                    "duration": "5",
+                    "disposition": {"attached_pic": 1},
                 }
             ]
         }
 
     monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
-    info = script.probe_media_info("photo.jpg")
+    info = script.probe_media_info("cover.mkv")
     assert info["is_video"] is False
     assert info["duration"] is None
 
