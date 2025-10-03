@@ -25,6 +25,19 @@ class MediaPreset(TypedDict):
     safety_overhead: float
 
 
+class MediaProbeResult(TypedDict, total=False):
+    is_video: bool
+    duration: Optional[float]
+    error: str
+
+
+class ProbeCacheEntry(TypedDict, total=False):
+    path: str
+    is_video: bool
+    duration: float
+    error: str
+
+
 MEDIA_PRESETS: dict[str, MediaPreset] = {
     "cdr700": {"target_size": "650M", "safety_overhead": 0.020},
     "dvd5": {"target_size": "4.36G", "safety_overhead": 0.020},
@@ -113,26 +126,165 @@ def kbps_to_bps(s: str) -> int:
 
 
 def ffprobe_json(cmd: Sequence[str]) -> dict[str, Any]:
-    out = subprocess.check_output(cmd)
-    return cast(dict[str, Any], json.loads(out))
+    proc = subprocess.run(
+        cmd,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout = proc.stdout.decode("utf-8", "replace")
+    if not stdout.strip():
+        return {}
+    return cast(dict[str, Any], json.loads(stdout))
+
+
+def _parse_fraction(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s or s.lower() == "n/a":
+            return None
+        if "/" in s:
+            num, den = s.split("/", 1)
+            try:
+                return float(num) / float(den)
+            except (ValueError, ZeroDivisionError):
+                return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_duration_value(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value >= 0 else None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s or s.lower() in {"n/a", "nan"}:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            if ":" in s:
+                parts = s.split(":")
+                try:
+                    total = 0.0
+                    for part in parts:
+                        total = total * 60 + float(part)
+                    return total
+                except ValueError:
+                    return None
+    return None
+
+
+def _duration_from_timebase(duration_ts: Any, time_base: Any) -> Optional[float]:
+    if duration_ts is None or time_base is None:
+        return None
+    try:
+        ts = float(duration_ts)
+    except (TypeError, ValueError):
+        try:
+            ts = float(str(duration_ts).strip())
+        except (ValueError, TypeError):
+            return None
+    base = _parse_fraction(time_base)
+    if base is None:
+        return None
+    return ts * base
+
+
+def _duration_from_frames(stream: dict[str, Any]) -> Optional[float]:
+    nb_frames = stream.get("nb_frames")
+    if nb_frames in (None, "N/A"):
+        return None
+    try:
+        frames = float(str(nb_frames))
+    except (TypeError, ValueError):
+        return None
+    fps = _parse_fraction(stream.get("avg_frame_rate"))
+    if fps is None or fps <= 0:
+        fps = _parse_fraction(stream.get("r_frame_rate"))
+    if fps is None or fps <= 0:
+        return None
+    return frames / fps
+
+
+def probe_media_info(path: str) -> MediaProbeResult:
+    cmd = [
+        "ffprobe",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-show_entries",
+        (
+            "format=duration:format_tags=DURATION:stream="
+            "codec_type,duration,duration_ts,time_base,avg_frame_rate,nb_frames,r_frame_rate"
+        ),
+        "-of",
+        "json",
+        "-i",
+        path,
+    ]
+    try:
+        data = ffprobe_json(cmd)
+    except subprocess.CalledProcessError as exc:
+        err = ""
+        if getattr(exc, "stderr", None):
+            err = exc.stderr.decode("utf-8", "replace").strip()
+        failure: MediaProbeResult = {"is_video": False, "duration": None}
+        if err:
+            failure["error"] = err
+        return failure
+
+    format_info = data.get("format")
+    durations: list[float] = []
+    if isinstance(format_info, dict):
+        fmt_duration = _parse_duration_value(format_info.get("duration"))
+        if fmt_duration is not None:
+            durations.append(fmt_duration)
+        tags = format_info.get("tags")
+        if isinstance(tags, dict):
+            tag_duration = _parse_duration_value(tags.get("DURATION"))
+            if tag_duration is not None:
+                durations.append(tag_duration)
+
+    has_video = False
+    streams = data.get("streams")
+    if isinstance(streams, list):
+        for stream in streams:
+            if not isinstance(stream, dict):
+                continue
+            if stream.get("codec_type") != "video":
+                continue
+            has_video = True
+            stream_duration = _parse_duration_value(stream.get("duration"))
+            if stream_duration is None:
+                stream_duration = _duration_from_timebase(
+                    stream.get("duration_ts"), stream.get("time_base")
+                )
+            if stream_duration is None:
+                stream_duration = _duration_from_frames(stream)
+            if stream_duration is not None:
+                durations.append(stream_duration)
+
+    duration = durations[0] if durations else None
+    success: MediaProbeResult = {"is_video": has_video, "duration": duration}
+    return success
 
 
 def ffprobe_duration(path: str) -> float:
-    data = ffprobe_json(
-        [
-            "ffprobe",
-            "-hide_banner",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "json",
-            "-i",
-            path,
-        ]
-    )
-    return float(data["format"]["duration"])
+    info = probe_media_info(path)
+    duration = info.get("duration")
+    if duration is None:
+        raise ValueError(f"ffprobe did not report duration for {path}")
+    return float(duration)
 
 
 def is_valid_media(path: str) -> bool:
@@ -143,36 +295,16 @@ def is_valid_media(path: str) -> bool:
 
 
 def has_video_stream(path: str) -> bool:
-    try:
-        data = ffprobe_json(
-            [
-                "ffprobe",
-                "-hide_banner",
-                "-v",
-                "error",
-                "-select_streams",
-                "v",
-                "-show_entries",
-                "stream=codec_type",
-                "-of",
-                "json",
-                "-i",
-                path,
-            ]
-        )
-    except Exception:
-        return False
-    streams = data.get("streams")
-    if not isinstance(streams, list):
-        return False
-    return any(
-        isinstance(stream, dict) and stream.get("codec_type") == "video"
-        for stream in streams
-    )
+    info = probe_media_info(path)
+    return bool(info.get("is_video"))
 
 
 def is_video_file(path: str) -> bool:
     return has_video_stream(path)
+
+
+def _should_ignore_name(name: str) -> bool:
+    return name.startswith("._")
 
 
 def collect_all_files(paths: List[str], pattern: Optional[str]) -> List[str]:
@@ -180,10 +312,15 @@ def collect_all_files(paths: List[str], pattern: Optional[str]) -> List[str]:
     for p in paths:
         p = os.path.abspath(p)
         if os.path.isfile(p):
+            if _should_ignore_name(os.path.basename(p)):
+                continue
             files.append(p)
         elif os.path.isdir(p):
-            for root, _, fn in os.walk(p):
+            for root, dirs, fn in os.walk(p):
+                dirs[:] = [d for d in dirs if not _should_ignore_name(d)]
                 for f in fn:
+                    if _should_ignore_name(f):
+                        continue
                     fp = os.path.abspath(os.path.join(root, f))
                     if os.path.isfile(fp):
                         files.append(fp)
@@ -211,15 +348,17 @@ def now_utc_iso() -> str:
 
 def load_manifest(path: str) -> dict[str, Any]:
     if not os.path.exists(path):
-        return {"version": 1, "updated": now_utc_iso(), "items": {}}
+        return {"version": 1, "updated": now_utc_iso(), "items": {}, "probes": {}}
     try:
         with open(path, "r", encoding="utf-8") as f:
             m = cast(dict[str, Any], json.load(f))
-            if "items" not in m:
+            if not isinstance(m.get("items"), dict):
                 m["items"] = {}
+            if not isinstance(m.get("probes"), dict):
+                m["probes"] = {}
             return m
     except Exception:
-        return {"version": 1, "updated": now_utc_iso(), "items": {}}
+        return {"version": 1, "updated": now_utc_iso(), "items": {}, "probes": {}}
 
 
 def save_manifest(manifest: dict[str, Any], path: str) -> None:
@@ -559,9 +698,60 @@ def main() -> None:
         logging.error("no input files found")
         sys.exit(1)
 
-    video_flags: dict[str, bool] = {path: is_video_file(path) for path in all_files}
-    videos = [p for p in all_files if video_flags[p]]
-    assets = [p for p in all_files if not video_flags[p]]
+    probes_val = manifest.get("probes")
+    if not isinstance(probes_val, dict):
+        probes_val = {}
+        manifest["probes"] = probes_val
+    probe_cache = cast(dict[str, ProbeCacheEntry], probes_val)
+
+    video_flags: dict[str, bool] = {}
+    video_durations: dict[str, float] = {}
+    probe_keys: dict[str, str] = {}
+    filtered_files: list[str] = []
+
+    for path in all_files:
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            logging.warning("input missing, skipping: %s", path)
+            continue
+
+        key = src_key(os.path.abspath(path), st)
+        probe_keys[path] = key
+        entry = probe_cache.get(key)
+        if not isinstance(entry, dict):
+            entry = None
+        if entry is None:
+            probe_result = probe_media_info(path)
+            entry = {
+                "path": os.path.abspath(path),
+                "is_video": bool(probe_result.get("is_video")),
+            }
+            duration_value = probe_result.get("duration")
+            if duration_value is not None:
+                entry["duration"] = float(duration_value)
+            error_value = probe_result.get("error")
+            if error_value:
+                entry["error"] = str(error_value)
+            probe_cache[key] = entry
+            save_manifest(manifest, manifest_path)
+
+        is_video = bool(entry.get("is_video"))
+        duration_val = entry.get("duration")
+        if isinstance(duration_val, (int, float)):
+            video_durations[path] = float(duration_val)
+
+        video_flags[path] = is_video
+        filtered_files.append(path)
+        if args.verbose:
+            if is_video:
+                logging.info("video: %s", path)
+            else:
+                logging.info("not a video: %s", path)
+
+    all_files = filtered_files
+    videos = [p for p in all_files if video_flags.get(p)]
+    assets = [p for p in all_files if not video_flags.get(p)]
     video_set = {p for p, is_video in video_flags.items() if is_video}
 
     logging.info("media preset: %s", canon_media or "none")
@@ -621,10 +811,23 @@ def main() -> None:
     total_audio_bytes = 0
     durations: List[float] = []
     for src in videos:
-        d = ffprobe_duration(src)
-        durations.append(d)
-        total_duration += d
-        total_audio_bytes += int((audio_bps / 8.0) * d)
+        duration = video_durations.get(src)
+        if duration is None:
+            try:
+                duration = ffprobe_duration(src)
+            except Exception as exc:
+                logging.error("failed to determine duration for %s: %s", src, exc)
+                sys.exit(1)
+            probe_key = probe_keys.get(src)
+            if probe_key:
+                entry = probe_cache.get(probe_key)
+                if entry is not None:
+                    entry["duration"] = float(duration)
+                    save_manifest(manifest, manifest_path)
+            video_durations[src] = float(duration)
+        durations.append(float(duration))
+        total_duration += float(duration)
+        total_audio_bytes += int((audio_bps / 8.0) * float(duration))
 
     use_constant_quality = args.constant_quality is not None
     global_video_kbps = 0

@@ -5,6 +5,7 @@
 import io
 import json
 import os
+import subprocess
 import sys
 import types
 from datetime import datetime
@@ -32,33 +33,91 @@ def test_kbps_to_bps():
 
 
 def test_ffprobe_json(monkeypatch):
-    def fake_check_output(cmd):
+    def fake_run(cmd, check, stdout, stderr):
         assert cmd == ["ffprobe", "file"]
-        return b'{"a": 1}'
+        assert check is True
+        assert stdout is script.subprocess.PIPE
+        assert stderr is script.subprocess.PIPE
 
-    monkeypatch.setattr(script.subprocess, "check_output", fake_check_output)
+        class Result:
+            def __init__(self) -> None:
+                self.stdout = b'{"a": 1}'
+                self.stderr = b""
+
+        return Result()
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
     assert script.ffprobe_json(["ffprobe", "file"]) == {"a": 1}
 
 
 def test_ffprobe_duration(monkeypatch):
+    monkeypatch.setattr(script, "probe_media_info", lambda path: {"duration": 12.34})
+    assert script.ffprobe_duration("path") == 12.34
+
+    monkeypatch.setattr(script, "probe_media_info", lambda path: {"duration": None})
+    with pytest.raises(ValueError):
+        script.ffprobe_duration("path")
+
+
+def test_probe_media_info_uses_format_duration(monkeypatch):
+    expected = [
+        "ffprobe",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-show_entries",
+        (
+            "format=duration:format_tags=DURATION:stream="
+            "codec_type,duration,duration_ts,time_base,avg_frame_rate,nb_frames,r_frame_rate"
+        ),
+        "-of",
+        "json",
+        "-i",
+        "path",
+    ]
+
     def fake_ffprobe_json(cmd):
-        expected = [
-            "ffprobe",
-            "-hide_banner",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "json",
-            "-i",
-            "path",
-        ]
         assert cmd == expected
-        return {"format": {"duration": "12.34"}}
+        return {
+            "format": {"duration": "12.5"},
+            "streams": [{"codec_type": "video"}],
+        }
 
     monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
-    assert script.ffprobe_duration("path") == 12.34
+    info = script.probe_media_info("path")
+    assert info["is_video"] is True
+    assert info["duration"] == pytest.approx(12.5)
+
+
+def test_probe_media_info_duration_fallback(monkeypatch):
+    def fake_ffprobe_json(cmd):
+        return {
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "duration_ts": "1800",
+                    "time_base": "1/600",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
+    info = script.probe_media_info("clip")
+    assert info["is_video"] is True
+    assert info["duration"] == pytest.approx(3.0)
+
+
+def test_probe_media_info_failure(monkeypatch):
+    err = subprocess.CalledProcessError(1, ["ffprobe"], output=b"", stderr=b"bad")
+
+    def fake_ffprobe_json(cmd):
+        raise err
+
+    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
+    info = script.probe_media_info("bad")
+    assert info["is_video"] is False
+    assert info["duration"] is None
+    assert info["error"] == "bad"
 
 
 def test_is_valid_media(monkeypatch):
@@ -71,36 +130,10 @@ def test_is_valid_media(monkeypatch):
 
 
 def test_has_video_stream(monkeypatch):
-    expected = [
-        "ffprobe",
-        "-hide_banner",
-        "-v",
-        "error",
-        "-select_streams",
-        "v",
-        "-show_entries",
-        "stream=codec_type",
-        "-of",
-        "json",
-        "-i",
-        "path",
-    ]
-
-    def fake_ffprobe_json(cmd):
-        assert cmd == expected
-        return {"streams": [{"codec_type": "video"}]}
-
-    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
+    monkeypatch.setattr(script, "probe_media_info", lambda path: {"is_video": True})
     assert script.has_video_stream("path") is True
 
-    monkeypatch.setattr(script, "ffprobe_json", lambda cmd: {"streams": []})
-    assert script.has_video_stream("path") is False
-
-    monkeypatch.setattr(
-        script,
-        "ffprobe_json",
-        lambda cmd: (_ for _ in ()).throw(Exception("ffprobe")),
-    )
+    monkeypatch.setattr(script, "probe_media_info", lambda path: {"is_video": False})
     assert script.has_video_stream("path") is False
 
 
@@ -155,10 +188,19 @@ def test_collect_all_files(tmp_path):
     sub.mkdir()
     (sub / "b.txt").write_text("b")
     (sub / "c.log").write_text("c")
+    (sub / "._ignored.txt").write_text("meta")
     paths = [str(tmp_path), str(tmp_path / "a.txt")]
     result = script.collect_all_files(paths, "*.txt")
     expected = sorted([str(tmp_path / "a.txt"), str(sub / "b.txt")])
     assert result == expected
+
+
+def test_collect_all_files_skips_dot_underscore(tmp_path):
+    (tmp_path / "._video.mp4").write_text("meta")
+    (tmp_path / "video.mp4").write_text("data")
+    result = script.collect_all_files([str(tmp_path)], None)
+    assert str(tmp_path / "video.mp4") in result
+    assert str(tmp_path / "._video.mp4") not in result
 
 
 def test_read_paths_from_file(tmp_path):
@@ -190,6 +232,7 @@ def test_load_manifest_new(monkeypatch, tmp_path):
         "version": 1,
         "updated": "TS",
         "items": {},
+        "probes": {},
     }
 
 
@@ -197,7 +240,7 @@ def test_load_manifest_existing(monkeypatch, tmp_path):
     monkeypatch.setattr(script, "now_utc_iso", lambda: "TS")
     path = tmp_path / "m.json"
     path.write_text('{"foo": 1}')
-    assert script.load_manifest(str(path)) == {"foo": 1, "items": {}}
+    assert script.load_manifest(str(path)) == {"foo": 1, "items": {}, "probes": {}}
 
 
 def test_load_manifest_invalid(monkeypatch, tmp_path):
@@ -208,6 +251,7 @@ def test_load_manifest_invalid(monkeypatch, tmp_path):
         "version": 1,
         "updated": "TS",
         "items": {},
+        "probes": {},
     }
 
 
@@ -252,7 +296,11 @@ def test_copy_if_fits(monkeypatch, tmp_path):
         str(out_dir),
     ]
     monkeypatch.setattr(sys, "argv", argv)
-    monkeypatch.setattr(script, "has_video_stream", lambda path: path.endswith(".mp4"))
+    monkeypatch.setattr(
+        script,
+        "probe_media_info",
+        lambda path: {"is_video": path.endswith(".mp4"), "duration": 10.0},
+    )
     monkeypatch.setattr(
         script,
         "ffprobe_duration",
@@ -288,6 +336,11 @@ def test_move_if_fits(monkeypatch, tmp_path):
         "--move-if-fit",
     ]
     monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(
+        script,
+        "probe_media_info",
+        lambda path: {"is_video": path.endswith(".mp4"), "duration": 10.0},
+    )
     script.main()
     assert not video.exists()
     assert (out_dir / "a.mp4").exists()
@@ -356,7 +409,14 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
         "32",
     ]
     monkeypatch.setattr(sys, "argv", argv)
-    monkeypatch.setattr(script, "has_video_stream", lambda path: path.endswith(".mp4"))
+    monkeypatch.setattr(
+        script,
+        "probe_media_info",
+        lambda path: {
+            "is_video": path.endswith(".mp4"),
+            "duration": 60.0 if path.endswith(".mp4") else None,
+        },
+    )
 
     monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
 
@@ -426,7 +486,14 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
         "30",
     ]
     monkeypatch.setattr(sys, "argv", argv)
-    monkeypatch.setattr(script, "has_video_stream", lambda path: path.endswith(".mp4"))
+    monkeypatch.setattr(
+        script,
+        "probe_media_info",
+        lambda path: {
+            "is_video": path.endswith(".mp4"),
+            "duration": 60.0 if path.endswith(".mp4") else None,
+        },
+    )
     monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
 
     def fake_run(cmd, env=None):
