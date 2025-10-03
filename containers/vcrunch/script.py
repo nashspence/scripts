@@ -983,18 +983,10 @@ def main() -> None:
         preserve_data_streams = False
         output_ext = OUT_EXT
         if has_data_streams and ext and _muxer_supports_av1(muxer_for_src):
-            if ext.lower() == ".mov":
-                output_ext = ".mp4"
-            else:
-                output_ext = ext
+            output_ext = ext
             preserve_data_streams = True
         should_copy_unknown = preserve_data_streams
-        if (
-            has_data_streams
-            and ext
-            and ext.lower() == ".mov"
-            and output_ext.lower() == ".mp4"
-        ):
+        if has_data_streams and ext and ext.lower() == ".mov":
             should_copy_unknown = True
         out_name = f"{stem}{args.name_suffix}{output_ext}"
         metadata = {
@@ -1166,6 +1158,11 @@ def main() -> None:
             ]
         if should_copy_unknown:
             ff.append("-copy_unknown")
+        if preserve_data_streams and output_ext.lower() == ".mov":
+            ff += [
+                "-brand",
+                "isom",
+            ]
         if muxer == "matroska":
             ff += [
                 "-cues_to_front",

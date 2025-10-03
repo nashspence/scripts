@@ -578,6 +578,72 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     assert cmd[idx + 3] == "0"
 
 
+def test_mov_with_data_stream_uses_mov_container(monkeypatch, tmp_path):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    video = src_dir / "clip.mov"
+    video.write_bytes(b"v" * (2 * 1024 * 1024))
+    out_dir = tmp_path / "out"
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+
+    argv = [
+        "script.py",
+        "--input",
+        str(src_dir),
+        "--target-size",
+        "1M",
+        "--output-dir",
+        str(out_dir),
+        "--stage-dir",
+        str(stage_dir),
+        "--constant-quality",
+        "32",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(
+        script,
+        "probe_media_info",
+        lambda path: {
+            "is_video": path.endswith(".mov"),
+            "duration": 60.0 if path.endswith(".mov") else None,
+        },
+    )
+    monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
+    monkeypatch.setattr(script, "has_data_stream", lambda path: path.endswith(".mov"))
+
+    captured_cmds = []
+
+    def fake_run(cmd, env=None):
+        captured_cmds.append(cmd)
+        stage_part = Path(cmd[-1])
+        stage_part.write_bytes(b"encoded")
+
+        class R:
+            returncode = 0
+
+        return R()
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+    monkeypatch.setattr(script, "is_valid_media", lambda path: True)
+
+    script.main()
+
+    bundles = sorted(p for p in out_dir.iterdir() if p.is_dir())
+    assert len(bundles) == 1
+    bundle = bundles[0]
+    output_video = bundle / "clip.mov"
+    assert output_video.exists()
+
+    cmd = captured_cmds[0]
+    assert "-copy_unknown" in cmd
+    assert "-brand" in cmd
+    brand_index = cmd.index("-brand")
+    assert cmd[brand_index + 1] == "isom"
+    assert "-f" in cmd
+    assert cmd[cmd.index("-f") + 1] == "mov"
+
+
 def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
