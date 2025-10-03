@@ -911,7 +911,10 @@ def main() -> None:
         preserve_data_streams = False
         output_ext = OUT_EXT
         if has_data_streams and ext and _muxer_supports_av1(muxer_for_src):
-            output_ext = ext
+            if ext.lower() == ".mov":
+                output_ext = ".mp4"
+            else:
+                output_ext = ext
             preserve_data_streams = True
         out_name = f"{stem}{args.name_suffix}{output_ext}"
         metadata = {
