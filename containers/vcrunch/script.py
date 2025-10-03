@@ -210,52 +210,6 @@ def find_start_timecode(path: str) -> str:
     return "00:00:00:00"
 
 
-def write_timecodes_v2(src: str, dest: str) -> bool:
-    cmd = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "frame=best_effort_timestamp_time",
-        "-of",
-        "csv=p=0",
-        src,
-    ]
-    try:
-        proc = subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except Exception as exc:
-        logging.debug("failed to probe frame timestamps for %s: %s", src, exc)
-        return False
-    text = proc.stdout.decode("utf-8", "replace")
-    values: list[int] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            values.append(int(round(float(line) * 1000.0)))
-        except ValueError:
-            continue
-    if not values:
-        return False
-    try:
-        with open(dest, "w", encoding="utf-8") as fh:
-            fh.write("# timecode format v2\n")
-            for value in values:
-                fh.write(f"{value}\n")
-    except OSError as exc:
-        logging.debug("failed to write timecodes for %s: %s", src, exc)
-        return False
-    return True
-
-
 def _parse_fraction(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -1027,7 +981,6 @@ def main() -> None:
     output_by_input: dict[str, str] = {}
     video_metadata: list[dict[str, Any]] = []
     encoded_count = 0
-    mkvmerge_path = shutil.which("mkvmerge")
     for src, _dur in zip(videos, durations):
         st = os.stat(src)
         stem = sanitize_base(pathlib.Path(src).stem)
@@ -1046,8 +999,6 @@ def main() -> None:
         stage_src = os.path.join(args.stage_dir, f"{stem}.{h}{ext}")
         stage_part = os.path.join(args.stage_dir, out_name + ".part")
         ffmpeg_output = stage_part + ".ffmpeg"
-        remux_output = stage_part + ".mkvmerge"
-        timecodes_path = stage_part + ".timecodes"
         key = src_key(os.path.abspath(src), st)
         rec = manifest["items"].get(
             key, {"type": "video", "src": src, "output": out_name, "status": "pending"}
@@ -1085,8 +1036,6 @@ def main() -> None:
             part_path,
             stage_part,
             ffmpeg_output,
-            remux_output,
-            timecodes_path,
         ):
             if os.path.exists(stale):
                 try:
@@ -1136,7 +1085,6 @@ def main() -> None:
             continue
 
         audio_kbps = max(1, int(audio_bps / 1000))
-        muxer: Optional[str] = "matroska"
         ff = [
             "ffmpeg",
         ]
@@ -1198,18 +1146,14 @@ def main() -> None:
             "-metadata",
             f"timecode={start_timecode}",
         ]
-        if muxer == "matroska":
-            ff += [
-                "-cues_to_front",
-                "1",
-                "-reserve_index_space",
-                "200k",
-            ]
-        if muxer:
-            ff += [
-                "-f",
-                muxer,
-            ]
+        ff += [
+            "-cues_to_front",
+            "1",
+            "-reserve_index_space",
+            "200k",
+            "-f",
+            "matroska",
+        ]
         ff.append(ffmpeg_output)
 
         rec.pop("error", None)
@@ -1244,27 +1188,6 @@ def main() -> None:
                 logging.error("expected encoded output missing for %s", src)
                 mark_pending("encoded output missing")
                 continue
-
-            if mkvmerge_path:
-                timecodes_written = write_timecodes_v2(stage_src, timecodes_path)
-                if timecodes_written:
-                    mkvmerge_cmd = [
-                        mkvmerge_path,
-                        "-o",
-                        remux_output,
-                        "--timestamps",
-                        f"0:{timecodes_path}",
-                        produced_path,
-                    ]
-                    _print_command(mkvmerge_cmd)
-                    mkvmerge_proc = subprocess.run(mkvmerge_cmd)
-                    if mkvmerge_proc.returncode == 0 and os.path.exists(remux_output):
-                        produced_path = remux_output
-                    else:
-                        logging.warning(
-                            "mkvmerge failed for %s; continuing with ffmpeg output",
-                            src,
-                        )
 
             try:
                 os.replace(produced_path, stage_part)
@@ -1321,8 +1244,6 @@ def main() -> None:
                 stage_part,
                 stage_src,
                 ffmpeg_output,
-                remux_output,
-                timecodes_path,
             ):
                 try:
                     if os.path.exists(pth):

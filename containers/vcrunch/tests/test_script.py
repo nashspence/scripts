@@ -571,7 +571,6 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
     monkeypatch.setattr(script, "find_start_timecode", lambda path: "01:02:03:04")
-    monkeypatch.setattr(script, "write_timecodes_v2", lambda src, dest: False)
     monkeypatch.setattr(script.shutil, "which", lambda name: None)
 
     captured_cmds = []
