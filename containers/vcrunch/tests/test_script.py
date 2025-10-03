@@ -177,6 +177,44 @@ def test_is_video_file(monkeypatch):
     ]
 
 
+def test_has_data_stream(monkeypatch):
+    expected_cmd = [
+        "ffprobe",
+        "-hide_banner",
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "json",
+        "sample.mkv",
+    ]
+
+    def fake_ffprobe_with_data(cmd):
+        assert cmd == expected_cmd
+        return {"streams": [{"codec_type": "data"}]}
+
+    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_with_data)
+    assert script.has_data_stream("sample.mkv") is True
+
+    monkeypatch.setattr(script, "ffprobe_json", lambda cmd: {"streams": []})
+    assert script.has_data_stream("sample.mkv") is False
+
+    def raise_called_process_error(cmd):
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(script, "ffprobe_json", raise_called_process_error)
+    assert script.has_data_stream("sample.mkv") is False
+
+
+def test_muxer_for_extension():
+    assert script._muxer_for_extension(".mkv") == "matroska"
+    assert script._muxer_for_extension(".webm") == "webm"
+    assert script._muxer_for_extension(".mp4") == "mp4"
+    assert script._muxer_for_extension(".m2ts") == "mpegts"
+    assert script._muxer_for_extension(".unknown") == "unknown"
+
+
 def test_run_success(monkeypatch, capsys):
     def fake_run(cmd):
         class R:
@@ -440,6 +478,7 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     )
 
     monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
+    monkeypatch.setattr(script, "has_data_stream", lambda path: False)
 
     captured_cmds = []
 
@@ -516,6 +555,7 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
         },
     )
     monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
+    monkeypatch.setattr(script, "has_data_stream", lambda path: False)
 
     def fake_run(cmd, env=None):
         stage_part = Path(cmd[-1])
