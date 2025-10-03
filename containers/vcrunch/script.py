@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional, Sequence, TypedDict, cast
 
 OUT_EXT = ".mkv"
-AV1_COMPATIBLE_MUXERS = {"matroska", "webm", "mp4", "mov"}
 DEFAULT_SUFFIX = ""
 MANIFEST_NAME = ".job.json"
 MAX_SVT_KBPS = 100_000
@@ -150,6 +149,113 @@ def ffprobe_json(cmd: Sequence[str]) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(stdout))
 
 
+def find_start_timecode(path: str) -> str:
+    probes = [
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-of",
+            "json",
+            "-select_streams",
+            "d",
+            "-show_streams",
+            "-show_entries",
+            "stream=tags",
+            path,
+        ],
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-of",
+            "json",
+            "-show_format",
+            "-show_entries",
+            "format=tags",
+            path,
+        ],
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-of",
+            "json",
+            "-select_streams",
+            "v:0",
+            "-show_streams",
+            "-show_entries",
+            "stream=tags",
+            path,
+        ],
+    ]
+    for cmd in probes:
+        try:
+            data = ffprobe_json(cmd)
+        except Exception:
+            continue
+        streams = data.get("streams")
+        if isinstance(streams, list):
+            for stream in streams:
+                if not isinstance(stream, dict):
+                    continue
+                tags = stream.get("tags")
+                if isinstance(tags, dict) and tags.get("timecode"):
+                    return str(tags["timecode"])
+        fmt = data.get("format")
+        if isinstance(fmt, dict):
+            tags = fmt.get("tags")
+            if isinstance(tags, dict) and tags.get("timecode"):
+                return str(tags["timecode"])
+    return "00:00:00:00"
+
+
+def write_timecodes_v2(src: str, dest: str) -> bool:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "frame=best_effort_timestamp_time",
+        "-of",
+        "csv=p=0",
+        src,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except Exception as exc:
+        logging.debug("failed to probe frame timestamps for %s: %s", src, exc)
+        return False
+    text = proc.stdout.decode("utf-8", "replace")
+    values: list[int] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            values.append(int(round(float(line) * 1000.0)))
+        except ValueError:
+            continue
+    if not values:
+        return False
+    try:
+        with open(dest, "w", encoding="utf-8") as fh:
+            fh.write("# timecode format v2\n")
+            for value in values:
+                fh.write(f"{value}\n")
+    except OSError as exc:
+        logging.debug("failed to write timecodes for %s: %s", src, exc)
+        return False
+    return True
+
+
 def _parse_fraction(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -272,59 +378,6 @@ def has_video_stream(path: str) -> bool:
 
 def is_video_file(path: str) -> bool:
     return has_video_stream(path)
-
-
-def has_data_stream(path: str) -> bool:
-    cmd = [
-        "ffprobe",
-        "-hide_banner",
-        "-v",
-        "error",
-        "-show_entries",
-        "stream=codec_type",
-        "-of",
-        "json",
-        path,
-    ]
-    try:
-        data = ffprobe_json(cmd)
-    except subprocess.CalledProcessError:
-        return False
-
-    streams = data.get("streams")
-    if not isinstance(streams, list):
-        return False
-    for stream in streams:
-        if isinstance(stream, dict) and stream.get("codec_type") == "data":
-            return True
-    return False
-
-
-def _muxer_for_extension(ext: str) -> Optional[str]:
-    ext = ext.lower().lstrip(".")
-    if not ext:
-        return None
-    if ext in {"mkv", "mk3d", "webm"}:
-        return "matroska" if ext != "webm" else "webm"
-    if ext in {"mp4", "m4v"}:
-        return "mp4"
-    if ext in {"mov"}:
-        return "mov"
-    if ext in {"ts", "m2ts", "mts"}:
-        return "mpegts"
-    if ext in {"avi"}:
-        return "avi"
-    if ext in {"flv"}:
-        return "flv"
-    if ext in {"mxf"}:
-        return "mxf"
-    return ext
-
-
-def _muxer_supports_av1(muxer: Optional[str]) -> bool:
-    if not muxer:
-        return False
-    return muxer.lower() in AV1_COMPATIBLE_MUXERS
 
 
 def _should_ignore_name(name: str) -> bool:
@@ -974,20 +1027,12 @@ def main() -> None:
     output_by_input: dict[str, str] = {}
     video_metadata: list[dict[str, Any]] = []
     encoded_count = 0
+    mkvmerge_path = shutil.which("mkvmerge")
     for src, _dur in zip(videos, durations):
         st = os.stat(src)
         stem = sanitize_base(pathlib.Path(src).stem)
         ext = pathlib.Path(src).suffix
-        has_data_streams = has_data_stream(src)
-        muxer_for_src = _muxer_for_extension(ext) if ext else None
-        preserve_data_streams = False
         output_ext = OUT_EXT
-        if has_data_streams and ext and _muxer_supports_av1(muxer_for_src):
-            output_ext = ext
-            preserve_data_streams = True
-        should_copy_unknown = preserve_data_streams
-        if has_data_streams and ext and ext.lower() == ".mov":
-            should_copy_unknown = True
         out_name = f"{stem}{args.name_suffix}{output_ext}"
         metadata = {
             "dir": os.path.abspath(os.path.dirname(src)),
@@ -1000,6 +1045,9 @@ def main() -> None:
         h = _short_hash(os.path.abspath(src))
         stage_src = os.path.join(args.stage_dir, f"{stem}.{h}{ext}")
         stage_part = os.path.join(args.stage_dir, out_name + ".part")
+        ffmpeg_output = stage_part + ".ffmpeg"
+        remux_output = stage_part + ".mkvmerge"
+        timecodes_path = stage_part + ".timecodes"
         key = src_key(os.path.abspath(src), st)
         rec = manifest["items"].get(
             key, {"type": "video", "src": src, "output": out_name, "status": "pending"}
@@ -1033,7 +1081,13 @@ def main() -> None:
             logging.info("retrying previously started encode for %s", src)
             mark_pending()
 
-        for stale in (part_path, stage_part):
+        for stale in (
+            part_path,
+            stage_part,
+            ffmpeg_output,
+            remux_output,
+            timecodes_path,
+        ):
             if os.path.exists(stale):
                 try:
                     os.remove(stale)
@@ -1066,6 +1120,7 @@ def main() -> None:
             except FileNotFoundError:
                 pass
 
+        start_timecode = "00:00:00:00"
         try:
             if os.path.exists(stage_src):
                 try:
@@ -1075,15 +1130,13 @@ def main() -> None:
             if args.verbose:
                 logging.info("staging -> %s", stage_src)
             shutil.copy2(src, stage_src)
+            start_timecode = find_start_timecode(stage_src)
         except Exception as e:
             logging.error("failed to stage source %s -> %s: %s", src, stage_src, e)
             continue
 
         audio_kbps = max(1, int(audio_bps / 1000))
         muxer: Optional[str] = "matroska"
-        if preserve_data_streams:
-            muxer_candidate = _muxer_for_extension(output_ext)
-            muxer = muxer_candidate if muxer_candidate else None
         ff = [
             "ffmpeg",
         ]
@@ -1100,8 +1153,7 @@ def main() -> None:
                 "warning",
             ]
         ff.append("-y")
-        if not preserve_data_streams and not should_copy_unknown:
-            ff.append("-ignore_unknown")
+        ff.append("-ignore_unknown")
         ff += [
             "-i",
             stage_src,
@@ -1111,13 +1163,13 @@ def main() -> None:
             "0:a?",
             "-map",
             "0:s?",
-        ]
-        if preserve_data_streams:
-            ff += [
-                "-map",
-                "0:d?",
-            ]
-        ff += [
+            "-map",
+            "-0:d?",
+            "-copyts",
+            "-start_at_zero",
+            "1",
+            "-vsync",
+            "passthrough",
             "-fps_mode",
             "passthrough",
             "-c:v",
@@ -1135,34 +1187,20 @@ def main() -> None:
             "-svtav1-params",
             f"lp={args.svt_lp}",
         ]
-        if preserve_data_streams:
-            ff += [
-                "-c:a",
-                "copy",
-            ]
-        else:
-            ff += [
-                "-c:a",
-                "libopus",
-                "-b:a",
-                f"{audio_kbps}k",
-            ]
+        ff += [
+            "-c:a",
+            "libopus",
+            "-b:a",
+            f"{audio_kbps}k",
+        ]
         ff += [
             "-c:s",
             "copy",
         ]
-        if preserve_data_streams:
-            ff += [
-                "-c:d",
-                "copy",
-            ]
-        if should_copy_unknown:
-            ff.append("-copy_unknown")
-        if preserve_data_streams and output_ext.lower() == ".mov":
-            ff += [
-                "-brand",
-                "isom",
-            ]
+        ff += [
+            "-metadata",
+            f"timecode={start_timecode}",
+        ]
         if muxer == "matroska":
             ff += [
                 "-cues_to_front",
@@ -1175,7 +1213,7 @@ def main() -> None:
                 "-f",
                 muxer,
             ]
-        ff.append(stage_part)
+        ff.append(ffmpeg_output)
 
         rec.pop("error", None)
         rec.update(
@@ -1202,6 +1240,40 @@ def main() -> None:
             if p.returncode != 0:
                 logging.error("ffmpeg failed for %s", src)
                 mark_pending(f"ffmpeg exited with code {p.returncode}")
+                continue
+
+            produced_path = ffmpeg_output
+            if not os.path.exists(produced_path):
+                logging.error("expected encoded output missing for %s", src)
+                mark_pending("encoded output missing")
+                continue
+
+            if mkvmerge_path:
+                timecodes_written = write_timecodes_v2(stage_src, timecodes_path)
+                if timecodes_written:
+                    mkvmerge_cmd = [
+                        mkvmerge_path,
+                        "-o",
+                        remux_output,
+                        "--timestamps",
+                        f"0:{timecodes_path}",
+                        produced_path,
+                    ]
+                    _print_command(mkvmerge_cmd)
+                    mkvmerge_proc = subprocess.run(mkvmerge_cmd)
+                    if mkvmerge_proc.returncode == 0 and os.path.exists(remux_output):
+                        produced_path = remux_output
+                    else:
+                        logging.warning(
+                            "mkvmerge failed for %s; continuing with ffmpeg output",
+                            src,
+                        )
+
+            try:
+                os.replace(produced_path, stage_part)
+            except OSError as exc:
+                logging.error("failed to finalize encoded output for %s: %s", src, exc)
+                mark_pending("failed to finalize encoded output")
                 continue
 
             if not os.path.exists(stage_part):
@@ -1248,7 +1320,13 @@ def main() -> None:
                 metadata["used_original"] = True
 
         finally:
-            for pth in (stage_part, stage_src):
+            for pth in (
+                stage_part,
+                stage_src,
+                ffmpeg_output,
+                remux_output,
+                timecodes_path,
+            ):
                 try:
                     if os.path.exists(pth):
                         os.remove(pth)

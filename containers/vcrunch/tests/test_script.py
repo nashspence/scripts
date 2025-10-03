@@ -239,44 +239,6 @@ def test_copy_assets_skips_done(tmp_path):
     assert results == [(str(src), "asset.bin")]
 
 
-def test_has_data_stream(monkeypatch):
-    expected_cmd = [
-        "ffprobe",
-        "-hide_banner",
-        "-v",
-        "error",
-        "-show_entries",
-        "stream=codec_type",
-        "-of",
-        "json",
-        "sample.mkv",
-    ]
-
-    def fake_ffprobe_with_data(cmd):
-        assert cmd == expected_cmd
-        return {"streams": [{"codec_type": "data"}]}
-
-    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_with_data)
-    assert script.has_data_stream("sample.mkv") is True
-
-    monkeypatch.setattr(script, "ffprobe_json", lambda cmd: {"streams": []})
-    assert script.has_data_stream("sample.mkv") is False
-
-    def raise_called_process_error(cmd):
-        raise subprocess.CalledProcessError(1, cmd)
-
-    monkeypatch.setattr(script, "ffprobe_json", raise_called_process_error)
-    assert script.has_data_stream("sample.mkv") is False
-
-
-def test_muxer_for_extension():
-    assert script._muxer_for_extension(".mkv") == "matroska"
-    assert script._muxer_for_extension(".webm") == "webm"
-    assert script._muxer_for_extension(".mp4") == "mp4"
-    assert script._muxer_for_extension(".m2ts") == "mpegts"
-    assert script._muxer_for_extension(".unknown") == "unknown"
-
-
 def test_run_success(monkeypatch, capsys):
     def fake_run(cmd):
         class R:
@@ -540,8 +502,6 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     )
 
     monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
-    monkeypatch.setattr(script, "has_data_stream", lambda path: False)
-
     captured_cmds = []
 
     def fake_run(cmd, env=None):
@@ -578,7 +538,7 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     assert cmd[idx + 3] == "0"
 
 
-def test_mov_with_data_stream_uses_mov_container(monkeypatch, tmp_path):
+def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     video = src_dir / "clip.mov"
@@ -610,17 +570,21 @@ def test_mov_with_data_stream_uses_mov_container(monkeypatch, tmp_path):
         },
     )
     monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
-    monkeypatch.setattr(script, "has_data_stream", lambda path: path.endswith(".mov"))
+    monkeypatch.setattr(script, "find_start_timecode", lambda path: "01:02:03:04")
+    monkeypatch.setattr(script, "write_timecodes_v2", lambda src, dest: False)
+    monkeypatch.setattr(script.shutil, "which", lambda name: None)
 
     captured_cmds = []
 
     def fake_run(cmd, env=None):
         captured_cmds.append(cmd)
-        stage_part = Path(cmd[-1])
-        stage_part.write_bytes(b"encoded")
+        output_path = Path(cmd[-1])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"encoded")
 
         class R:
             returncode = 0
+            stdout = b""
 
         return R()
 
@@ -632,16 +596,21 @@ def test_mov_with_data_stream_uses_mov_container(monkeypatch, tmp_path):
     bundles = sorted(p for p in out_dir.iterdir() if p.is_dir())
     assert len(bundles) == 1
     bundle = bundles[0]
-    output_video = bundle / "clip.mov"
+    output_video = bundle / "clip.mkv"
     assert output_video.exists()
 
     cmd = captured_cmds[0]
-    assert "-copy_unknown" in cmd
-    assert "-brand" in cmd
-    brand_index = cmd.index("-brand")
-    assert cmd[brand_index + 1] == "isom"
+    assert cmd[0] == "ffmpeg"
+    assert "-ignore_unknown" in cmd
+    assert "-0:d?" in cmd
+    assert "-copyts" in cmd
+    assert "-start_at_zero" in cmd
+    metadata_index = cmd.index("-metadata")
+    assert cmd[metadata_index + 1] == "timecode=01:02:03:04"
     assert "-f" in cmd
-    assert cmd[cmd.index("-f") + 1] == "mov"
+    assert cmd[cmd.index("-f") + 1] == "matroska"
+    assert "-c:a" in cmd
+    assert cmd[cmd.index("-c:a") + 1] == "libopus"
 
 
 def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
@@ -683,7 +652,6 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
         },
     )
     monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
-    monkeypatch.setattr(script, "has_data_stream", lambda path: False)
 
     def fake_run(cmd, env=None):
         stage_part = Path(cmd[-1])
