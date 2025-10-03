@@ -60,3 +60,25 @@
 * And I run vcrunch
 * Then "<src>" is moved to "<out>"
 * And ".job.json" records "<src>" as done
+
+## Scenario: ignore dot-underscore files
+* Given a directory "<src>" containing a dot-underscore file "._clip.mov"
+* And "<src>" also contains a video "<video>"
+* And an output directory "<out>"
+* When I pass --input "<src>"
+* And I pass --output-dir "<out>"
+* And I run vcrunch
+* Then "._clip.mov" is ignored
+* And "<video>" is processed
+
+## Scenario: resume media probes
+* Given a directory "<src>" containing a video "<video>" and a non-video "<asset>"
+* And an output directory "<out>"
+* When I pass --input "<src>"
+* And I pass --output-dir "<out>"
+* And I run vcrunch
+* And I interrupt vcrunch after probe results are written
+* And I run vcrunch again with the same arguments
+* Then vcrunch resumes using the existing probe entries
+* And ".job.json" includes a "probes" entry for "<video>"
+* And ".job.json" includes a "probes" entry for "<asset>"
