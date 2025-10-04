@@ -1041,10 +1041,6 @@ def main() -> None:
             f"timecode={start_timecode}",
         ]
         ff += [
-            "-cues_to_front",
-            "1",
-            "-reserve_index_space",
-            "200k",
             "-f",
             "matroska",
         ]
