@@ -58,36 +58,6 @@ def test_ffprobe_duration(monkeypatch):
         script.ffprobe_duration("path")
 
 
-def test_detect_initial_empty_edit(monkeypatch):
-    def fake_ffprobe_json(cmd):
-        if "-show_format" in cmd:
-            return {"format": {"format_name": "mov,mp4"}}
-        return {
-            "streams": [
-                {"codec_type": "audio", "start_time": "0.0"},
-                {"codec_type": "video", "start_time": "1.5"},
-            ]
-        }
-
-    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
-    assert script.detect_initial_empty_edit("clip.mov") == pytest.approx(1.5)
-
-
-def test_detect_initial_empty_edit_non_qt(monkeypatch):
-    def fake_ffprobe_json(cmd):
-        if "-show_format" in cmd:
-            return {"format": {"format_name": "matroska"}}
-        return {
-            "streams": [
-                {"codec_type": "audio", "start_time": "0.0"},
-                {"codec_type": "video", "start_time": "2.0"},
-            ]
-        }
-
-    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
-    assert script.detect_initial_empty_edit("clip.mkv") == 0.0
-
-
 def test_probe_media_info_uses_stream_duration(monkeypatch):
     expected = [
         "ffprobe",
@@ -421,7 +391,6 @@ def test_copy_if_fits(monkeypatch, tmp_path):
     monkeypatch.setattr(
         script, "run", lambda cmd: (_ for _ in ()).throw(Exception("run"))
     )
-    monkeypatch.setattr(script, "detect_initial_empty_edit", lambda path: 0.0)
     script.main()
     assert (out_dir / "a.mp4").exists()
     assert (out_dir / "b.txt").exists()
@@ -454,7 +423,6 @@ def test_move_if_fits(monkeypatch, tmp_path):
         "probe_media_info",
         lambda path: {"is_video": path.endswith(".mp4"), "duration": 10.0},
     )
-    monkeypatch.setattr(script, "detect_initial_empty_edit", lambda path: 0.0)
     script.main()
     assert not video.exists()
     assert (out_dir / "a.mp4").exists()
@@ -509,7 +477,6 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
-    monkeypatch.setattr(script, "detect_initial_empty_edit", lambda path: 0.0)
 
     script.main()
 
@@ -582,7 +549,6 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
-    monkeypatch.setattr(script, "detect_initial_empty_edit", lambda path: 0.0)
 
     script.main()
 
@@ -595,89 +561,14 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     assert cmd[0] == "ffmpeg"
     assert "-ignore_unknown" in cmd
     assert "-0:d?" in cmd
-    expected_stage = (
-        stage_dir
-        / f"{script.sanitize_base(video.stem)}.{script._short_hash(str(video.resolve()))}{video.suffix}"
-    )
-    assert cmd.count("-i") == 1
-    copyts_index = cmd.index("-copyts")
-    assert cmd[copyts_index + 1] == "-start_at_zero"
-    assert cmd[copyts_index + 2] == "-i"
-    assert cmd[copyts_index + 3] == str(expected_stage)
+    assert "-copyts" in cmd
+    assert "-start_at_zero" in cmd
     metadata_index = cmd.index("-metadata")
     assert cmd[metadata_index + 1] == "timecode=01:02:03:04"
     assert "-f" in cmd
     assert cmd[cmd.index("-f") + 1] == "matroska"
     assert "-c:a" in cmd
     assert cmd[cmd.index("-c:a") + 1] == "libopus"
-
-
-def test_initial_empty_edit_trims_head(monkeypatch, tmp_path):
-    src_dir = tmp_path / "src"
-    src_dir.mkdir()
-    video = src_dir / "clip.mov"
-    video.write_bytes(b"v" * (2 * 1024 * 1024))
-    out_dir = tmp_path / "out"
-    stage_dir = tmp_path / "stage"
-    stage_dir.mkdir()
-
-    argv = [
-        "script.py",
-        "--input",
-        str(src_dir),
-        "--target-size",
-        "1M",
-        "--output-dir",
-        str(out_dir),
-        "--stage-dir",
-        str(stage_dir),
-        "--constant-quality",
-        "28",
-    ]
-    monkeypatch.setattr(sys, "argv", argv)
-    monkeypatch.setattr(
-        script,
-        "probe_media_info",
-        lambda path: {"is_video": path.endswith(".mov"), "duration": 60.0},
-    )
-    monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
-    monkeypatch.setattr(script, "find_start_timecode", lambda path: "00:00:00:00")
-    monkeypatch.setattr(script, "detect_initial_empty_edit", lambda path: 1.25)
-
-    captured_cmds: list[list[str]] = []
-
-    def fake_run(cmd, env=None):
-        captured_cmds.append(cmd)
-        Path(cmd[-1]).write_bytes(b"encoded")
-
-        class R:
-            returncode = 0
-
-        return R()
-
-    monkeypatch.setattr(script.subprocess, "run", fake_run)
-    monkeypatch.setattr(script, "is_valid_media", lambda path: True)
-
-    script.main()
-
-    cmd = captured_cmds[0]
-    assert "-ss" not in cmd
-    assert cmd.count("-i") == 2
-    expected_stage = (
-        stage_dir
-        / f"{script.sanitize_base(video.stem)}.{script._short_hash(str(video.resolve()))}{video.suffix}"
-    )
-    copyts_index = cmd.index("-copyts")
-    assert cmd[copyts_index + 1] == "-start_at_zero"
-    assert cmd[copyts_index + 2] == "-i"
-    assert cmd[copyts_index + 3] == str(expected_stage)
-    itsoffset_index = cmd.index("-itsoffset")
-    assert cmd[itsoffset_index + 1] == "1.250000"
-    assert cmd[itsoffset_index + 2] == "-i"
-    assert cmd[itsoffset_index + 3] == str(expected_stage)
-    map_positions = [i for i, part in enumerate(cmd) if part == "-map"]
-    assert cmd[map_positions[0] + 1] == "0:v:0"
-    assert cmd[map_positions[1] + 1] == "1:a?"
 
 
 def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
@@ -731,7 +622,6 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
-    monkeypatch.setattr(script, "detect_initial_empty_edit", lambda path: 0.0)
 
     script.main()
 
