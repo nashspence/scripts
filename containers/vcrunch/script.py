@@ -1019,8 +1019,6 @@ def main() -> None:
         else:
             ff += ["-b:v", f"{global_video_kbps}k"]
         ff += [
-            "-g",
-            "240",
             "-preset",
             "5",
             "-svtav1-params",
