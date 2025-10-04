@@ -318,6 +318,85 @@ def ffprobe_duration(path: str) -> float:
     return float(duration)
 
 
+def detect_initial_empty_edit(
+    path: str,
+    head_sec: float = 3.0,
+    tol_a0: float = 0.10,
+    min_gap: float = 0.25,
+    max_gap: float = 3.00,
+) -> float:
+    """Detect QuickTime/MOV style initial empty edits.
+
+    Many older QuickTime encodes include an empty edit list entry that delays the
+    video stream, causing the first video frame timestamp to start after the
+    audio. When detected, we return the start time of the video stream so that
+    callers can trim the gap.
+    """
+
+    try:
+        fmt = ffprobe_json(
+            ["ffprobe", "-v", "error", "-show_format", "-of", "json", path]
+        )
+    except Exception:
+        return 0.0
+
+    fmt_info = fmt.get("format")
+    fmt_name = ""
+    if isinstance(fmt_info, dict):
+        fmt_name = str(fmt_info.get("format_name", ""))
+    container_names = {name.strip() for name in fmt_name.split(",") if name.strip()}
+    is_qt = bool(container_names & {"mov", "mp4", "m4a", "3gp", "3g2", "mj2"})
+
+    if not is_qt:
+        return 0.0
+
+    try:
+        streams = ffprobe_json(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=index,codec_type,start_time",
+                "-select_streams",
+                "a:0,v:0",
+                "-of",
+                "json",
+                path,
+            ]
+        ).get("streams", [])
+    except Exception:
+        return 0.0
+
+    a_start: Optional[float] = None
+    v_start: Optional[float] = None
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        start = stream.get("start_time")
+        if start is None:
+            continue
+        try:
+            start_val = float(start)
+        except (TypeError, ValueError):
+            continue
+        codec_type = stream.get("codec_type")
+        if codec_type == "audio":
+            a_start = start_val
+        elif codec_type == "video":
+            v_start = start_val
+
+    if v_start is None or a_start is None:
+        return 0.0
+
+    if v_start > head_sec:
+        return 0.0
+
+    if a_start <= tol_a0 and min_gap <= v_start <= max_gap:
+        return max(0.0, v_start)
+    return 0.0
+
+
 def is_valid_media(path: str) -> bool:
     try:
         return ffprobe_duration(path) > 0.0
@@ -978,6 +1057,15 @@ def main() -> None:
             mark_pending(f"failed to stage source: {e}")
             continue
 
+        initial_trim = 0.0
+        try:
+            initial_trim = detect_initial_empty_edit(stage_src)
+        except Exception as exc:
+            logging.debug(
+                "initial empty edit detection failed for %s: %s", stage_src, exc
+            )
+            initial_trim = 0.0
+
         audio_kbps = max(1, int(audio_bps / 1000))
         ff = [
             "ffmpeg",
@@ -996,19 +1084,50 @@ def main() -> None:
             ]
         ff.append("-y")
         ff.append("-ignore_unknown")
+        maps: list[str]
+        if initial_trim > 0.0:
+            logging.info(
+                "detected initial empty edit of %.3fs; trimming head", initial_trim
+            )
+            ff += [
+                "-copyts",
+                "-start_at_zero",
+                "-i",
+                stage_src,
+                "-itsoffset",
+                f"{initial_trim:.6f}",
+                "-i",
+                stage_src,
+            ]
+            maps = [
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a?",
+                "-map",
+                "0:s?",
+                "-map",
+                "-0:d?",
+            ]
+        else:
+            ff += [
+                "-copyts",
+                "-start_at_zero",
+                "-i",
+                stage_src,
+            ]
+            maps = [
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-map",
+                "0:s?",
+                "-map",
+                "-0:d?",
+            ]
         ff += [
-            "-i",
-            stage_src,
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a?",
-            "-map",
-            "0:s?",
-            "-map",
-            "-0:d?",
-            "-copyts",
-            "-start_at_zero",
+            *maps,
             "-fps_mode",
             "passthrough",
             "-c:v",
