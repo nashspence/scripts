@@ -475,6 +475,14 @@ def copy_assets(
                 logging.warning(
                     "manifest marks asset done but output missing: %s", output_path
                 )
+                if manifest_dict is not None and manifest_items is not None:
+                    new_record = dict(record)
+                    new_record["status"] = "pending"
+                    new_record["error"] = "output missing"
+                    new_record.pop("finished_at", None)
+                    manifest_items[key] = new_record
+                    if manifest_path:
+                        save_manifest(manifest_dict, manifest_path)
                 record = None
 
         dest_dir = os.path.dirname(dest)
@@ -497,10 +505,26 @@ def copy_assets(
                     "status": "done",
                     "finished_at": now_utc_iso(),
                 }
+                manifest_items[key].pop("error", None)
                 if manifest_path:
                     save_manifest(manifest_dict, manifest_path)
         except Exception as e:
             logging.error("failed to copy asset %s -> %s: %s", src, dest, e)
+            if (
+                manifest_items is not None
+                and key is not None
+                and manifest_dict is not None
+            ):
+                manifest_items[key] = {
+                    "type": "asset",
+                    "src": src,
+                    "output": dest_name,
+                    "status": "pending",
+                    "error": str(e),
+                }
+                manifest_items[key].pop("finished_at", None)
+                if manifest_path:
+                    save_manifest(manifest_dict, manifest_path)
     return copied
 
 
@@ -617,12 +641,6 @@ def main() -> None:
     os.makedirs(args.stage_dir, exist_ok=True)
     manifest_path = os.path.join(args.output_dir, args.manifest_name)
     manifest = load_manifest(manifest_path)
-    if all_videos_done(manifest, args.output_dir):
-        logging.warning(
-            "already complete; manifest indicates all videos are done and outputs are valid"
-        )
-        logging.info("manifest: %s", manifest_path)
-        return
 
     inputs: List[str] = []
     if args.paths_from:
@@ -632,6 +650,40 @@ def main() -> None:
     if not all_files:
         logging.error("no input files found")
         sys.exit(1)
+
+    def manifest_covers_inputs() -> bool:
+        items = manifest.get("items")
+        if not isinstance(items, dict):
+            return False
+        for src in all_files:
+            try:
+                st = os.stat(src)
+            except FileNotFoundError:
+                continue
+            key = src_key(os.path.abspath(src), st)
+            rec = items.get(key)
+            if not isinstance(rec, dict):
+                return False
+            if rec.get("status") != "done":
+                return False
+            output_rel = rec.get("output")
+            if not output_rel:
+                return False
+            output_path = os.path.join(args.output_dir, os.path.normpath(output_rel))
+            if rec.get("type") == "video":
+                if not (os.path.exists(output_path) and is_valid_media(output_path)):
+                    return False
+            else:
+                if not os.path.exists(output_path):
+                    return False
+        return True
+
+    if all_videos_done(manifest, args.output_dir) and manifest_covers_inputs():
+        logging.warning(
+            "already complete; manifest indicates all videos are done and outputs are valid"
+        )
+        logging.info("manifest: %s", manifest_path)
+        return
 
     probes_val = manifest.get("probes")
     if not isinstance(probes_val, dict):
@@ -923,6 +975,7 @@ def main() -> None:
             start_timecode = find_start_timecode(stage_src)
         except Exception as e:
             logging.error("failed to stage source %s -> %s: %s", src, stage_src, e)
+            mark_pending(f"failed to stage source: {e}")
             continue
 
         audio_kbps = max(1, int(audio_bps / 1000))
@@ -1061,6 +1114,7 @@ def main() -> None:
                     logging.error(
                         "failed to copy original source to output for %s: %s", src, e
                     )
+                    mark_pending("failed to copy original source to output")
                     continue
             else:
                 try:
