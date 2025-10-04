@@ -4,7 +4,6 @@
 
 import io
 import json
-import os
 import subprocess
 import sys
 import types
@@ -429,44 +428,6 @@ def test_move_if_fits(monkeypatch, tmp_path):
     assert (out_dir / "a.mp4").exists()
 
 
-def test_group_outputs_by_target_size(tmp_path):
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-    files = {
-        "a.mkv": 400_000,
-        "b.mkv": 400_000,
-        "c.txt": 300_000,
-    }
-    for name, size in files.items():
-        path = out_dir / name
-        path.write_bytes(b"x" * size)
-    manifest = {
-        "items": {
-            "1": {"type": "video", "output": "a.mkv"},
-            "2": {"type": "video", "output": "b.mkv"},
-        }
-    }
-    script.group_outputs_by_target_size(
-        str(out_dir),
-        manifest,
-        ".job.json",
-        700_000,
-        ["a.mkv", "b.mkv", "c.txt"],
-    )
-    dir1 = out_dir / "01"
-    dir2 = out_dir / "02"
-    assert dir1.is_dir()
-    assert dir2.is_dir()
-    assert sorted(p.name for p in dir1.iterdir()) == ["a.mkv"]
-    assert sorted(p.name for p in dir2.iterdir()) == ["b.mkv", "c.txt"]
-    assert os.path.normpath(manifest["items"]["1"]["output"]) == os.path.join(
-        "01", "a.mkv"
-    )
-    assert os.path.normpath(manifest["items"]["2"]["output"]) == os.path.join(
-        "02", "b.mkv"
-    )
-
-
 def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
@@ -520,16 +481,15 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     script.main()
 
     dirs = sorted(p.name for p in out_dir.iterdir() if p.is_dir())
-    assert dirs == ["01"]
-    bundle = out_dir / "01"
-    video_out = bundle / "a.mkv"
-    asset_out = bundle / "notes.txt"
+    assert dirs == []
+    video_out = out_dir / "a.mkv"
+    asset_out = out_dir / "notes.txt"
     assert video_out.exists()
     assert asset_out.exists()
 
     manifest_data = json.loads((out_dir / ".job.json").read_text())
     rec = next(iter(manifest_data["items"].values()))
-    assert rec["output"].startswith("01" + os.sep)
+    assert rec["output"] == "a.mkv"
     cmd = captured_cmds[0]
     assert "-crf" in cmd
     idx = cmd.index("-crf")
@@ -593,9 +553,8 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     script.main()
 
     bundles = sorted(p for p in out_dir.iterdir() if p.is_dir())
-    assert len(bundles) == 1
-    bundle = bundles[0]
-    output_video = bundle / "clip.mkv"
+    assert bundles == []
+    output_video = out_dir / "clip.mkv"
     assert output_video.exists()
 
     cmd = captured_cmds[0]
@@ -667,12 +626,11 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
     script.main()
 
     bundles = sorted(p for p in out_dir.iterdir() if p.is_dir())
-    assert len(bundles) == 1
-    bundle = bundles[0]
+    assert bundles == []
 
-    assert (bundle / "a.mkv").exists()
-    assert (bundle / "a.mkv.srt").exists()
-    assert (bundle / "a.mkv.nfo").exists()
-    assert (bundle / "other.txt").exists()
-    assert not (bundle / "a.mp4.srt").exists()
-    assert not (bundle / "a.mp4.nfo").exists()
+    assert (out_dir / "a.mkv").exists()
+    assert (out_dir / "a.mkv.srt").exists()
+    assert (out_dir / "a.mkv.nfo").exists()
+    assert (out_dir / "other.txt").exists()
+    assert not (out_dir / "a.mp4.srt").exists()
+    assert not (out_dir / "a.mp4.nfo").exists()
