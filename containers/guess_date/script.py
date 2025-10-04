@@ -1049,10 +1049,22 @@ def format_output(representative: CandidateRecord) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def serialize_output(representative: CandidateRecord, *, json_output: bool) -> str:
+    formatted = format_output(representative)
+    if not json_output:
+        return formatted
+    payload = {
+        "creation_date": formatted,
+        "source": representative.src,
+    }
+    return json.dumps(payload)
+
+
 def choose_and_output(
     aggregated: Sequence[AggregatedGroup],
     *,
     stdin: TextIO | None = None,
+    json_output: bool = False,
 ) -> int:
     if not aggregated:
         return 1
@@ -1060,15 +1072,15 @@ def choose_and_output(
     input_stream = stdin or sys.stdin
     top = aggregated[0]
     if len(aggregated) == 1:
-        print(format_output(top.representative), end="")
+        print(serialize_output(top.representative, json_output=json_output), end="")
         return 0
 
     if abs(aggregated[0].score - aggregated[1].score) > 3:
-        print(format_output(top.representative), end="")
+        print(serialize_output(top.representative, json_output=json_output), end="")
         return 0
 
     if not input_stream.isatty():
-        print(format_output(top.representative), end="")
+        print(serialize_output(top.representative, json_output=json_output), end="")
         return 0
 
     options = [entry.representative for entry in aggregated[:3]]
@@ -1082,13 +1094,19 @@ def choose_and_output(
         choice = input_stream.readline().strip()
         selected = int(choice)
     except ValueError:
-        print(format_output(top.representative), end="")
+        print(serialize_output(top.representative, json_output=json_output), end="")
         return 0
 
     if 1 <= selected <= len(options):
-        print(format_output(options[selected - 1]), end="")
+        print(
+            serialize_output(
+                options[selected - 1],
+                json_output=json_output,
+            ),
+            end="",
+        )
     else:
-        print(format_output(top.representative), end="")
+        print(serialize_output(top.representative, json_output=json_output), end="")
     return 0
 
 
@@ -1103,6 +1121,11 @@ def main(argv: list[str] | None = None) -> int:
         "--fail-on-mtime-only",
         action="store_true",
         help="exit with status 1 when filesystem mtime is the only available timestamp",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="output the selected creation date and source as JSON",
     )
     parser.add_argument("path", help="path to the media file to inspect")
 
@@ -1131,7 +1154,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     aggregated = cluster_and_score(candidates)
-    return choose_and_output(aggregated)
+    return choose_and_output(aggregated, json_output=options.json)
 
 
 if __name__ == "__main__":
