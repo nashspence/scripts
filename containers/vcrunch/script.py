@@ -891,6 +891,7 @@ def main() -> None:
         h = _short_hash(os.path.abspath(src))
         stage_src = os.path.join(args.stage_dir, f"{stem}.{h}{ext}")
         stage_part = os.path.join(args.stage_dir, out_name + ".part")
+        remux_output = stage_part + ".mkvmerge"
         ffmpeg_output = stage_part + ".ffmpeg"
         key = src_key(os.path.abspath(src), st)
         rec = manifest["items"].get(
@@ -928,6 +929,7 @@ def main() -> None:
         for stale in (
             part_path,
             stage_part,
+            remux_output,
             ffmpeg_output,
         ):
             if os.path.exists(stale):
@@ -1115,6 +1117,33 @@ def main() -> None:
                     mark_pending("failed to copy original source to output")
                     continue
             else:
+                mux_cmd = [
+                    "mkvmerge",
+                    "-o",
+                    remux_output,
+                    stage_part,
+                ]
+                _print_command(mux_cmd)
+                mux_proc = subprocess.run(mux_cmd)
+                if mux_proc.returncode != 0:
+                    logging.error("mkvmerge failed for %s", src)
+                    mark_pending(f"mkvmerge exited with code {mux_proc.returncode}")
+                    continue
+
+                if not os.path.exists(remux_output):
+                    logging.error("expected remuxed output missing for %s", src)
+                    mark_pending("remuxed output missing")
+                    continue
+
+                try:
+                    os.replace(remux_output, stage_part)
+                except OSError as exc:
+                    logging.error(
+                        "failed to finalize remuxed output for %s: %s", src, exc
+                    )
+                    mark_pending("failed to finalize remuxed output")
+                    continue
+
                 try:
                     shutil.copy2(stage_part, part_path)
                 except Exception as e:
@@ -1135,6 +1164,7 @@ def main() -> None:
         finally:
             for pth in (
                 stage_part,
+                remux_output,
                 stage_src,
                 ffmpeg_output,
             ):

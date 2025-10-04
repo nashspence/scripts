@@ -467,8 +467,13 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
 
     def fake_run(cmd, env=None):
         captured_cmds.append(cmd)
-        stage_part = Path(cmd[-1])
-        stage_part.write_bytes(b"encoded")
+        if cmd[0] == "ffmpeg":
+            stage_part = Path(cmd[-1])
+            stage_part.write_bytes(b"encoded")
+        elif cmd[0] == "mkvmerge":
+            output_path = Path(cmd[2])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"remuxed")
 
         class R:
             returncode = 0
@@ -537,9 +542,14 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
 
     def fake_run(cmd, env=None):
         captured_cmds.append(cmd)
-        output_path = Path(cmd[-1])
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(b"encoded")
+        if cmd[0] == "ffmpeg":
+            output_path = Path(cmd[-1])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"encoded")
+        elif cmd[0] == "mkvmerge":
+            output_path = Path(cmd[2])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"remuxed")
 
         class R:
             returncode = 0
@@ -612,8 +622,13 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
     monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
 
     def fake_run(cmd, env=None):
-        stage_part = Path(cmd[-1])
-        stage_part.write_bytes(b"encoded")
+        if cmd[0] == "ffmpeg":
+            stage_part = Path(cmd[-1])
+            stage_part.write_bytes(b"encoded")
+        elif cmd[0] == "mkvmerge":
+            output_path = Path(cmd[2])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"remuxed")
 
         class R:
             returncode = 0
