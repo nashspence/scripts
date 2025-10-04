@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import types
@@ -470,3 +471,37 @@ def test_main_allows_other_sources_with_mtime(
     captured = capsys.readouterr()
     assert rc == 0
     assert captured.out == dt.isoformat()
+
+
+def test_main_outputs_json(monkeypatch: Any, tmp_path: Path, capsys: Any) -> None:
+    file_path = tmp_path / "example.mov"
+    file_path.write_bytes(b"data")
+
+    dt = datetime(2024, 5, 6, 7, 8, 9, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        "containers.guess_date.script.extract_from_exiftool",
+        lambda _: [("exif:DateTimeOriginal", dt, 98, True, False)],
+    )
+    monkeypatch.setattr(
+        "containers.guess_date.script.extract_from_ffprobe", lambda _: []
+    )
+    monkeypatch.setattr(
+        "containers.guess_date.script.extract_from_mediainfo", lambda _: []
+    )
+    monkeypatch.setattr("containers.guess_date.script.extract_sidecars", lambda _: [])
+    monkeypatch.setattr(
+        "containers.guess_date.script.file_system_candidates",
+        lambda _: [
+            ("fs:mtime", dt.replace(tzinfo=None), 60, False, False),
+            ("fs:ctime", dt.replace(tzinfo=None), 55, False, False),
+        ],
+    )
+
+    rc = script.main(["--json", os.fspath(file_path)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert payload == {
+        "creation_date": dt.isoformat(),
+        "source": "exif:DateTimeOriginal",
+    }
