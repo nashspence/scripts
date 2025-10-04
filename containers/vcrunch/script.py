@@ -504,163 +504,6 @@ def copy_assets(
     return copied
 
 
-def group_outputs_by_target_size(
-    output_dir: str,
-    manifest: dict[str, Any],
-    manifest_name: str,
-    target_bytes: int,
-    ordered_relpaths: Sequence[str],
-) -> None:
-    if target_bytes <= 0:
-        logging.warning("target bytes <= 0; skipping grouping into directories")
-        return
-
-    files: list[tuple[str, int]] = []
-    for root, _, filenames in os.walk(output_dir):
-        for name in filenames:
-            rel = os.path.relpath(os.path.join(root, name), output_dir)
-            norm_rel = os.path.normpath(rel)
-            if os.path.normpath(manifest_name) == norm_rel:
-                continue
-            if name.endswith(".part"):
-                continue
-            path = os.path.join(output_dir, rel)
-            try:
-                size = os.path.getsize(path)
-            except FileNotFoundError:
-                continue
-            files.append((rel, size))
-
-    if not files:
-        return
-
-    order_map: dict[str, int] = {}
-    for idx, rel in enumerate(ordered_relpaths):
-        norm = os.path.normpath(rel)
-        if norm not in order_map:
-            order_map[norm] = idx
-
-    def sort_key(item: tuple[str, int]) -> tuple[int, int | str, str]:
-        rel, _size = item
-        norm_rel = os.path.normpath(rel)
-        if norm_rel in order_map:
-            return (0, order_map[norm_rel], norm_rel)
-        return (1, norm_rel.lower(), norm_rel)
-
-    files.sort(key=sort_key)
-
-    filtered_files: list[tuple[str, int]] = []
-    seen_names: set[str] = set()
-    for rel, size in files:
-        base = pathlib.Path(rel).name
-        if base in seen_names:
-            try:
-                os.remove(os.path.join(output_dir, rel))
-            except OSError:
-                pass
-            continue
-        seen_names.add(base)
-        filtered_files.append((rel, size))
-
-    files = filtered_files
-
-    groups: list[list[tuple[str, int]]] = []
-    current: list[tuple[str, int]] = []
-    current_size = 0
-    for rel, size in files:
-        if current and current_size + size > target_bytes:
-            groups.append(current)
-            current = []
-            current_size = 0
-        current.append((rel, size))
-        current_size += size
-    if current:
-        groups.append(current)
-
-    tmp_base = os.path.join(output_dir, ".vcrunch_grouping")
-    if os.path.exists(tmp_base):
-        shutil.rmtree(tmp_base)
-    os.makedirs(tmp_base, exist_ok=True)
-
-    dest_rel_map: dict[str, str] = {}
-    used_names: set[str] = set()
-
-    def unique_name(name: str) -> str:
-        if name not in used_names:
-            used_names.add(name)
-            return name
-        stem, ext = os.path.splitext(name)
-        idx = 1
-        while True:
-            candidate = f"{stem}_{idx}{ext}"
-            if candidate not in used_names:
-                used_names.add(candidate)
-                return candidate
-            idx += 1
-
-    for idx, group in enumerate(groups, start=1):
-        subdir_name = f"{idx:02d}"
-        subdir_tmp = os.path.join(tmp_base, subdir_name)
-        os.makedirs(subdir_tmp, exist_ok=True)
-        for rel, _ in group:
-            src = os.path.join(output_dir, rel)
-            if not os.path.exists(src):
-                continue
-            dest_name = unique_name(os.path.basename(rel))
-            dest_rel = os.path.normpath(os.path.join(subdir_name, dest_name))
-            dest_path = os.path.join(subdir_tmp, dest_name)
-            if os.path.exists(dest_path):
-                os.remove(dest_path)
-            shutil.move(src, dest_path)
-            dest_rel_map[os.path.normpath(rel)] = dest_rel
-
-    for root_dir, dirs, _ in os.walk(output_dir, topdown=False):
-        if os.path.normpath(root_dir) == os.path.normpath(tmp_base):
-            continue
-        if os.path.normpath(root_dir) == os.path.normpath(output_dir):
-            continue
-        for d in dirs:
-            d_path = os.path.join(root_dir, d)
-            if os.path.normpath(d_path) == os.path.normpath(tmp_base):
-                continue
-            try:
-                os.rmdir(d_path)
-            except OSError:
-                pass
-
-    for idx, _ in enumerate(groups, start=1):
-        subdir_name = f"{idx:02d}"
-        src_dir = os.path.join(tmp_base, subdir_name)
-        dest_dir = os.path.join(output_dir, subdir_name)
-        if os.path.exists(dest_dir):
-            shutil.rmtree(dest_dir)
-        if os.path.exists(src_dir):
-            shutil.move(src_dir, dest_dir)
-
-    shutil.rmtree(tmp_base, ignore_errors=True)
-
-    manifest_items = manifest.get("items", {})
-    output_map: dict[str, dict[str, Any]] = {}
-    for rec in manifest_items.values():
-        if rec.get("type") != "video":
-            continue
-        output_rel = rec.get("output")
-        if not output_rel:
-            continue
-        output_map[os.path.normpath(output_rel)] = rec
-
-    for original_rel, new_rel in dest_rel_map.items():
-        rec = output_map.get(original_rel)
-        if rec is not None:
-            rec["output"] = new_rel
-
-    logging.info(
-        "grouped outputs into %d director%s",
-        len(groups),
-        "y" if len(groups) == 1 else "ies",
-    )
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Encode videos (SVT-AV1) with resume manifest. Non-video files are copied to the output directory."
@@ -966,9 +809,7 @@ def main() -> None:
         f"{total_audio_bytes:,}",
     )
     if videos:
-        if use_constant_quality:
-            logging.info("constant quality mode: files will be grouped by target size")
-        else:
+        if not use_constant_quality:
             logging.info(
                 "video budget bytes: %s; avg video bitrate: %s kbps (using %s kbps)",
                 f"{max(0, video_budget_bytes):,}",
@@ -1288,13 +1129,6 @@ def main() -> None:
             ordered_outputs.append(dest_rel)
 
     if use_constant_quality:
-        group_outputs_by_target_size(
-            args.output_dir,
-            manifest,
-            args.manifest_name,
-            target_bytes,
-            ordered_outputs,
-        )
         save_manifest(manifest, manifest_path)
     logging.warning("videos encoded (this run): %d / %d", encoded_count, len(videos))
     if all_videos_done(manifest, args.output_dir):
