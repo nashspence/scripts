@@ -274,6 +274,63 @@ def test_copy_assets_skips_done(tmp_path):
     assert results == [(str(src), "asset.bin")]
 
 
+def test_copy_assets_preserves_metadata(tmp_path):
+    src = tmp_path / "asset.bin"
+    src.write_text("content")
+    ts = 1_600_000_000
+    os.utime(src, (ts, ts))
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    results = script.copy_assets([str(src)], str(out_dir))
+
+    dest = out_dir / "asset.bin"
+    assert dest.exists()
+    assert results == [(str(src), "asset.bin")]
+    assert int(dest.stat().st_mtime) == ts
+
+
+def test_copy_assets_renames_and_preserves_metadata(tmp_path):
+    src = tmp_path / "asset.txt"
+    src.write_text("content")
+    ts = 1_700_000_000
+    os.utime(src, (ts, ts))
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    old_dest = out_dir / "old.txt"
+    old_dest.write_text("old")
+    os.utime(old_dest, (1_500_000_000, 1_500_000_000))
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest = {"items": {}, "probes": {}}
+    src_stat = src.stat()
+    key = script.src_key(str(src.resolve()), src_stat)
+    manifest["items"][key] = {
+        "type": "asset",
+        "src": str(src),
+        "output": "old.txt",
+        "status": "done",
+        "finished_at": "2024-01-01T00:00:00Z",
+    }
+
+    results = script.copy_assets(
+        [str(src)],
+        str(out_dir),
+        rename_map={str(src): "new.txt"},
+        manifest=manifest,
+        manifest_path=str(manifest_path),
+    )
+
+    new_dest = out_dir / "new.txt"
+    assert not old_dest.exists()
+    assert new_dest.exists()
+    assert results == [(str(src), "new.txt")]
+    assert int(new_dest.stat().st_mtime) == ts
+    assert manifest["items"][key]["output"] == "new.txt"
+
+
 def test_run_success(monkeypatch, capsys):
     def fake_run(cmd):
         class R:
