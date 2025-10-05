@@ -4,10 +4,11 @@
 
 import io
 import json
+import os
 import subprocess
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -538,11 +539,13 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     assert cmd[idx + 3] == "0"
 
 
-def test_mkvmerge_preserves_creation_date(monkeypatch, tmp_path):
+def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     video = src_dir / "a.mp4"
     video.write_bytes(b"v" * (2 * 1024 * 1024))
+    desired_mtime = datetime(2020, 1, 1, 12, 30, tzinfo=timezone.utc).timestamp()
+    os.utime(video, (desired_mtime, desired_mtime))
     out_dir = tmp_path / "out"
     stage_dir = tmp_path / "stage"
     stage_dir.mkdir()
@@ -578,7 +581,8 @@ def test_mkvmerge_preserves_creation_date(monkeypatch, tmp_path):
         lambda path: "2024-09-28T15:42:11Z",
     )
 
-    captured_cmds: list[list[str]] = []
+    captured_mux_cmds: list[list[str]] = []
+    captured_edit_cmds: list[list[str]] = []
 
     def fake_run(cmd, env=None, **kwargs):
         if cmd[0] == "ffmpeg":
@@ -586,10 +590,13 @@ def test_mkvmerge_preserves_creation_date(monkeypatch, tmp_path):
             stage_part.write_bytes(b"encoded")
             return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         if cmd[0] == "mkvmerge":
-            captured_cmds.append(cmd)
+            captured_mux_cmds.append(cmd)
             output_path = Path(cmd[2])
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"remuxed")
+            return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if cmd[0] == "mkvpropedit":
+            captured_edit_cmds.append(cmd)
             return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         return types.SimpleNamespace(returncode=0, stdout=b"{}", stderr=b"")
 
@@ -600,12 +607,19 @@ def test_mkvmerge_preserves_creation_date(monkeypatch, tmp_path):
 
     output_video = out_dir / "a.mkv"
     assert output_video.exists()
-    assert captured_cmds
-    mkv_cmd = captured_cmds[0]
+    assert captured_mux_cmds
+    mkv_cmd = captured_mux_cmds[0]
     assert "--disable-track-statistics-tags" in mkv_cmd
-    assert "--date" in mkv_cmd
-    date_index = mkv_cmd.index("--date")
-    assert mkv_cmd[date_index + 1] == "2024-09-28T15:42:11Z"
+    assert captured_edit_cmds
+    prop_cmd = captured_edit_cmds[0]
+    assert prop_cmd[0] == "mkvpropedit"
+    assert prop_cmd[1].endswith(".part")
+    assert "--edit" in prop_cmd
+    assert "--set" in prop_cmd
+    set_index = prop_cmd.index("--set")
+    assert prop_cmd[set_index + 1] == "date=2024-09-28T15:42:11Z"
+    out_stat = output_video.stat()
+    assert pytest.approx(out_stat.st_mtime, rel=0, abs=1) == desired_mtime
 
 
 def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):

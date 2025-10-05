@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pathlib
+import platform
 import shlex
 import shutil
 import subprocess
@@ -28,6 +29,57 @@ def _print_command(cmd: Sequence[str]) -> None:
         return
     cmdline = " ".join(shlex.quote(str(part)) for part in cmd)
     print(cmdline, file=sys.stderr)
+
+
+def _apply_birthtime(path: str, birthtime: float) -> None:
+    if platform.system() != "Darwin":
+        return
+    setfile = shutil.which("SetFile")
+    if not setfile:
+        logging.debug("SetFile unavailable; skipping birthtime update for %s", path)
+        return
+    try:
+        dt = datetime.fromtimestamp(birthtime, tz=timezone.utc).astimezone()
+    except (OSError, OverflowError, ValueError) as exc:
+        logging.debug("cannot convert birthtime for %s: %s", path, exc)
+        return
+    formatted = dt.strftime("%m/%d/%Y %H:%M:%S")
+    cmd = [setfile, "-d", formatted, path]
+    try:
+        _print_command(cmd)
+        proc = subprocess.run(cmd)
+    except OSError as exc:
+        logging.debug("failed to execute SetFile for %s: %s", path, exc)
+        return
+    if proc.returncode != 0:
+        logging.debug("SetFile exited with %s for %s", proc.returncode, path)
+
+
+def _apply_source_timestamps(
+    src: str, dest: str, st: Optional[os.stat_result] = None
+) -> None:
+    try:
+        stat_result = st if st is not None else os.stat(src)
+    except OSError as exc:
+        logging.debug("failed to stat %s for timestamp copy: %s", src, exc)
+        return
+
+    atime_ns = getattr(
+        stat_result, "st_atime_ns", int(stat_result.st_atime * 1_000_000_000)
+    )
+    mtime_ns = getattr(
+        stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000)
+    )
+
+    try:
+        os.utime(dest, ns=(atime_ns, mtime_ns))
+    except OSError as exc:
+        logging.debug("failed to update timestamps for %s: %s", dest, exc)
+        return
+
+    birthtime = getattr(stat_result, "st_birthtime", None)
+    if birthtime is not None:
+        _apply_birthtime(dest, birthtime)
 
 
 class MediaPreset(TypedDict):
@@ -1209,8 +1261,27 @@ def main() -> None:
                     mark_pending("failed to finalize remuxed output")
                     continue
 
+                if original_creation_date:
+                    prop_cmd = [
+                        "mkvpropedit",
+                        stage_part,
+                        "--edit",
+                        "info",
+                        "--set",
+                        f"date={original_creation_date}",
+                    ]
+                    _print_command(prop_cmd)
+                    prop_proc = subprocess.run(prop_cmd)
+                    if prop_proc.returncode != 0:
+                        logging.error("mkvpropedit failed for %s", src)
+                        mark_pending(
+                            f"mkvpropedit exited with code {prop_proc.returncode}"
+                        )
+                        continue
+
                 try:
                     shutil.copy2(stage_part, part_path)
+                    _apply_source_timestamps(src, part_path, st)
                 except Exception as e:
                     logging.error("failed to copy staged result to output: %s", e)
                     mark_pending("failed to copy staged result")
