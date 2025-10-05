@@ -210,6 +210,72 @@ def find_start_timecode(path: str) -> str:
     return "00:00:00:00"
 
 
+def _parse_creation_date(value: str) -> Optional[str]:
+    s = value.strip()
+    if not s:
+        return None
+
+    candidates = [s]
+    if "T" not in s and " " in s:
+        candidates.append(s.replace(" ", "T", 1))
+
+    for candidate in candidates:
+        fixed = candidate
+        if fixed.endswith("Z"):
+            fixed = fixed[:-1] + "+00:00"
+        elif fixed.endswith("+0000"):
+            fixed = fixed[:-5] + "+00:00"
+
+        try:
+            dt = datetime.fromisoformat(fixed)
+        except ValueError:
+            continue
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+
+        return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    return None
+
+
+def get_container_creation_date(path: str) -> Optional[str]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_entries",
+        "format_tags=creation_time,com.apple.quicktime.creationdate",
+        path,
+    ]
+
+    try:
+        data = ffprobe_json(cmd)
+    except Exception:
+        return None
+
+    fmt = data.get("format")
+    if not isinstance(fmt, dict):
+        return None
+
+    tags = fmt.get("tags")
+    if not isinstance(tags, dict):
+        return None
+
+    for key in ("creation_time", "com.apple.quicktime.creationdate"):
+        value = tags.get(key)
+        if isinstance(value, str):
+            parsed = _parse_creation_date(value)
+            if parsed:
+                return parsed
+
+    return None
+
+
 def _parse_fraction(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -962,6 +1028,7 @@ def main() -> None:
                 pass
 
         start_timecode = "00:00:00:00"
+        original_creation_date: Optional[str] = None
         try:
             if os.path.exists(stage_src):
                 try:
@@ -972,6 +1039,7 @@ def main() -> None:
                 logging.info("staging -> %s", stage_src)
             shutil.copy2(src, stage_src)
             start_timecode = find_start_timecode(stage_src)
+            original_creation_date = get_container_creation_date(stage_src)
         except Exception as e:
             logging.error("failed to stage source %s -> %s: %s", src, stage_src, e)
             mark_pending(f"failed to stage source: {e}")
@@ -1117,8 +1185,11 @@ def main() -> None:
                     "mkvmerge",
                     "-o",
                     remux_output,
-                    stage_part,
+                    "--disable-track-statistics-tags",
                 ]
+                if original_creation_date:
+                    mux_cmd += ["--date", original_creation_date]
+                mux_cmd.append(stage_part)
                 _print_command(mux_cmd)
                 mux_proc = subprocess.run(mux_cmd)
                 if mux_proc.returncode != 0:
