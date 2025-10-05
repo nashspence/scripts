@@ -998,6 +998,7 @@ def main() -> None:
             ]
         ff.append("-y")
         ff.append("-ignore_unknown")
+        ff += ["-map_metadata", "0", "-map_chapters", "0"]
         ff += [
             "-i",
             stage_src,
@@ -1009,6 +1010,8 @@ def main() -> None:
             "0:s?",
             "-map",
             "-0:d?",
+            "-map", 
+            "0:t?",
             "-copyts",
             "-start_at_zero",
             "-fps_mode",
