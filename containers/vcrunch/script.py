@@ -717,9 +717,6 @@ def main() -> None:
             duration_value = probe_result.get("duration")
             if duration_value is not None:
                 entry["duration"] = float(duration_value)
-            error_value = probe_result.get("error")
-            if error_value:
-                entry["error"] = str(error_value)
             probe_cache[key] = entry
             save_manifest(manifest, manifest_path)
 
@@ -1010,7 +1007,7 @@ def main() -> None:
             "0:s?",
             "-map",
             "-0:d?",
-            "-map", 
+            "-map",
             "0:t?",
             "-copyts",
             "-start_at_zero",
