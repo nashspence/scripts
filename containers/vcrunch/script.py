@@ -1063,7 +1063,6 @@ def main() -> None:
             ]
         ff.append("-y")
         ff.append("-ignore_unknown")
-        ff += ["-map_metadata", "0", "-map_chapters", "0"]
         ff += [
             "-i",
             stage_src,
@@ -1112,6 +1111,7 @@ def main() -> None:
             "-f",
             "matroska",
         ]
+        ff += ["-map_metadata", "0", "-map_chapters", "0"]
         ff.append(ffmpeg_output)
 
         rec.pop("error", None)
@@ -1187,8 +1187,6 @@ def main() -> None:
                     remux_output,
                     "--disable-track-statistics-tags",
                 ]
-                if original_creation_date:
-                    mux_cmd += ["--date", original_creation_date]
                 mux_cmd.append(stage_part)
                 _print_command(mux_cmd)
                 mux_proc = subprocess.run(mux_cmd)
