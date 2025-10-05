@@ -565,9 +565,11 @@ def copy_assets(
 
         key: Optional[str] = None
         record: Optional[dict[str, Any]] = None
+        src_stat: Optional[os.stat_result] = None
         if manifest_items is not None:
             try:
                 st = os.stat(src)
+                src_stat = st
             except FileNotFoundError:
                 logging.warning("asset missing, skipping: %s", src)
                 continue
@@ -580,6 +582,51 @@ def copy_assets(
                 recorded_output = os.path.normpath(record.get("output") or dest_name)
                 output_path = os.path.join(out_dir, recorded_output)
                 if os.path.exists(output_path):
+                    if recorded_output != dest_name:
+                        new_output_path = os.path.join(out_dir, dest_name)
+                        new_output_dir = os.path.dirname(new_output_path)
+                        if new_output_dir and not os.path.exists(new_output_dir):
+                            os.makedirs(new_output_dir, exist_ok=True)
+                        try:
+                            os.replace(output_path, new_output_path)
+                        except OSError as exc:
+                            logging.error(
+                                "failed to rename asset %s -> %s: %s",
+                                output_path,
+                                new_output_path,
+                                exc,
+                            )
+                            if (
+                                manifest_items is not None
+                                and key is not None
+                                and manifest_dict is not None
+                            ):
+                                new_record = dict(record)
+                                new_record["status"] = "pending"
+                                new_record["error"] = f"rename failed: {exc}"
+                                new_record.pop("finished_at", None)
+                                manifest_items[key] = new_record
+                                if manifest_path:
+                                    save_manifest(manifest_dict, manifest_path)
+                        else:
+                            logging.info(
+                                "renamed asset output: %s -> %s",
+                                output_path,
+                                new_output_path,
+                            )
+                            _apply_source_timestamps(src, new_output_path, src_stat)
+                            copied.append((src, dest_name))
+                            if (
+                                manifest_items is not None
+                                and key is not None
+                                and manifest_dict is not None
+                            ):
+                                new_record = dict(record)
+                                new_record["output"] = dest_name
+                                manifest_items[key] = new_record
+                                if manifest_path:
+                                    save_manifest(manifest_dict, manifest_path)
+                            continue
                     logging.info("skip asset done: %s -> %s", src, output_path)
                     copied.append((src, recorded_output))
                     if manifest_dict is not None and recorded_output != record.get(
@@ -609,6 +656,7 @@ def copy_assets(
 
         try:
             shutil.copy2(src, dest)
+            _apply_source_timestamps(src, dest, src_stat)
             logging.info("copied asset: %s -> %s", src, dest)
             copied.append((src, dest_name))
             if (
