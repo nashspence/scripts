@@ -58,6 +58,41 @@ def test_ffprobe_duration(monkeypatch):
         script.ffprobe_duration("path")
 
 
+def test_get_container_creation_date(monkeypatch):
+    expected = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_entries",
+        "format_tags=creation_time,com.apple.quicktime.creationdate",
+        "video.mkv",
+    ]
+
+    def fake_ffprobe_json(cmd):
+        assert cmd == expected
+        return {
+            "format": {
+                "tags": {
+                    "creation_time": "2024-09-28T15:42:11.123456Z",
+                }
+            }
+        }
+
+    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
+    assert script.get_container_creation_date("video.mkv") == "2024-09-28T15:42:11Z"
+
+
+def test_get_container_creation_date_missing(monkeypatch):
+    monkeypatch.setattr(
+        script,
+        "ffprobe_json",
+        lambda cmd: {"format": {"tags": {}}},
+    )
+    assert script.get_container_creation_date("video.mkv") is None
+
+
 def test_probe_media_info_uses_stream_duration(monkeypatch):
     expected = [
         "ffprobe",
@@ -501,6 +536,76 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     assert cmd[idx + 1] == "32"
     assert cmd[idx + 2] == "-b:v"
     assert cmd[idx + 3] == "0"
+
+
+def test_mkvmerge_preserves_creation_date(monkeypatch, tmp_path):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    video = src_dir / "a.mp4"
+    video.write_bytes(b"v" * (2 * 1024 * 1024))
+    out_dir = tmp_path / "out"
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+
+    argv = [
+        "script.py",
+        "--input",
+        str(src_dir),
+        "--target-size",
+        "1M",
+        "--output-dir",
+        str(out_dir),
+        "--stage-dir",
+        str(stage_dir),
+        "--constant-quality",
+        "32",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(
+        script,
+        "probe_media_info",
+        lambda path: {
+            "is_video": path.endswith(".mp4"),
+            "duration": 60.0 if path.endswith(".mp4") else None,
+        },
+    )
+
+    monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
+    monkeypatch.setattr(script, "find_start_timecode", lambda path: "00:00:00:00")
+    monkeypatch.setattr(
+        script,
+        "get_container_creation_date",
+        lambda path: "2024-09-28T15:42:11Z",
+    )
+
+    captured_cmds: list[list[str]] = []
+
+    def fake_run(cmd, env=None, **kwargs):
+        if cmd[0] == "ffmpeg":
+            stage_part = Path(cmd[-1])
+            stage_part.write_bytes(b"encoded")
+            return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if cmd[0] == "mkvmerge":
+            captured_cmds.append(cmd)
+            output_path = Path(cmd[2])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"remuxed")
+            return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        return types.SimpleNamespace(returncode=0, stdout=b"{}", stderr=b"")
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+    monkeypatch.setattr(script, "is_valid_media", lambda path: True)
+
+    script.main()
+
+    output_video = out_dir / "a.mkv"
+    assert output_video.exists()
+    assert captured_cmds
+    mkv_cmd = captured_cmds[0]
+    assert "--disable-track-statistics-tags" in mkv_cmd
+    assert "--date" in mkv_cmd
+    date_index = mkv_cmd.index("--date")
+    assert mkv_cmd[date_index + 1] == "2024-09-28T15:42:11Z"
 
 
 def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
