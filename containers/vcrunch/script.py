@@ -1025,6 +1025,9 @@ def main() -> None:
         if final_dir and not os.path.exists(final_dir):
             os.makedirs(final_dir, exist_ok=True)
         part_path = final_path + ".part"
+        original_rel = os.path.basename(src)
+        original_rel = os.path.normpath(original_rel)
+        original_final_path = os.path.join(args.output_dir, original_rel)
 
         def mark_pending(error: Optional[str] = None) -> None:
             rec["status"] = "pending"
@@ -1223,14 +1226,31 @@ def main() -> None:
                 logging.info(
                     "encoded output larger than source; keeping original for %s", src
                 )
+                original_part_path = original_final_path + ".part"
                 try:
-                    shutil.copy2(src, final_path)
+                    if os.path.exists(original_part_path):
+                        os.remove(original_part_path)
+                except FileNotFoundError:
+                    pass
+                try:
+                    shutil.copy2(src, original_part_path)
+                    _apply_source_timestamps(src, original_part_path, st)
+                    os.replace(original_part_path, original_final_path)
                     use_original_output = True
+                    output_rel = original_rel
+                    final_path = original_final_path
+                    output_by_input[os.path.abspath(src)] = os.path.normpath(output_rel)
+                    rec["output"] = output_rel
                 except Exception as e:
                     logging.error(
                         "failed to copy original source to output for %s: %s", src, e
                     )
                     mark_pending("failed to copy original source to output")
+                    try:
+                        if os.path.exists(original_part_path):
+                            os.remove(original_part_path)
+                    except FileNotFoundError:
+                        pass
                     continue
             else:
                 mux_cmd = [

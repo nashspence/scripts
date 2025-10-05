@@ -300,6 +300,59 @@ def test_run_failure(monkeypatch):
     assert exc.value.code == 1
 
 
+def test_main_keeps_original_name_when_larger(monkeypatch, tmp_path):
+    src = tmp_path / "video.mp4"
+    src.write_bytes(b"source-bytes")
+    out_dir = tmp_path / "out"
+    stage_dir = tmp_path / "stage"
+
+    monkeypatch.setattr(
+        script.sys,
+        "argv",
+        [
+            "vcrunch",
+            "--input",
+            str(src),
+            "--output-dir",
+            str(out_dir),
+            "--stage-dir",
+            str(stage_dir),
+        ],
+    )
+
+    monkeypatch.setattr(
+        script,
+        "probe_media_info",
+        lambda path: {"is_video": True, "duration": 10.0},
+    )
+    monkeypatch.setattr(script, "ffprobe_duration", lambda path: 10.0)
+    monkeypatch.setattr(script, "find_start_timecode", lambda path: "00:00:00:00")
+    monkeypatch.setattr(script, "get_container_creation_date", lambda path: None)
+    monkeypatch.setattr(script, "is_valid_media", lambda path: True)
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd and cmd[0] == "ffmpeg":
+            Path(cmd[-1]).write_bytes(b"encoded-output-is-larger")
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+
+    script.main()
+
+    output_file = out_dir / "video.mp4"
+    assert output_file.exists()
+    assert not (out_dir / "video.mkv").exists()
+
+    manifest_path = out_dir / script.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    outputs = [rec["output"] for rec in manifest["items"].values()]
+    assert outputs == ["video.mp4"]
+
+
 def test_collect_all_files(tmp_path):
     (tmp_path / "a.txt").write_text("a")
     sub = tmp_path / "sub"
