@@ -1353,6 +1353,8 @@ def main() -> None:
         "inputs: %d (videos=%d assets=%d)", len(all_files), len(videos), len(assets)
     )
 
+    use_constant_quality = args.constant_quality is not None
+
     target_bytes = parse_size(target_size_str)
     total_input_bytes = 0
     for src in all_files:
@@ -1361,7 +1363,7 @@ def main() -> None:
         except FileNotFoundError:
             pass
 
-    if total_input_bytes <= target_bytes:
+    if not use_constant_quality and total_input_bytes <= target_bytes:
         action = "move" if args.move_if_fit else "copy"
         logging.warning(
             "inputs fit within target size; %sing without re-encoding", action
@@ -1421,7 +1423,6 @@ def main() -> None:
         total_duration += float(duration)
         total_audio_bytes += int((audio_bps / 8.0) * float(duration))
 
-    use_constant_quality = args.constant_quality is not None
     global_video_kbps = 0
     if use_constant_quality:
         logging.info("using constant quality: CRF=%s", args.constant_quality)

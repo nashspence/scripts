@@ -711,6 +711,95 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     assert mkv_cmd[ts_idx + 1].endswith("a.v0.timecodes.txt")
 
 
+def test_constant_quality_ignores_fit_short_circuit(monkeypatch, tmp_path):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    video = src_dir / "a.mp4"
+    video.write_bytes(b"v" * 1024)
+    out_dir = tmp_path / "out"
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+
+    argv = [
+        "script.py",
+        "--input",
+        str(src_dir),
+        "--target-size",
+        "10M",
+        "--output-dir",
+        str(out_dir),
+        "--stage-dir",
+        str(stage_dir),
+        "--constant-quality",
+        "28",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(
+        script,
+        "probe_media_info",
+        lambda path: {"is_video": path.endswith(".mp4"), "duration": 60.0},
+    )
+    monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
+
+    def fake_timecodes(src_path: str, dest_dir: Path, base_stem: str) -> Path:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out_path = dest_dir / f"{base_stem}.v0.timecodes.txt"
+        out_path.write_text("# timecode format v2\n0.000000\n", encoding="utf-8")
+        return out_path
+
+    monkeypatch.setattr(script, "_generate_timecodes_v2", fake_timecodes)
+
+    captured_cmds = []
+
+    def fake_run(cmd, env=None, **kwargs):
+        captured_cmds.append(cmd)
+        if cmd[0] == "ffmpeg":
+            Path(cmd[-1]).write_bytes(b"encoded")
+        elif cmd[0] == "mkvmerge":
+            Path(cmd[2]).write_bytes(b"remuxed")
+
+        class R:
+            returncode = 0
+
+        return R()
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+
+    def fake_dump(src, dest, verbose):
+        dest.mkdir(parents=True, exist_ok=True)
+        video_sidecar = dest / "video.stream.h264"
+        video_sidecar.write_bytes(b"origvideo")
+        audio_sidecar = dest / "audio.stream.aac"
+        audio_sidecar.write_bytes(b"origaudio")
+        return {
+            "exports": [
+                {
+                    "path": str(video_sidecar),
+                    "stream": {"codec_type": "video", "codec_name": "h264", "index": 0},
+                    "stype": "v",
+                    "mkv_ok": True,
+                },
+                {
+                    "path": str(audio_sidecar),
+                    "stream": {"codec_type": "audio", "codec_name": "aac", "index": 1},
+                    "stype": "a",
+                    "mkv_ok": True,
+                },
+            ],
+            "attachments": [],
+            "metadata_path": None,
+            "extras": [],
+        }
+
+    monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
+    monkeypatch.setattr(script, "is_valid_media", lambda path: True)
+
+    script.main()
+
+    assert (out_dir / "a.mkv").exists()
+    assert any(cmd[0] == "ffmpeg" for cmd in captured_cmds)
+
+
 def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
