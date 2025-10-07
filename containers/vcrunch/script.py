@@ -458,40 +458,6 @@ def _collect_packet_timestamps_seconds(
     return fixed
 
 
-def _write_timecodes_v2(path: pathlib.Path, timestamps: Sequence[float]) -> None:
-    lines = ["# timecode format v2"]
-    lines.extend(f"{ts * 1000.0:.6f}" for ts in timestamps)
-    text = "\n".join(lines) + "\n"
-    path.write_text(text, encoding="utf-8")
-
-
-def _generate_timecodes_v2(
-    src: str, dest_dir: pathlib.Path, base_stem: str
-) -> Optional[pathlib.Path]:
-    picked = _pick_real_video_stream_index(src)
-    if picked is None:
-        logging.warning("no suitable video stream for timecodes in %s", src)
-        return None
-    stream_index, stream_spec = picked
-    timestamps = _collect_frame_timestamps_seconds(src, stream_index, stream_spec)
-    if not timestamps:
-        logging.warning(
-            "no timestamps collected for %s stream %s (%s)",
-            src,
-            stream_index,
-            stream_spec,
-        )
-        return None
-    safe_base = _sanitize_token(base_stem) or "timecodes"
-    out_path = dest_dir / f"{safe_base}.v{stream_index}.timecodes.txt"
-    try:
-        _write_timecodes_v2(out_path, timestamps)
-    except OSError as exc:
-        logging.warning("failed to write timecodes for %s: %s", src, exc)
-        return None
-    return out_path
-
-
 def _dump_streams_and_metadata(
     src: str,
     dest_dir: pathlib.Path,
@@ -591,7 +557,6 @@ def _dump_streams_and_metadata(
 
 def _mkvmerge_args(
     streams: List[Tuple[pathlib.Path, Dict[str, Any], str]],
-    timestamps: Optional[Dict[pathlib.Path, pathlib.Path]] = None,
 ) -> Tuple[List[str], List[pathlib.Path]]:
     order = {"v": 0, "a": 1, "s": 2, "d": 3, "t": 4}
     args: List[str] = []
@@ -599,7 +564,6 @@ def _mkvmerge_args(
     for path, stream, stype in sorted(streams, key=lambda item: order.get(item[2], 9)):
         if stype not in {"v", "a", "s"}:
             continue
-        ts_map = timestamps or {}
         lang = _stream_language(stream)
         title = _stream_title(stream)
         flags = _stream_disposition_flags(stream)
@@ -611,8 +575,6 @@ def _mkvmerge_args(
             args += ["--default-track-flag", "0:yes"]
         if "forced" in flags:
             args += ["--forced-track-flag", "0:yes"]
-        if path in ts_map:
-            args += ["--timestamps", f"0:{ts_map[path]}"]
         args.append(str(path))
         used.append(path)
     return args, used
@@ -1780,7 +1742,7 @@ def main() -> None:
             env["SVT_LOG"] = "4" if args.verbose else "2"
 
             base_name = pathlib.Path(src).stem
-            video_encode_path = streams_root / f"{base_name}.video.av1.ivf"
+            video_encode_path = streams_root / f"{base_name}.video.av1.mkv"
             finally_cleanup_files.append(str(video_encode_path))
 
             video_cmd = ["ffmpeg"]
@@ -1791,6 +1753,10 @@ def main() -> None:
             video_cmd += [
                 "-y",
                 "-ignore_unknown",
+                "-fflags",
+                "+genpts+igndts",
+                "-copyts",
+                "-start_at_zero",
                 "-i",
                 stage_src,
                 "-map",
@@ -1807,11 +1773,15 @@ def main() -> None:
                 "5",
                 "-svtav1-params",
                 f"lp={args.svt_lp}",
+                "-vsync",
+                "vfr",
+                "-fps_mode",
+                "vfr",
                 "-an",
                 "-sn",
                 "-dn",
                 "-f",
-                "ivf",
+                "matroska",
                 str(video_encode_path),
             ]
 
@@ -1862,7 +1832,7 @@ def main() -> None:
             audio_entry: Optional[StreamExport] = None
             audio_encode_path: Optional[pathlib.Path] = None
             if original_audio is not None:
-                audio_encode_path = streams_root / f"{base_name}.audio.opus.opus"
+                audio_encode_path = streams_root / f"{base_name}.audio.opus.mkv"
                 finally_cleanup_files.append(str(audio_encode_path))
                 audio_cmd = ["ffmpeg"]
                 if args.verbose:
@@ -1872,6 +1842,8 @@ def main() -> None:
                 audio_cmd += [
                     "-y",
                     "-ignore_unknown",
+                    "-copyts",
+                    "-start_at_zero",
                     "-i",
                     stage_src,
                     "-map",
@@ -1879,12 +1851,16 @@ def main() -> None:
                     "-vn",
                     "-sn",
                     "-dn",
+                    "-af",
+                    "asetpts=PTS-STARTPTS",
                     "-c:a",
                     "libopus",
+                    "-ar",
+                    "48000",
                     "-b:a",
                     f"{audio_kbps}k",
                     "-f",
-                    "opus",
+                    "matroska",
                     str(audio_encode_path),
                 ]
                 _print_command(audio_cmd)
@@ -1940,18 +1916,6 @@ def main() -> None:
                     (pathlib.Path(audio_entry["path"]), audio_entry["stream"], "a")
                 )
 
-            timecodes_path = _generate_timecodes_v2(
-                stage_src, streams_root, f"{stem}{args.name_suffix}"
-            )
-            if timecodes_path is None:
-                logging.error("failed to generate timecodes for %s", src)
-                mark_pending("failed to generate timecodes")
-                continue
-
-            timestamps_map: Dict[pathlib.Path, pathlib.Path] = {
-                pathlib.Path(video_entry["path"]): timecodes_path
-            }
-
             leftover_paths: set[pathlib.Path] = set()
             selected_paths = {pathlib.Path(video_entry["path"])}
             if audio_entry is not None:
@@ -1970,7 +1934,7 @@ def main() -> None:
                 else:
                     leftover_paths.add(export_path)
 
-            mkv_args, used_sidecars = _mkvmerge_args(streams_for_mux, timestamps_map)
+            mkv_args, used_sidecars = _mkvmerge_args(streams_for_mux)
             if not mkv_args:
                 logging.error("no mkvmerge-compatible streams for %s", src)
                 mark_pending("no mkvmerge-compatible streams")
@@ -2016,7 +1980,6 @@ def main() -> None:
                 leftover_paths.add(metadata_sidecar)
             for attachment in attachments:
                 leftover_paths.add(attachment)
-            leftover_paths.add(timecodes_path)
 
             if original_creation_date:
                 prop_cmd = [
