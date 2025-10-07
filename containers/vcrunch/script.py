@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
+from fractions import Fraction
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TypedDict, cast
 
 OUT_EXT = ".mkv"
@@ -227,7 +228,7 @@ def _export_attachments(
         cmd += ["-stats", "-loglevel", "info"]
     else:
         cmd += ["-hide_banner", "-loglevel", "warning"]
-    cmd += ["-dump_attachment:t", "", "-i", src]
+    cmd += ["-dump_attachment:t", "", "-i", src, "-f", "null", os.devnull]
     _print_command(cmd)
     proc = subprocess.run(cmd, cwd=str(attach_dir))
     if proc.returncode != 0:
@@ -309,23 +310,99 @@ def _collect_frame_timestamps_seconds(
     ]
     try:
         data = ffprobe_json(cmd)
-    except subprocess.CalledProcessError:
-        return None
+    except subprocess.CalledProcessError as exc:
+        logging.debug(
+            "ffprobe -show_frames failed for %s stream %s: %s", src, stream_index, exc
+        )
+        return _collect_packet_timestamps_seconds(src, stream_index)
     frames = cast(List[Dict[str, Any]], data.get("frames") or [])
     timestamps: List[float] = []
     for frame in frames:
         if cast(str, frame.get("media_type")) != "video":
             continue
-        value = frame.get("best_effort_timestamp_time")
+        value = _parse_time_value(frame.get("best_effort_timestamp_time"))
         if value is None:
-            value = frame.get("pkt_pts_time")
+            value = _parse_time_value(frame.get("pkt_pts_time"))
         if value is None:
             continue
-        try:
-            timestamps.append(float(value))
-        except (TypeError, ValueError):
-            continue
+        timestamps.append(value)
     if not timestamps:
+        logging.debug(
+            "no frame timestamps found for %s stream %s; falling back to packets",
+            src,
+            stream_index,
+        )
+        return _collect_packet_timestamps_seconds(src, stream_index)
+    fixed: List[float] = []
+    last = float("-inf")
+    for ts in timestamps:
+        if ts < last:
+            ts = last
+        fixed.append(ts)
+        last = ts
+    logging.debug(
+        "collected %d frame timestamps for %s stream %s",
+        len(fixed),
+        src,
+        stream_index,
+    )
+    return fixed
+
+
+def _parse_time_value(raw: Any) -> Optional[float]:
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        value = raw.strip()
+        if not value:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            if "/" in value:
+                try:
+                    return float(Fraction(value))
+                except (ValueError, ZeroDivisionError):
+                    return None
+    return None
+
+
+def _collect_packet_timestamps_seconds(
+    src: str, stream_index: int
+) -> Optional[List[float]]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        f"i:{stream_index}",
+        "-show_packets",
+        "-show_entries",
+        "packet=pts_time,dts_time",
+        "-of",
+        "json",
+        src,
+    ]
+    try:
+        data = ffprobe_json(cmd)
+    except subprocess.CalledProcessError as exc:
+        logging.debug(
+            "ffprobe -show_packets failed for %s stream %s: %s", src, stream_index, exc
+        )
+        return None
+    packets = cast(List[Dict[str, Any]], data.get("packets") or [])
+    timestamps: List[float] = []
+    for packet in packets:
+        value = _parse_time_value(packet.get("pts_time"))
+        if value is None:
+            value = _parse_time_value(packet.get("dts_time"))
+        if value is None:
+            continue
+        timestamps.append(value)
+    if not timestamps:
+        logging.debug("no packet timestamps found for %s stream %s", src, stream_index)
         return None
     fixed: List[float] = []
     last = float("-inf")
@@ -334,6 +411,12 @@ def _collect_frame_timestamps_seconds(
             ts = last
         fixed.append(ts)
         last = ts
+    logging.debug(
+        "collected %d packet timestamps for %s stream %s",
+        len(fixed),
+        src,
+        stream_index,
+    )
     return fixed
 
 

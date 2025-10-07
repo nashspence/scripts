@@ -50,6 +50,33 @@ def test_ffprobe_json(monkeypatch):
     assert script.ffprobe_json(["ffprobe", "file"]) == {"a": 1}
 
 
+def test_parse_time_value_fraction():
+    assert script._parse_time_value("1/2") == pytest.approx(0.5)
+    assert script._parse_time_value("  ") is None
+    assert script._parse_time_value(None) is None
+
+
+def test_collect_frame_timestamps_seconds_fallback(monkeypatch):
+    calls = []
+
+    def fake_ffprobe_json(cmd):
+        calls.append(cmd)
+        if "-show_frames" in cmd:
+            return {"frames": []}
+        return {
+            "packets": [
+                {"pts_time": "0"},
+                {"pts_time": "1/2"},
+                {"dts_time": "1"},
+            ]
+        }
+
+    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
+    timestamps = script._collect_frame_timestamps_seconds("input.mpg", 0)
+    assert timestamps == pytest.approx([0.0, 0.5, 1.0])
+    assert any("-show_packets" in cmd for cmd in calls)
+
+
 def test_ffprobe_duration(monkeypatch):
     monkeypatch.setattr(script, "probe_media_info", lambda path: {"duration": 12.34})
     assert script.ffprobe_duration("path") == 12.34
