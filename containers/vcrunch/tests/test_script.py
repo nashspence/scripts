@@ -72,9 +72,10 @@ def test_collect_frame_timestamps_seconds_fallback(monkeypatch):
         }
 
     monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
-    timestamps = script._collect_frame_timestamps_seconds("input.mpg", 0)
+    timestamps = script._collect_frame_timestamps_seconds("input.mpg", 0, "v:0")
     assert timestamps == pytest.approx([0.0, 0.5, 1.0])
     assert any("-show_packets" in cmd for cmd in calls)
+    assert any("v:0" in cmd for cmd in calls)
 
 
 def test_ffprobe_duration(monkeypatch):

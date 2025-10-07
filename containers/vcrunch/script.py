@@ -190,15 +190,22 @@ def _export_stream(
 def _write_packet_index(
     src: str,
     stream_index: int,
+    stream_spec: Optional[str],
     sidecar: pathlib.Path,
 ) -> Optional[pathlib.Path]:
     out_path = sidecar.with_suffix(sidecar.suffix + ".packets.json")
+    if not stream_spec:
+        logging.debug(
+            "no stream specifier for index %s; skipping packet index export",
+            stream_index,
+        )
+        return None
     cmd = [
         "ffprobe",
         "-v",
         "error",
         "-select_streams",
-        f"i:{stream_index}",
+        stream_spec,
         "-show_packets",
         "-show_entries",
         "packet=pts_time,dts_time,flags,pos,size",
@@ -236,7 +243,7 @@ def _export_attachments(
     return [p for p in attach_dir.iterdir() if p.is_file()]
 
 
-def _pick_real_video_stream_index(src: str) -> Optional[int]:
+def _pick_real_video_stream_index(src: str) -> Optional[Tuple[int, str]]:
     cmd = [
         "ffprobe",
         "-v",
@@ -253,10 +260,14 @@ def _pick_real_video_stream_index(src: str) -> Optional[int]:
         return None
     streams = cast(List[Dict[str, Any]], data.get("streams") or [])
     best_index: Optional[int] = None
+    best_spec: Optional[str] = None
     best_score = -1
+    video_ordinal = 0
     for stream in streams:
         if cast(str, stream.get("codec_type")) != "video":
             continue
+        spec = f"v:{video_ordinal}"
+        video_ordinal += 1
         disp = cast(Dict[str, Any], stream.get("disposition") or {})
         try:
             if int(disp.get("attached_pic", 0)) == 1:
@@ -289,21 +300,32 @@ def _pick_real_video_stream_index(src: str) -> Optional[int]:
         if score > best_score:
             best_score = score
             best_index = idx
-    return best_index
+            best_spec = spec
+    if best_index is None or best_spec is None:
+        logging.debug("no non-attached video stream found in %s", src)
+        return None
+    logging.debug(
+        "selected video stream %s (specifier %s) with score %s for %s",
+        best_index,
+        best_spec,
+        best_score,
+        src,
+    )
+    return best_index, best_spec
 
 
 def _collect_frame_timestamps_seconds(
-    src: str, stream_index: int
+    src: str, stream_index: int, stream_spec: str
 ) -> Optional[List[float]]:
     cmd = [
         "ffprobe",
         "-v",
         "error",
         "-select_streams",
-        f"i:{stream_index}",
+        stream_spec,
         "-show_frames",
         "-show_entries",
-        "frame=media_type,best_effort_timestamp_time,pkt_pts_time",
+        "frame=media_type,best_effort_timestamp_time,pkt_pts_time,pts_time,pkt_dts_time",
         "-of",
         "json",
         src,
@@ -312,9 +334,13 @@ def _collect_frame_timestamps_seconds(
         data = ffprobe_json(cmd)
     except subprocess.CalledProcessError as exc:
         logging.debug(
-            "ffprobe -show_frames failed for %s stream %s: %s", src, stream_index, exc
+            "ffprobe -show_frames failed for %s stream %s (%s): %s",
+            src,
+            stream_index,
+            stream_spec,
+            exc,
         )
-        return _collect_packet_timestamps_seconds(src, stream_index)
+        return _collect_packet_timestamps_seconds(src, stream_index, stream_spec)
     frames = cast(List[Dict[str, Any]], data.get("frames") or [])
     timestamps: List[float] = []
     for frame in frames:
@@ -328,11 +354,12 @@ def _collect_frame_timestamps_seconds(
         timestamps.append(value)
     if not timestamps:
         logging.debug(
-            "no frame timestamps found for %s stream %s; falling back to packets",
+            "no frame timestamps found for %s stream %s (%s); falling back to packets",
             src,
             stream_index,
+            stream_spec,
         )
-        return _collect_packet_timestamps_seconds(src, stream_index)
+        return _collect_packet_timestamps_seconds(src, stream_index, stream_spec)
     fixed: List[float] = []
     last = float("-inf")
     for ts in timestamps:
@@ -341,10 +368,11 @@ def _collect_frame_timestamps_seconds(
         fixed.append(ts)
         last = ts
     logging.debug(
-        "collected %d frame timestamps for %s stream %s",
+        "collected %d frame timestamps for %s stream %s (%s)",
         len(fixed),
         src,
         stream_index,
+        stream_spec,
     )
     return fixed
 
@@ -370,17 +398,17 @@ def _parse_time_value(raw: Any) -> Optional[float]:
 
 
 def _collect_packet_timestamps_seconds(
-    src: str, stream_index: int
+    src: str, stream_index: int, stream_spec: str
 ) -> Optional[List[float]]:
     cmd = [
         "ffprobe",
         "-v",
         "error",
         "-select_streams",
-        f"i:{stream_index}",
+        stream_spec,
         "-show_packets",
         "-show_entries",
-        "packet=pts_time,dts_time",
+        "packet=stream_index,pts_time,dts_time,pos,flags",
         "-of",
         "json",
         src,
@@ -389,7 +417,11 @@ def _collect_packet_timestamps_seconds(
         data = ffprobe_json(cmd)
     except subprocess.CalledProcessError as exc:
         logging.debug(
-            "ffprobe -show_packets failed for %s stream %s: %s", src, stream_index, exc
+            "ffprobe -show_packets failed for %s stream %s (%s): %s",
+            src,
+            stream_index,
+            stream_spec,
+            exc,
         )
         return None
     packets = cast(List[Dict[str, Any]], data.get("packets") or [])
@@ -402,7 +434,12 @@ def _collect_packet_timestamps_seconds(
             continue
         timestamps.append(value)
     if not timestamps:
-        logging.debug("no packet timestamps found for %s stream %s", src, stream_index)
+        logging.debug(
+            "no packet timestamps found for %s stream %s (%s)",
+            src,
+            stream_index,
+            stream_spec,
+        )
         return None
     fixed: List[float] = []
     last = float("-inf")
@@ -412,10 +449,11 @@ def _collect_packet_timestamps_seconds(
         fixed.append(ts)
         last = ts
     logging.debug(
-        "collected %d packet timestamps for %s stream %s",
+        "collected %d packet timestamps for %s stream %s (%s)",
         len(fixed),
         src,
         stream_index,
+        stream_spec,
     )
     return fixed
 
@@ -430,11 +468,19 @@ def _write_timecodes_v2(path: pathlib.Path, timestamps: Sequence[float]) -> None
 def _generate_timecodes_v2(
     src: str, dest_dir: pathlib.Path, base_stem: str
 ) -> Optional[pathlib.Path]:
-    stream_index = _pick_real_video_stream_index(src)
-    if stream_index is None:
+    picked = _pick_real_video_stream_index(src)
+    if picked is None:
+        logging.warning("no suitable video stream for timecodes in %s", src)
         return None
-    timestamps = _collect_frame_timestamps_seconds(src, stream_index)
+    stream_index, stream_spec = picked
+    timestamps = _collect_frame_timestamps_seconds(src, stream_index, stream_spec)
     if not timestamps:
+        logging.warning(
+            "no timestamps collected for %s stream %s (%s)",
+            src,
+            stream_index,
+            stream_spec,
+        )
         return None
     safe_base = _sanitize_token(base_stem) or "timecodes"
     out_path = dest_dir / f"{safe_base}.v{stream_index}.timecodes.txt"
@@ -475,6 +521,27 @@ def _dump_streams_and_metadata(
     exports: List[StreamExport] = []
     extras: List[pathlib.Path] = []
     streams = cast(List[Dict[str, Any]], metadata.get("streams") or [])
+    type_map = {
+        "video": "v",
+        "audio": "a",
+        "subtitle": "s",
+        "data": "d",
+        "attachment": "t",
+    }
+    type_counters: Dict[str, int] = {}
+    stream_specifiers: Dict[int, str] = {}
+    for raw_stream in streams:
+        try:
+            raw_index = int(raw_stream.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        letter = type_map.get(cast(str, raw_stream.get("codec_type") or ""))
+        if not letter:
+            continue
+        ordinal = type_counters.get(letter, 0)
+        type_counters[letter] = ordinal + 1
+        stream_specifiers[raw_index] = f"{letter}:{ordinal}"
+
     for stream in streams:
         try:
             index = int(stream.get("index", -1))
@@ -505,7 +572,9 @@ def _dump_streams_and_metadata(
                 }
             )
             if stype == "d":
-                pkt = _write_packet_index(src, index, sidecar)
+                pkt = _write_packet_index(
+                    src, index, stream_specifiers.get(index), sidecar
+                )
                 if pkt is not None:
                     extras.append(pkt)
         except RuntimeError as exc:
