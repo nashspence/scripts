@@ -15,6 +15,7 @@ import sys
 from datetime import datetime, timezone
 from fractions import Fraction
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TypedDict, cast
+from xml.sax.saxutils import escape as xml_escape
 
 OUT_EXT = ".mkv"
 DEFAULT_SUFFIX = ""
@@ -38,6 +39,7 @@ class DumpedStreams(TypedDict):
     attachments: List[pathlib.Path]
     metadata_path: Optional[pathlib.Path]
     extras: List[pathlib.Path]
+    container_tags: Dict[str, str]
 
 
 VIDEO_STREAM_MAP: Dict[str, Tuple[str, str, bool]] = {
@@ -478,11 +480,19 @@ def _dump_streams_and_metadata(
     ]
     metadata = ffprobe_json(cmd)
     meta_path: Optional[pathlib.Path] = None
+    container_tags: Dict[str, str] = {}
     if metadata:
         meta_path = dest_dir / (pathlib.Path(src).stem + ".metadata.json")
         with open(meta_path, "w", encoding="utf-8") as fh:
             json.dump(metadata, fh, indent=2)
             fh.write("\n")
+        fmt_obj = metadata.get("format")
+        if isinstance(fmt_obj, dict):
+            raw_tags = fmt_obj.get("tags")
+            if isinstance(raw_tags, dict):
+                for key, value in raw_tags.items():
+                    if isinstance(key, str) and isinstance(value, str):
+                        container_tags[key] = value
 
     exports: List[StreamExport] = []
     extras: List[pathlib.Path] = []
@@ -524,11 +534,23 @@ def _dump_streams_and_metadata(
         )
         lang = _stream_language(stream)
         flags = _stream_disposition_flags(stream)
+        target_muxer = muxer
+        target_ext = ext
+        if mkv_ok and stype in {"v", "a", "s"}:
+            target_muxer = "matroska"
+            target_ext = "mkv"
         sidecar = _sidecar_name(
-            pathlib.Path(src), stype, index, codec_hint, lang, flags, ext, dest_dir
+            pathlib.Path(src),
+            stype,
+            index,
+            codec_hint,
+            lang,
+            flags,
+            target_ext,
+            dest_dir,
         )
         try:
-            _export_stream(src, sidecar, index, muxer, verbose)
+            _export_stream(src, sidecar, index, target_muxer, verbose)
             exports.append(
                 {
                     "path": str(sidecar),
@@ -552,6 +574,7 @@ def _dump_streams_and_metadata(
         "attachments": attachments,
         "metadata_path": meta_path,
         "extras": extras,
+        "container_tags": container_tags,
     }
 
 
@@ -636,6 +659,77 @@ def _apply_source_timestamps(
     birthtime = getattr(stat_result, "st_birthtime", None)
     if birthtime is not None:
         _apply_birthtime(dest, birthtime)
+
+
+def _build_container_tags_xml(entries: List[Tuple[str, str]]) -> str:
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>', "<Tags>"]
+    for key, value in entries:
+        lines.append("  <Tag>")
+        lines.append("    <Targets>")
+        lines.append("      <TargetTypeValue>50</TargetTypeValue>")
+        lines.append("    </Targets>")
+        lines.append("    <Simple>")
+        lines.append(f"      <Name>{xml_escape(key)}</Name>")
+        lines.append(f"      <String>{xml_escape(value)}</String>")
+        lines.append("    </Simple>")
+        lines.append("  </Tag>")
+    lines.append("</Tags>")
+    return "\n".join(lines) + "\n"
+
+
+def _apply_container_metadata(
+    mkv_path: str,
+    creation_date: Optional[str],
+    tags: Dict[str, str],
+    cleanup: List[str],
+) -> None:
+    info_updates: List[Tuple[str, str]] = []
+    remaining_tags: List[Tuple[str, str]] = []
+
+    title_value = None
+    for key, value in tags.items():
+        if not isinstance(value, str):
+            continue
+        stripped = value.strip()
+        if not stripped:
+            continue
+        lowered = key.lower()
+        if lowered == "title":
+            title_value = stripped
+            continue
+        if lowered in {"creation_time", "com.apple.quicktime.creationdate"}:
+            continue
+        remaining_tags.append((key, stripped))
+
+    if creation_date:
+        info_updates.append(("date", creation_date))
+    if title_value:
+        info_updates.append(("title", title_value))
+
+    tags_file: Optional[pathlib.Path] = None
+    if remaining_tags:
+        xml_text = _build_container_tags_xml(remaining_tags)
+        tags_file = pathlib.Path(mkv_path + ".container.tags.xml")
+        try:
+            tags_file.write_text(xml_text, encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"failed to write container tags XML: {exc}") from exc
+        cleanup.append(str(tags_file))
+
+    if not info_updates and tags_file is None:
+        return
+
+    cmd: List[str] = ["mkvpropedit", mkv_path]
+    if info_updates:
+        cmd += ["--edit", "info"]
+        for key, value in info_updates:
+            cmd += ["--set", f"{key}={value}"]
+    if tags_file is not None:
+        cmd += ["--tags", f"global:{tags_file}"]
+    _print_command(cmd)
+    proc = subprocess.run(cmd)
+    if proc.returncode != 0:
+        raise RuntimeError(f"mkvpropedit exited with code {proc.returncode}")
 
 
 class MediaPreset(TypedDict):
@@ -1718,6 +1812,7 @@ def main() -> None:
             attachments = dumped["attachments"]
             extras = dumped["extras"]
             metadata_sidecar = dumped["metadata_path"]
+            container_tags = dumped.get("container_tags", {})
 
             original_video = next((exp for exp in exports if exp["stype"] == "v"), None)
             if original_video is None:
@@ -1981,21 +2076,26 @@ def main() -> None:
             for attachment in attachments:
                 leftover_paths.add(attachment)
 
-            if original_creation_date:
-                prop_cmd = [
-                    "mkvpropedit",
+            creation_date_to_apply = original_creation_date
+            if not creation_date_to_apply:
+                for key_name in ("creation_time", "com.apple.quicktime.creationdate"):
+                    raw_value = container_tags.get(key_name)
+                    if isinstance(raw_value, str):
+                        parsed = _parse_creation_date(raw_value)
+                        if parsed:
+                            creation_date_to_apply = parsed
+                            break
+            try:
+                _apply_container_metadata(
                     stage_part,
-                    "--edit",
-                    "info",
-                    "--set",
-                    f"date={original_creation_date}",
-                ]
-                _print_command(prop_cmd)
-                prop_proc = subprocess.run(prop_cmd)
-                if prop_proc.returncode != 0:
-                    logging.error("mkvpropedit failed for %s", src)
-                    mark_pending(f"mkvpropedit exited with code {prop_proc.returncode}")
-                    continue
+                    creation_date_to_apply,
+                    container_tags,
+                    finally_cleanup_files,
+                )
+            except RuntimeError as exc:
+                logging.error("failed to apply container metadata for %s: %s", src, exc)
+                mark_pending("failed to apply container metadata")
+                continue
 
             try:
                 shutil.copy2(stage_part, part_path)

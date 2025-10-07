@@ -658,9 +658,9 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
 
     def fake_dump(src, dest, verbose):
         dest.mkdir(parents=True, exist_ok=True)
-        video_sidecar = dest / "video.stream.h264"
+        video_sidecar = dest / "video.stream.h264.mkv"
         video_sidecar.write_bytes(b"origvideo")
-        audio_sidecar = dest / "audio.stream.aac"
+        audio_sidecar = dest / "audio.stream.aac.mkv"
         audio_sidecar.write_bytes(b"origaudio")
         return {
             "exports": [
@@ -680,6 +680,7 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
             "attachments": [],
             "metadata_path": None,
             "extras": [],
+            "container_tags": {"title": "Example Title", "comment": "Example"},
         }
 
     monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
@@ -768,9 +769,9 @@ def test_constant_quality_ignores_fit_short_circuit(monkeypatch, tmp_path):
 
     def fake_dump(src, dest, verbose):
         dest.mkdir(parents=True, exist_ok=True)
-        video_sidecar = dest / "video.stream.h264"
+        video_sidecar = dest / "video.stream.h264.mkv"
         video_sidecar.write_bytes(b"origvideo")
-        audio_sidecar = dest / "audio.stream.aac"
+        audio_sidecar = dest / "audio.stream.aac.mkv"
         audio_sidecar.write_bytes(b"origaudio")
         return {
             "exports": [
@@ -790,6 +791,11 @@ def test_constant_quality_ignores_fit_short_circuit(monkeypatch, tmp_path):
             "attachments": [],
             "metadata_path": None,
             "extras": [],
+            "container_tags": {
+                "title": "Original Title",
+                "creation_time": "2024-09-28T15:42:11Z",
+                "comment": "Container comment",
+            },
         }
 
     monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
@@ -866,9 +872,9 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
 
     def fake_dump(src, dest, verbose):
         dest.mkdir(parents=True, exist_ok=True)
-        video_sidecar = dest / "video.stream.h264"
+        video_sidecar = dest / "video.stream.h264.mkv"
         video_sidecar.write_bytes(b"origvideo")
-        audio_sidecar = dest / "audio.stream.aac"
+        audio_sidecar = dest / "audio.stream.aac.mkv"
         audio_sidecar.write_bytes(b"origaudio")
         return {
             "exports": [
@@ -888,6 +894,10 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
             "attachments": [],
             "metadata_path": None,
             "extras": [],
+            "container_tags": {
+                "title": "Original Title",
+                "comment": "Container comment",
+            },
         }
 
     monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
@@ -907,8 +917,12 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
     assert prop_cmd[1].endswith(".part")
     assert "--edit" in prop_cmd
     assert "--set" in prop_cmd
-    set_index = prop_cmd.index("--set")
-    assert prop_cmd[set_index + 1] == "date=2024-09-28T15:42:11Z"
+    assert prop_cmd.count("--set") >= 2
+    assert "date=2024-09-28T15:42:11Z" in prop_cmd
+    assert any(arg == "title=Original Title" for arg in prop_cmd)
+    assert "--tags" in prop_cmd
+    tags_index = prop_cmd.index("--tags")
+    assert prop_cmd[tags_index + 1].startswith("global:")
     out_stat = output_video.stat()
     assert pytest.approx(out_stat.st_mtime, rel=0, abs=1) == desired_mtime
 
@@ -971,9 +985,9 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
 
     def fake_dump(src, dest, verbose):
         dest.mkdir(parents=True, exist_ok=True)
-        video_sidecar = dest / "video.stream.h264"
+        video_sidecar = dest / "video.stream.h264.mkv"
         video_sidecar.write_bytes(b"origvideo")
-        audio_sidecar = dest / "audio.stream.aac"
+        audio_sidecar = dest / "audio.stream.aac.mkv"
         audio_sidecar.write_bytes(b"origaudio")
         data_sidecar = dest / "data.stream.bin"
         data_sidecar.write_bytes(b"telemetry")
@@ -1001,6 +1015,7 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
             "attachments": [],
             "metadata_path": None,
             "extras": [],
+            "container_tags": {},
         }
 
     monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
@@ -1100,9 +1115,9 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
 
     def fake_dump(src, dest, verbose):
         dest.mkdir(parents=True, exist_ok=True)
-        video_sidecar = dest / "video.stream.h264"
+        video_sidecar = dest / "video.stream.h264.mkv"
         video_sidecar.write_bytes(b"origvideo")
-        audio_sidecar = dest / "audio.stream.aac"
+        audio_sidecar = dest / "audio.stream.aac.mkv"
         audio_sidecar.write_bytes(b"origaudio")
         return {
             "exports": [
@@ -1122,6 +1137,7 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
             "attachments": [],
             "metadata_path": None,
             "extras": [],
+            "container_tags": {},
         }
 
     monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
