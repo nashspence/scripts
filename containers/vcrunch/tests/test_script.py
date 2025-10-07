@@ -387,6 +387,14 @@ def test_main_keeps_original_name_when_larger(monkeypatch, tmp_path):
     monkeypatch.setattr(script, "get_container_creation_date", lambda path: None)
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
 
+    def fake_timecodes(src_path: str, dest_dir: Path, base_stem: str) -> Path:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out_path = dest_dir / f"{base_stem}.v0.timecodes.txt"
+        out_path.write_text("# timecode format v2\n0.000000\n", encoding="utf-8")
+        return out_path
+
+    monkeypatch.setattr(script, "_generate_timecodes_v2", fake_timecodes)
+
     def fake_run(cmd, *args, **kwargs):
         if isinstance(cmd, list) and cmd and cmd[0] == "ffmpeg":
             Path(cmd[-1]).write_bytes(b"encoded-output-is-larger")
@@ -537,6 +545,12 @@ def test_copy_if_fits(monkeypatch, tmp_path):
     monkeypatch.setattr(
         script, "run", lambda cmd: (_ for _ in ()).throw(Exception("run"))
     )
+    monkeypatch.setattr(
+        script,
+        "_generate_timecodes_v2",
+        lambda src_path, dest_dir, base_stem: dest_dir
+        / f"{base_stem}.v0.timecodes.txt",
+    )
     script.main()
     assert (out_dir / "a.mp4").exists()
     assert (out_dir / "b.txt").exists()
@@ -568,6 +582,12 @@ def test_move_if_fits(monkeypatch, tmp_path):
         script,
         "probe_media_info",
         lambda path: {"is_video": path.endswith(".mp4"), "duration": 10.0},
+    )
+    monkeypatch.setattr(
+        script,
+        "_generate_timecodes_v2",
+        lambda src_path, dest_dir, base_stem: dest_dir
+        / f"{base_stem}.v0.timecodes.txt",
     )
     script.main()
     assert not video.exists()
@@ -611,7 +631,15 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
     captured_cmds = []
 
-    def fake_run(cmd, env=None):
+    def fake_timecodes(src_path: str, dest_dir: Path, base_stem: str) -> Path:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out_path = dest_dir / f"{base_stem}.v0.timecodes.txt"
+        out_path.write_text("# timecode format v2\n0.000000\n", encoding="utf-8")
+        return out_path
+
+    monkeypatch.setattr(script, "_generate_timecodes_v2", fake_timecodes)
+
+    def fake_run(cmd, env=None, **kwargs):
         captured_cmds.append(cmd)
         if cmd[0] == "ffmpeg":
             stage_part = Path(cmd[-1])
@@ -627,6 +655,34 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
         return R()
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
+
+    def fake_dump(src, dest, verbose):
+        dest.mkdir(parents=True, exist_ok=True)
+        video_sidecar = dest / "video.stream.h264"
+        video_sidecar.write_bytes(b"origvideo")
+        audio_sidecar = dest / "audio.stream.aac"
+        audio_sidecar.write_bytes(b"origaudio")
+        return {
+            "exports": [
+                {
+                    "path": str(video_sidecar),
+                    "stream": {"codec_type": "video", "codec_name": "h264", "index": 0},
+                    "stype": "v",
+                    "mkv_ok": True,
+                },
+                {
+                    "path": str(audio_sidecar),
+                    "stream": {"codec_type": "audio", "codec_name": "aac", "index": 1},
+                    "stype": "a",
+                    "mkv_ok": True,
+                },
+            ],
+            "attachments": [],
+            "metadata_path": None,
+            "extras": [],
+        }
+
+    monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
 
     script.main()
@@ -637,16 +693,22 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     asset_out = out_dir / "notes.txt"
     assert video_out.exists()
     assert asset_out.exists()
+    timecodes_out = out_dir / "a.v0.timecodes.txt"
+    assert timecodes_out.exists()
 
     manifest_data = json.loads((out_dir / ".job.json").read_text())
     rec = next(iter(manifest_data["items"].values()))
     assert rec["output"] == "a.mkv"
-    cmd = captured_cmds[0]
+    cmd = next(c for c in captured_cmds if c[0] == "ffmpeg")
     assert "-crf" in cmd
     idx = cmd.index("-crf")
     assert cmd[idx + 1] == "32"
     assert cmd[idx + 2] == "-b:v"
     assert cmd[idx + 3] == "0"
+    mkv_cmd = next(c for c in captured_cmds if c[0] == "mkvmerge")
+    assert "--timestamps" in mkv_cmd
+    ts_idx = mkv_cmd.index("--timestamps")
+    assert mkv_cmd[ts_idx + 1].endswith("a.v0.timecodes.txt")
 
 
 def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
@@ -694,6 +756,14 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
     captured_mux_cmds: list[list[str]] = []
     captured_edit_cmds: list[list[str]] = []
 
+    def fake_timecodes(src_path: str, dest_dir: Path, base_stem: str) -> Path:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out_path = dest_dir / f"{base_stem}.v0.timecodes.txt"
+        out_path.write_text("# timecode format v2\n0.000000\n", encoding="utf-8")
+        return out_path
+
+    monkeypatch.setattr(script, "_generate_timecodes_v2", fake_timecodes)
+
     def fake_run(cmd, env=None, **kwargs):
         if cmd[0] == "ffmpeg":
             stage_part = Path(cmd[-1])
@@ -711,6 +781,34 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
         return types.SimpleNamespace(returncode=0, stdout=b"{}", stderr=b"")
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
+
+    def fake_dump(src, dest, verbose):
+        dest.mkdir(parents=True, exist_ok=True)
+        video_sidecar = dest / "video.stream.h264"
+        video_sidecar.write_bytes(b"origvideo")
+        audio_sidecar = dest / "audio.stream.aac"
+        audio_sidecar.write_bytes(b"origaudio")
+        return {
+            "exports": [
+                {
+                    "path": str(video_sidecar),
+                    "stream": {"codec_type": "video", "codec_name": "h264", "index": 0},
+                    "stype": "v",
+                    "mkv_ok": True,
+                },
+                {
+                    "path": str(audio_sidecar),
+                    "stream": {"codec_type": "audio", "codec_name": "aac", "index": 1},
+                    "stype": "a",
+                    "mkv_ok": True,
+                },
+            ],
+            "attachments": [],
+            "metadata_path": None,
+            "extras": [],
+        }
+
+    monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
 
     script.main()
@@ -720,6 +818,9 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
     assert captured_mux_cmds
     mkv_cmd = captured_mux_cmds[0]
     assert "--disable-track-statistics-tags" in mkv_cmd
+    assert "--timestamps" in mkv_cmd
+    ts_idx = mkv_cmd.index("--timestamps")
+    assert mkv_cmd[ts_idx + 1].endswith("a.v0.timecodes.txt")
     assert captured_edit_cmds
     prop_cmd = captured_edit_cmds[0]
     assert prop_cmd[0] == "mkvpropedit"
@@ -730,6 +831,8 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
     assert prop_cmd[set_index + 1] == "date=2024-09-28T15:42:11Z"
     out_stat = output_video.stat()
     assert pytest.approx(out_stat.st_mtime, rel=0, abs=1) == desired_mtime
+    timecodes_out = out_dir / "a.v0.timecodes.txt"
+    assert timecodes_out.exists()
 
 
 def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
@@ -769,7 +872,15 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
 
     captured_cmds = []
 
-    def fake_run(cmd, env=None):
+    def fake_timecodes(src_path: str, dest_dir: Path, base_stem: str) -> Path:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out_path = dest_dir / f"{base_stem}.v0.timecodes.txt"
+        out_path.write_text("# timecode format v2\n0.000000\n", encoding="utf-8")
+        return out_path
+
+    monkeypatch.setattr(script, "_generate_timecodes_v2", fake_timecodes)
+
+    def fake_run(cmd, env=None, **kwargs):
         captured_cmds.append(cmd)
         if cmd[0] == "ffmpeg":
             output_path = Path(cmd[-1])
@@ -787,6 +898,42 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
         return R()
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
+
+    def fake_dump(src, dest, verbose):
+        dest.mkdir(parents=True, exist_ok=True)
+        video_sidecar = dest / "video.stream.h264"
+        video_sidecar.write_bytes(b"origvideo")
+        audio_sidecar = dest / "audio.stream.aac"
+        audio_sidecar.write_bytes(b"origaudio")
+        data_sidecar = dest / "data.stream.bin"
+        data_sidecar.write_bytes(b"telemetry")
+        return {
+            "exports": [
+                {
+                    "path": str(video_sidecar),
+                    "stream": {"codec_type": "video", "codec_name": "h264", "index": 0},
+                    "stype": "v",
+                    "mkv_ok": True,
+                },
+                {
+                    "path": str(audio_sidecar),
+                    "stream": {"codec_type": "audio", "codec_name": "aac", "index": 1},
+                    "stype": "a",
+                    "mkv_ok": True,
+                },
+                {
+                    "path": str(data_sidecar),
+                    "stream": {"codec_type": "data", "codec_name": "bin", "index": 2},
+                    "stype": "d",
+                    "mkv_ok": False,
+                },
+            ],
+            "attachments": [],
+            "metadata_path": None,
+            "extras": [],
+        }
+
+    monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
 
     script.main()
@@ -795,19 +942,27 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     assert bundles == []
     output_video = out_dir / "clip.mkv"
     assert output_video.exists()
+    timecodes_out = out_dir / "clip.v0.timecodes.txt"
+    assert timecodes_out.exists()
 
-    cmd = captured_cmds[0]
-    assert cmd[0] == "ffmpeg"
-    assert "-ignore_unknown" in cmd
-    assert "-0:d?" in cmd
-    assert "-copyts" in cmd
-    assert "-start_at_zero" in cmd
-    metadata_index = cmd.index("-metadata")
-    assert cmd[metadata_index + 1] == "timecode=01:02:03:04"
-    assert "-f" in cmd
-    assert cmd[cmd.index("-f") + 1] == "matroska"
-    assert "-c:a" in cmd
-    assert cmd[cmd.index("-c:a") + 1] == "libopus"
+    video_cmd = next(
+        c for c in captured_cmds if c[0] == "ffmpeg" and "-map" in c and "0:v:0" in c
+    )
+    assert "-ignore_unknown" in video_cmd
+    assert "-copyts" not in video_cmd
+    assert "-start_at_zero" not in video_cmd
+    assert "-metadata" not in video_cmd
+    assert "-f" in video_cmd
+    assert video_cmd[video_cmd.index("-f") + 1] == "ivf"
+
+    audio_cmd = next(c for c in captured_cmds if c[0] == "ffmpeg" and "-c:a" in c)
+    assert audio_cmd[audio_cmd.index("-c:a") + 1] == "libopus"
+    assert "-f" in audio_cmd
+    assert audio_cmd[audio_cmd.index("-f") + 1] == "opus"
+    mkv_cmd = next(c for c in captured_cmds if c[0] == "mkvmerge")
+    assert "--timestamps" in mkv_cmd
+    ts_idx = mkv_cmd.index("--timestamps")
+    assert mkv_cmd[ts_idx + 1].endswith("clip.v0.timecodes.txt")
 
 
 def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
@@ -850,7 +1005,15 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(script, "ffprobe_duration", lambda path: 60.0)
 
-    def fake_run(cmd, env=None):
+    def fake_timecodes(src_path: str, dest_dir: Path, base_stem: str) -> Path:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out_path = dest_dir / f"{base_stem}.v0.timecodes.txt"
+        out_path.write_text("# timecode format v2\n0.000000\n", encoding="utf-8")
+        return out_path
+
+    monkeypatch.setattr(script, "_generate_timecodes_v2", fake_timecodes)
+
+    def fake_run(cmd, env=None, **kwargs):
         if cmd[0] == "ffmpeg":
             stage_part = Path(cmd[-1])
             stage_part.write_bytes(b"encoded")
@@ -865,6 +1028,34 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
         return R()
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
+
+    def fake_dump(src, dest, verbose):
+        dest.mkdir(parents=True, exist_ok=True)
+        video_sidecar = dest / "video.stream.h264"
+        video_sidecar.write_bytes(b"origvideo")
+        audio_sidecar = dest / "audio.stream.aac"
+        audio_sidecar.write_bytes(b"origaudio")
+        return {
+            "exports": [
+                {
+                    "path": str(video_sidecar),
+                    "stream": {"codec_type": "video", "codec_name": "h264", "index": 0},
+                    "stype": "v",
+                    "mkv_ok": True,
+                },
+                {
+                    "path": str(audio_sidecar),
+                    "stream": {"codec_type": "audio", "codec_name": "aac", "index": 1},
+                    "stype": "a",
+                    "mkv_ok": True,
+                },
+            ],
+            "attachments": [],
+            "metadata_path": None,
+            "extras": [],
+        }
+
+    monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
 
     script.main()
@@ -876,5 +1067,6 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
     assert (out_dir / "a.mkv.srt").exists()
     assert (out_dir / "a.mkv.nfo").exists()
     assert (out_dir / "other.txt").exists()
+    assert (out_dir / "a.v0.timecodes.txt").exists()
     assert not (out_dir / "a.mp4.srt").exists()
     assert not (out_dir / "a.mp4.nfo").exists()

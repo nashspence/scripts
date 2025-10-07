@@ -7,12 +7,13 @@ import logging
 import os
 import pathlib
 import platform
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
-from typing import Any, List, Optional, Sequence, TypedDict, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypedDict, cast
 
 OUT_EXT = ".mkv"
 DEFAULT_SUFFIX = ""
@@ -22,6 +23,447 @@ DEFAULT_TARGET_SIZE = "23.30G"
 DEFAULT_SAFETY_OVERHEAD = 0.012
 
 VERBOSE_LEVEL = 0
+
+
+class StreamExport(TypedDict):
+    path: str
+    stream: Dict[str, Any]
+    stype: str
+    mkv_ok: bool
+
+
+class DumpedStreams(TypedDict):
+    exports: List[StreamExport]
+    attachments: List[pathlib.Path]
+    metadata_path: Optional[pathlib.Path]
+    extras: List[pathlib.Path]
+
+
+VIDEO_STREAM_MAP: Dict[str, Tuple[str, str, bool]] = {
+    "h264": ("h264", "h264", True),
+    "hevc": ("hevc", "h265", True),
+    "mpeg4": ("m4v", "m4v", True),
+    "mpeg2video": ("mpegvideo", "m2v", True),
+    "vp9": ("ivf", "ivf", True),
+    "av1": ("ivf", "ivf", True),
+    "mjpeg": ("mjpeg", "mjpeg", False),
+    "png": ("image2", "png", False),
+    "bmp": ("image2", "bmp", False),
+    "webp": ("image2", "webp", False),
+}
+
+
+AUDIO_STREAM_MAP: Dict[str, Tuple[str, str, bool]] = {
+    "aac": ("adts", "aac", True),
+    "ac3": ("ac3", "ac3", True),
+    "eac3": ("eac3", "eac3", True),
+    "mp3": ("mp3", "mp3", True),
+    "flac": ("flac", "flac", True),
+    "opus": ("opus", "opus", True),
+    "vorbis": ("ogg", "ogg", True),
+    "pcm_s16le": ("wav", "wav", True),
+    "pcm_s24le": ("wav", "wav", True),
+    "pcm_s32le": ("wav", "wav", True),
+}
+
+
+SUBTITLE_STREAM_MAP: Dict[str, Tuple[str, str, bool]] = {
+    "subrip": ("srt", "srt", True),
+    "srt": ("srt", "srt", True),
+    "ass": ("ass", "ass", True),
+    "ssa": ("ass", "ass", True),
+    "webvtt": ("webvtt", "vtt", True),
+    "hdmv_pgs_subtitle": ("sup", "sup", True),
+}
+
+
+RAW_STREAM_DUMP = ("data", "bin", False)
+
+
+def _sanitize_token(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    cleaned = re.sub(r"[^\w\-\+.]+", "_", value.strip())
+    return cleaned[:48]
+
+
+def _stream_language(stream: Dict[str, Any]) -> str:
+    tags = cast(Dict[str, Any], stream.get("tags") or {})
+    lang = cast(str, tags.get("language") or "")
+    if lang.lower() in {"und", "undetermined", "xx"}:
+        return ""
+    return lang.lower()
+
+
+def _stream_title(stream: Dict[str, Any]) -> str:
+    tags = cast(Dict[str, Any], stream.get("tags") or {})
+    title = cast(str, tags.get("title") or "")
+    return title
+
+
+def _stream_disposition_flags(stream: Dict[str, Any]) -> List[str]:
+    disp = cast(Dict[str, Any], stream.get("disposition") or {})
+    flags = []
+    for key in (
+        "default",
+        "forced",
+        "hearing_impaired",
+        "visual_impaired",
+        "attached_pic",
+        "dub",
+        "original",
+    ):
+        try:
+            if int(disp.get(key, 0)) == 1:
+                flags.append(key)
+        except (TypeError, ValueError):
+            continue
+    return flags
+
+
+def _classify_stream(stream: Dict[str, Any]) -> Tuple[str, Tuple[str, str, bool]]:
+    codec_type = cast(str, stream.get("codec_type") or "")
+    codec_name = cast(str, (stream.get("codec_name") or "").lower())
+    if codec_type == "video":
+        return "v", VIDEO_STREAM_MAP.get(codec_name, RAW_STREAM_DUMP)
+    if codec_type == "audio":
+        return "a", AUDIO_STREAM_MAP.get(codec_name, RAW_STREAM_DUMP)
+    if codec_type == "subtitle":
+        return "s", SUBTITLE_STREAM_MAP.get(codec_name, RAW_STREAM_DUMP)
+    if codec_type == "attachment":
+        return "t", RAW_STREAM_DUMP
+    return "d", RAW_STREAM_DUMP
+
+
+def _sidecar_name(
+    base: pathlib.Path,
+    stype: str,
+    index: int,
+    codec_hint: str,
+    lang: str,
+    flags: List[str],
+    ext: str,
+    dest_dir: pathlib.Path,
+) -> pathlib.Path:
+    parts = [f"{stype}{index}-{_sanitize_token(codec_hint) or 'unknown'}"]
+    if lang:
+        parts.append(lang)
+    if flags:
+        parts.extend(flags[:2])
+    filename = ".".join([base.stem] + parts) + f".{ext}"
+    return dest_dir / filename
+
+
+def _export_stream(
+    src: str,
+    output: pathlib.Path,
+    stream_index: int,
+    muxer: str,
+    verbose: bool,
+) -> None:
+    cmd = [
+        "ffmpeg",
+        "-y",
+    ]
+    if verbose:
+        cmd += ["-stats", "-loglevel", "info"]
+    else:
+        cmd += ["-hide_banner", "-loglevel", "warning"]
+    cmd += [
+        "-i",
+        src,
+        "-map",
+        f"0:{stream_index}",
+        "-c",
+        "copy",
+        "-f",
+        muxer,
+        str(output),
+    ]
+    _print_command(cmd)
+    proc = subprocess.run(cmd)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed exporting stream {stream_index}")
+
+
+def _write_packet_index(
+    src: str,
+    stream_index: int,
+    sidecar: pathlib.Path,
+) -> Optional[pathlib.Path]:
+    out_path = sidecar.with_suffix(sidecar.suffix + ".packets.json")
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        f"i:{stream_index}",
+        "-show_packets",
+        "-show_entries",
+        "packet=pts_time,dts_time,flags,pos,size",
+        "-of",
+        "json",
+        src,
+    ]
+    try:
+        data = ffprobe_json(cmd)
+    except subprocess.CalledProcessError:
+        return None
+    if not data:
+        return None
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    return out_path
+
+
+def _export_attachments(
+    src: str, dest_dir: pathlib.Path, verbose: bool
+) -> List[pathlib.Path]:
+    attach_dir = dest_dir / "attachments"
+    attach_dir.mkdir(parents=True, exist_ok=True)
+    cmd = ["ffmpeg", "-y"]
+    if verbose:
+        cmd += ["-stats", "-loglevel", "info"]
+    else:
+        cmd += ["-hide_banner", "-loglevel", "warning"]
+    cmd += ["-dump_attachment:t", "", "-i", src]
+    _print_command(cmd)
+    proc = subprocess.run(cmd, cwd=str(attach_dir))
+    if proc.returncode != 0:
+        return []
+    return [p for p in attach_dir.iterdir() if p.is_file()]
+
+
+def _pick_real_video_stream_index(src: str) -> Optional[int]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=index,codec_type,disposition,width,height",
+        "-of",
+        "json",
+        src,
+    ]
+    try:
+        data = ffprobe_json(cmd)
+    except subprocess.CalledProcessError:
+        return None
+    streams = cast(List[Dict[str, Any]], data.get("streams") or [])
+    best_index: Optional[int] = None
+    best_score = -1
+    for stream in streams:
+        if cast(str, stream.get("codec_type")) != "video":
+            continue
+        disp = cast(Dict[str, Any], stream.get("disposition") or {})
+        try:
+            if int(disp.get("attached_pic", 0)) == 1:
+                continue
+        except (TypeError, ValueError):
+            continue
+        raw_width = stream.get("width")
+        raw_height = stream.get("height")
+        width = 0
+        height = 0
+        if isinstance(raw_width, (int, float)):
+            width = int(raw_width)
+        elif isinstance(raw_width, str):
+            try:
+                width = int(float(raw_width))
+            except ValueError:
+                width = 0
+        if isinstance(raw_height, (int, float)):
+            height = int(raw_height)
+        elif isinstance(raw_height, str):
+            try:
+                height = int(float(raw_height))
+            except ValueError:
+                height = 0
+        score = width * height
+        try:
+            idx = int(cast(Any, stream.get("index")))
+        except (TypeError, ValueError):
+            continue
+        if score > best_score:
+            best_score = score
+            best_index = idx
+    return best_index
+
+
+def _collect_frame_timestamps_seconds(
+    src: str, stream_index: int
+) -> Optional[List[float]]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        f"i:{stream_index}",
+        "-show_frames",
+        "-show_entries",
+        "frame=media_type,best_effort_timestamp_time,pkt_pts_time",
+        "-of",
+        "json",
+        src,
+    ]
+    try:
+        data = ffprobe_json(cmd)
+    except subprocess.CalledProcessError:
+        return None
+    frames = cast(List[Dict[str, Any]], data.get("frames") or [])
+    timestamps: List[float] = []
+    for frame in frames:
+        if cast(str, frame.get("media_type")) != "video":
+            continue
+        value = frame.get("best_effort_timestamp_time")
+        if value is None:
+            value = frame.get("pkt_pts_time")
+        if value is None:
+            continue
+        try:
+            timestamps.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if not timestamps:
+        return None
+    fixed: List[float] = []
+    last = float("-inf")
+    for ts in timestamps:
+        if ts < last:
+            ts = last
+        fixed.append(ts)
+        last = ts
+    return fixed
+
+
+def _write_timecodes_v2(path: pathlib.Path, timestamps: Sequence[float]) -> None:
+    lines = ["# timecode format v2"]
+    lines.extend(f"{ts * 1000.0:.6f}" for ts in timestamps)
+    text = "\n".join(lines) + "\n"
+    path.write_text(text, encoding="utf-8")
+
+
+def _generate_timecodes_v2(
+    src: str, dest_dir: pathlib.Path, base_stem: str
+) -> Optional[pathlib.Path]:
+    stream_index = _pick_real_video_stream_index(src)
+    if stream_index is None:
+        return None
+    timestamps = _collect_frame_timestamps_seconds(src, stream_index)
+    if not timestamps:
+        return None
+    safe_base = _sanitize_token(base_stem) or "timecodes"
+    out_path = dest_dir / f"{safe_base}.v{stream_index}.timecodes.txt"
+    try:
+        _write_timecodes_v2(out_path, timestamps)
+    except OSError as exc:
+        logging.warning("failed to write timecodes for %s: %s", src, exc)
+        return None
+    return out_path
+
+
+def _dump_streams_and_metadata(
+    src: str,
+    dest_dir: pathlib.Path,
+    verbose: bool,
+) -> DumpedStreams:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        "-show_programs",
+        "-show_chapters",
+        src,
+    ]
+    metadata = ffprobe_json(cmd)
+    meta_path: Optional[pathlib.Path] = None
+    if metadata:
+        meta_path = dest_dir / (pathlib.Path(src).stem + ".metadata.json")
+        with open(meta_path, "w", encoding="utf-8") as fh:
+            json.dump(metadata, fh, indent=2)
+            fh.write("\n")
+
+    exports: List[StreamExport] = []
+    extras: List[pathlib.Path] = []
+    streams = cast(List[Dict[str, Any]], metadata.get("streams") or [])
+    for stream in streams:
+        try:
+            index = int(stream.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        stype, (muxer, ext, mkv_ok) = _classify_stream(stream)
+        if stype == "t":
+            continue
+        codec_hint = cast(
+            str,
+            (
+                stream.get("codec_name") or stream.get("codec_tag_string") or "unknown"
+            ).lower(),
+        )
+        lang = _stream_language(stream)
+        flags = _stream_disposition_flags(stream)
+        sidecar = _sidecar_name(
+            pathlib.Path(src), stype, index, codec_hint, lang, flags, ext, dest_dir
+        )
+        try:
+            _export_stream(src, sidecar, index, muxer, verbose)
+            exports.append(
+                {
+                    "path": str(sidecar),
+                    "stream": stream,
+                    "stype": stype,
+                    "mkv_ok": mkv_ok,
+                }
+            )
+            if stype == "d":
+                pkt = _write_packet_index(src, index, sidecar)
+                if pkt is not None:
+                    extras.append(pkt)
+        except RuntimeError as exc:
+            logging.warning("failed to export stream %s: %s", index, exc)
+
+    attachments = _export_attachments(src, dest_dir, verbose)
+    return {
+        "exports": exports,
+        "attachments": attachments,
+        "metadata_path": meta_path,
+        "extras": extras,
+    }
+
+
+def _mkvmerge_args(
+    streams: List[Tuple[pathlib.Path, Dict[str, Any], str]],
+    timestamps: Optional[Dict[pathlib.Path, pathlib.Path]] = None,
+) -> Tuple[List[str], List[pathlib.Path]]:
+    order = {"v": 0, "a": 1, "s": 2, "d": 3, "t": 4}
+    args: List[str] = []
+    used: List[pathlib.Path] = []
+    for path, stream, stype in sorted(streams, key=lambda item: order.get(item[2], 9)):
+        if stype not in {"v", "a", "s"}:
+            continue
+        ts_map = timestamps or {}
+        lang = _stream_language(stream)
+        title = _stream_title(stream)
+        flags = _stream_disposition_flags(stream)
+        if lang:
+            args += ["--language", f"0:{lang}"]
+        if title:
+            args += ["--track-name", f"0:{title}"]
+        if "default" in flags:
+            args += ["--default-track-flag", "0:yes"]
+        if "forced" in flags:
+            args += ["--forced-track-flag", "0:yes"]
+        if path in ts_map:
+            args += ["--timestamps", f"0:{ts_map[path]}"]
+        args.append(str(path))
+        used.append(path)
+    return args, used
 
 
 def _print_command(cmd: Sequence[str]) -> None:
@@ -1055,7 +1497,6 @@ def main() -> None:
         stage_src = os.path.join(args.stage_dir, f"{stem}.{h}{ext}")
         stage_part = os.path.join(args.stage_dir, out_name + ".part")
         remux_output = stage_part + ".mkvmerge"
-        ffmpeg_output = stage_part + ".ffmpeg"
         key = src_key(os.path.abspath(src), st)
         rec = manifest["items"].get(
             key, {"type": "video", "src": src, "output": out_name, "status": "pending"}
@@ -1073,9 +1514,6 @@ def main() -> None:
         if final_dir and not os.path.exists(final_dir):
             os.makedirs(final_dir, exist_ok=True)
         part_path = final_path + ".part"
-        original_rel = os.path.basename(src)
-        original_rel = os.path.normpath(original_rel)
-        original_final_path = os.path.join(args.output_dir, original_rel)
 
         def mark_pending(error: Optional[str] = None) -> None:
             rec["status"] = "pending"
@@ -1096,7 +1534,6 @@ def main() -> None:
             part_path,
             stage_part,
             remux_output,
-            ffmpeg_output,
         ):
             if os.path.exists(stale):
                 try:
@@ -1130,7 +1567,6 @@ def main() -> None:
             except FileNotFoundError:
                 pass
 
-        start_timecode = "00:00:00:00"
         original_creation_date: Optional[str] = None
         try:
             if os.path.exists(stage_src):
@@ -1141,7 +1577,6 @@ def main() -> None:
             if args.verbose:
                 logging.info("staging -> %s", stage_src)
             shutil.copy2(src, stage_src)
-            start_timecode = find_start_timecode(stage_src)
             original_creation_date = get_container_creation_date(stage_src)
         except Exception as e:
             logging.error("failed to stage source %s -> %s: %s", src, stage_src, e)
@@ -1149,234 +1584,339 @@ def main() -> None:
             continue
 
         audio_kbps = max(1, int(audio_bps / 1000))
-        ff = [
-            "ffmpeg",
-        ]
-        if args.verbose:
-            ff += [
-                "-stats",
-                "-loglevel",
-                "info",
-            ]
-        else:
-            ff += [
-                "-hide_banner",
-                "-loglevel",
-                "warning",
-            ]
-        ff.append("-y")
-        ff.append("-ignore_unknown")
-        ff += [
-            "-i",
-            stage_src,
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a?",
-            "-map",
-            "0:s?",
-            "-map",
-            "-0:d?",
-            "-map",
-            "0:t?",
-            "-copyts",
-            "-start_at_zero",
-            "-fps_mode",
-            "passthrough",
-            "-c:v",
-            "libsvtav1",
-        ]
-        if use_constant_quality:
-            ff += ["-crf", str(args.constant_quality), "-b:v", "0"]
-        else:
-            ff += ["-b:v", f"{global_video_kbps}k"]
-        ff += [
-            "-preset",
-            "5",
-            "-svtav1-params",
-            f"lp={args.svt_lp}",
-        ]
-        ff += [
-            "-c:a",
-            "libopus",
-            "-b:a",
-            f"{audio_kbps}k",
-        ]
-        ff += [
-            "-c:s",
-            "copy",
-        ]
-        ff += [
-            "-metadata",
-            f"timecode={start_timecode}",
-        ]
-        ff += [
-            "-f",
-            "matroska",
-        ]
-        ff += ["-map_metadata", "0", "-map_chapters", "0"]
-        ff.append(ffmpeg_output)
+        streams_root = pathlib.Path(os.path.join(args.stage_dir, f"{stem}.{h}.streams"))
+        if streams_root.exists():
+            shutil.rmtree(streams_root, ignore_errors=True)
 
-        rec.pop("error", None)
-        rec.update(
-            {
-                "status": "encoding_started",
-                "started_at": now_utc_iso(),
-                "output": output_rel,
-            }
-        )
-        manifest["items"][key] = rec
-        save_manifest(manifest, manifest_path)
+        finally_cleanup_files: List[str] = [stage_part, remux_output, stage_src]
 
         try:
-            logging.debug("+ %s", " ".join(map(str, ff)))
-            env = os.environ.copy()
-
-            if not args.verbose:
-                env["SVT_LOG"] = "2"
-            else:
-                env["SVT_LOG"] = "4"
-
-            _print_command(ff)
-            p = subprocess.run(ff, env=env)
-            if p.returncode != 0:
-                logging.error("ffmpeg failed for %s", src)
-                mark_pending(f"ffmpeg exited with code {p.returncode}")
-                continue
-
-            produced_path = ffmpeg_output
-            if not os.path.exists(produced_path):
-                logging.error("expected encoded output missing for %s", src)
-                mark_pending("encoded output missing")
-                continue
-
             try:
-                os.replace(produced_path, stage_part)
-            except OSError as exc:
-                logging.error("failed to finalize encoded output for %s: %s", src, exc)
-                mark_pending("failed to finalize encoded output")
-                continue
-
-            if not os.path.exists(stage_part):
-                logging.error("expected encoded output missing for %s", src)
-                mark_pending("encoded output missing")
-                continue
-
-            use_original_output = False
-            try:
-                encoded_size = os.path.getsize(stage_part)
-            except OSError as e:
-                logging.error("failed to stat encoded output for %s: %s", src, e)
-                mark_pending("failed to stat encoded output")
-                continue
-
-            if encoded_size > st.st_size:
-                logging.info(
-                    "encoded output larger than source; keeping original for %s", src
+                dumped = _dump_streams_and_metadata(
+                    stage_src, streams_root, args.verbose
                 )
-                original_part_path = original_final_path + ".part"
+            except Exception as exc:
+                logging.error("failed to dump streams for %s: %s", src, exc)
+                mark_pending("failed to dump streams")
+                continue
+            exports = dumped["exports"]
+            attachments = dumped["attachments"]
+            extras = dumped["extras"]
+            metadata_sidecar = dumped["metadata_path"]
+
+            original_video = next((exp for exp in exports if exp["stype"] == "v"), None)
+            if original_video is None:
+                logging.error("no video stream found for %s", src)
+                mark_pending("no video stream found")
+                continue
+
+            original_audio = next((exp for exp in exports if exp["stype"] == "a"), None)
+
+            rec.pop("error", None)
+            rec.update(
+                {
+                    "status": "encoding_started",
+                    "started_at": now_utc_iso(),
+                    "output": output_rel,
+                }
+            )
+            manifest["items"][key] = rec
+            save_manifest(manifest, manifest_path)
+
+            env = os.environ.copy()
+            env["SVT_LOG"] = "4" if args.verbose else "2"
+
+            base_name = pathlib.Path(src).stem
+            video_encode_path = streams_root / f"{base_name}.video.av1.ivf"
+            finally_cleanup_files.append(str(video_encode_path))
+
+            video_cmd = ["ffmpeg"]
+            if args.verbose:
+                video_cmd += ["-stats", "-loglevel", "info"]
+            else:
+                video_cmd += ["-hide_banner", "-loglevel", "warning"]
+            video_cmd += [
+                "-y",
+                "-ignore_unknown",
+                "-i",
+                stage_src,
+                "-map",
+                "0:v:0",
+                "-c:v",
+                "libsvtav1",
+            ]
+            if use_constant_quality:
+                video_cmd += ["-crf", str(args.constant_quality), "-b:v", "0"]
+            else:
+                video_cmd += ["-b:v", f"{global_video_kbps}k"]
+            video_cmd += [
+                "-preset",
+                "5",
+                "-svtav1-params",
+                f"lp={args.svt_lp}",
+                "-an",
+                "-sn",
+                "-dn",
+                "-f",
+                "ivf",
+                str(video_encode_path),
+            ]
+
+            _print_command(video_cmd)
+            video_proc = subprocess.run(video_cmd, env=env)
+            if video_proc.returncode != 0:
+                logging.error("video encode failed for %s", src)
+                mark_pending(f"video encode exited with code {video_proc.returncode}")
+                continue
+
+            if not video_encode_path.exists():
+                logging.error("expected encoded video missing for %s", src)
+                mark_pending("encoded video missing")
+                continue
+
+            try:
+                encoded_video_size = video_encode_path.stat().st_size
+                original_video_size = os.path.getsize(original_video["path"])
+            except OSError as exc:
+                logging.error("failed to stat video streams for %s: %s", src, exc)
+                mark_pending("failed to stat video streams")
+                continue
+
+            video_entry: StreamExport
+            skip_paths: set[pathlib.Path] = set()
+            if encoded_video_size >= original_video_size:
+                logging.info(
+                    "encoded video larger than source stream; keeping original for %s",
+                    src,
+                )
                 try:
-                    if os.path.exists(original_part_path):
-                        os.remove(original_part_path)
+                    video_encode_path.unlink()
                 except FileNotFoundError:
                     pass
-                try:
-                    shutil.copy2(src, original_part_path)
-                    _apply_source_timestamps(src, original_part_path, st)
-                    os.replace(original_part_path, original_final_path)
-                    use_original_output = True
-                    output_rel = original_rel
-                    final_path = original_final_path
-                    output_by_input[os.path.abspath(src)] = os.path.normpath(output_rel)
-                    rec["output"] = output_rel
-                except Exception as e:
-                    logging.error(
-                        "failed to copy original source to output for %s: %s", src, e
+                video_entry = original_video
+            else:
+                new_stream = json.loads(json.dumps(original_video["stream"]))
+                new_stream["codec_name"] = "av1"
+                new_stream["codec_tag_string"] = "av01"
+                video_entry = {
+                    "path": str(video_encode_path),
+                    "stream": new_stream,
+                    "stype": "v",
+                    "mkv_ok": True,
+                }
+                skip_paths.add(pathlib.Path(original_video["path"]))
+
+            audio_entry: Optional[StreamExport] = None
+            audio_encode_path: Optional[pathlib.Path] = None
+            if original_audio is not None:
+                audio_encode_path = streams_root / f"{base_name}.audio.opus.opus"
+                finally_cleanup_files.append(str(audio_encode_path))
+                audio_cmd = ["ffmpeg"]
+                if args.verbose:
+                    audio_cmd += ["-stats", "-loglevel", "info"]
+                else:
+                    audio_cmd += ["-hide_banner", "-loglevel", "warning"]
+                audio_cmd += [
+                    "-y",
+                    "-ignore_unknown",
+                    "-i",
+                    stage_src,
+                    "-map",
+                    "0:a:0",
+                    "-vn",
+                    "-sn",
+                    "-dn",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    f"{audio_kbps}k",
+                    "-f",
+                    "opus",
+                    str(audio_encode_path),
+                ]
+                _print_command(audio_cmd)
+                audio_proc = subprocess.run(audio_cmd)
+                if audio_proc.returncode != 0:
+                    logging.error("audio encode failed for %s", src)
+                    mark_pending(
+                        f"audio encode exited with code {audio_proc.returncode}"
                     )
-                    mark_pending("failed to copy original source to output")
+                    continue
+
+                if not audio_encode_path.exists():
+                    logging.error("expected encoded audio missing for %s", src)
+                    mark_pending("encoded audio missing")
+                    continue
+
+                try:
+                    encoded_audio_size = audio_encode_path.stat().st_size
+                    original_audio_size = os.path.getsize(original_audio["path"])
+                except OSError as exc:
+                    logging.error("failed to stat audio streams for %s: %s", src, exc)
+                    mark_pending("failed to stat audio streams")
+                    continue
+
+                if encoded_audio_size >= original_audio_size:
+                    logging.info(
+                        "encoded audio larger than source stream; keeping original for %s",
+                        src,
+                    )
                     try:
-                        if os.path.exists(original_part_path):
-                            os.remove(original_part_path)
+                        audio_encode_path.unlink()
                     except FileNotFoundError:
                         pass
-                    continue
-            else:
-                mux_cmd = [
-                    "mkvmerge",
-                    "-o",
-                    remux_output,
-                    "--disable-track-statistics-tags",
-                ]
-                mux_cmd.append(stage_part)
-                _print_command(mux_cmd)
-                mux_proc = subprocess.run(mux_cmd)
-                if mux_proc.returncode != 0:
-                    logging.error("mkvmerge failed for %s", src)
-                    mark_pending(f"mkvmerge exited with code {mux_proc.returncode}")
-                    continue
+                    audio_entry = original_audio
+                else:
+                    new_audio_stream = json.loads(json.dumps(original_audio["stream"]))
+                    new_audio_stream["codec_name"] = "opus"
+                    new_audio_stream["codec_tag_string"] = "Opus"
+                    audio_entry = {
+                        "path": str(audio_encode_path),
+                        "stream": new_audio_stream,
+                        "stype": "a",
+                        "mkv_ok": True,
+                    }
+                    skip_paths.add(pathlib.Path(original_audio["path"]))
 
-                if not os.path.exists(remux_output):
-                    logging.error("expected remuxed output missing for %s", src)
-                    mark_pending("remuxed output missing")
-                    continue
+            streams_for_mux: List[Tuple[pathlib.Path, Dict[str, Any], str]] = []
+            streams_for_mux.append(
+                (pathlib.Path(video_entry["path"]), video_entry["stream"], "v")
+            )
+            if audio_entry is not None:
+                streams_for_mux.append(
+                    (pathlib.Path(audio_entry["path"]), audio_entry["stream"], "a")
+                )
 
-                try:
-                    os.replace(remux_output, stage_part)
-                except OSError as exc:
-                    logging.error(
-                        "failed to finalize remuxed output for %s: %s", src, exc
+            timecodes_path = _generate_timecodes_v2(
+                stage_src, streams_root, f"{stem}{args.name_suffix}"
+            )
+            if timecodes_path is None:
+                logging.error("failed to generate timecodes for %s", src)
+                mark_pending("failed to generate timecodes")
+                continue
+
+            timestamps_map: Dict[pathlib.Path, pathlib.Path] = {
+                pathlib.Path(video_entry["path"]): timecodes_path
+            }
+
+            leftover_paths: set[pathlib.Path] = set()
+            selected_paths = {pathlib.Path(video_entry["path"])}
+            if audio_entry is not None:
+                selected_paths.add(pathlib.Path(audio_entry["path"]))
+
+            for export in exports:
+                export_path = pathlib.Path(export["path"])
+                if export_path in skip_paths:
+                    continue
+                if export_path in selected_paths:
+                    continue
+                if export["mkv_ok"] and export["stype"] in {"v", "a", "s"}:
+                    streams_for_mux.append(
+                        (export_path, export["stream"], export["stype"])
                     )
-                    mark_pending("failed to finalize remuxed output")
-                    continue
+                else:
+                    leftover_paths.add(export_path)
 
-                if original_creation_date:
-                    prop_cmd = [
-                        "mkvpropedit",
-                        stage_part,
-                        "--edit",
-                        "info",
-                        "--set",
-                        f"date={original_creation_date}",
-                    ]
-                    _print_command(prop_cmd)
-                    prop_proc = subprocess.run(prop_cmd)
-                    if prop_proc.returncode != 0:
-                        logging.error("mkvpropedit failed for %s", src)
-                        mark_pending(
-                            f"mkvpropedit exited with code {prop_proc.returncode}"
-                        )
-                        continue
+            mkv_args, used_sidecars = _mkvmerge_args(streams_for_mux, timestamps_map)
+            if not mkv_args:
+                logging.error("no mkvmerge-compatible streams for %s", src)
+                mark_pending("no mkvmerge-compatible streams")
+                continue
 
+            mux_cmd = [
+                "mkvmerge",
+                "-o",
+                remux_output,
+                "--disable-track-statistics-tags",
+            ]
+            mux_cmd += mkv_args
+            _print_command(mux_cmd)
+            mux_proc = subprocess.run(mux_cmd)
+            if mux_proc.returncode != 0:
+                logging.error("mkvmerge failed for %s", src)
+                mark_pending(f"mkvmerge exited with code {mux_proc.returncode}")
+                continue
+
+            if not os.path.exists(remux_output):
+                logging.error("expected remuxed output missing for %s", src)
+                mark_pending("remuxed output missing")
+                continue
+
+            try:
+                os.replace(remux_output, stage_part)
+            except OSError as exc:
+                logging.error("failed to finalize remuxed output for %s: %s", src, exc)
+                mark_pending("failed to finalize remuxed output")
+                continue
+
+            used_sidecar_paths = {pathlib.Path(p) for p in used_sidecars}
+            for used_path in used_sidecar_paths:
                 try:
-                    shutil.copy2(stage_part, part_path)
-                    _apply_source_timestamps(src, part_path, st)
-                except Exception as e:
-                    logging.error("failed to copy staged result to output: %s", e)
-                    mark_pending("failed to copy staged result")
+                    used_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+            leftover_paths -= used_sidecar_paths
+            for extra in extras:
+                leftover_paths.add(extra)
+            if metadata_sidecar is not None:
+                leftover_paths.add(metadata_sidecar)
+            for attachment in attachments:
+                leftover_paths.add(attachment)
+            leftover_paths.add(timecodes_path)
+
+            if original_creation_date:
+                prop_cmd = [
+                    "mkvpropedit",
+                    stage_part,
+                    "--edit",
+                    "info",
+                    "--set",
+                    f"date={original_creation_date}",
+                ]
+                _print_command(prop_cmd)
+                prop_proc = subprocess.run(prop_cmd)
+                if prop_proc.returncode != 0:
+                    logging.error("mkvpropedit failed for %s", src)
+                    mark_pending(f"mkvpropedit exited with code {prop_proc.returncode}")
                     continue
 
-                os.replace(part_path, final_path)
+            try:
+                shutil.copy2(stage_part, part_path)
+                _apply_source_timestamps(src, part_path, st)
+            except Exception as e:
+                logging.error("failed to copy staged result to output: %s", e)
+                mark_pending("failed to copy staged result")
+                continue
+
+            os.replace(part_path, final_path)
+
+            for sidecar in sorted(leftover_paths):
+                if not sidecar.exists():
+                    continue
+                try:
+                    rel = sidecar.relative_to(streams_root)
+                except ValueError:
+                    rel = pathlib.Path(sidecar.name)
+                dest_sidecar = pathlib.Path(final_dir) / rel
+                dest_sidecar.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(sidecar, dest_sidecar)
+                _apply_source_timestamps(src, str(dest_sidecar), st)
 
             rec.update({"status": "done", "finished_at": now_utc_iso()})
             manifest["items"][key] = rec
             save_manifest(manifest, manifest_path)
-            if not use_original_output:
-                encoded_count += 1
-            else:
-                metadata["used_original"] = True
+            encoded_count += 1
 
         finally:
-            for pth in (
-                stage_part,
-                remux_output,
-                stage_src,
-                ffmpeg_output,
-            ):
+            for pth in finally_cleanup_files:
                 try:
                     if os.path.exists(pth):
                         os.remove(pth)
                 except FileNotFoundError:
                     pass
+            if streams_root.exists():
+                shutil.rmtree(streams_root, ignore_errors=True)
 
     videos_by_dir: dict[str, list[dict[str, Any]]] = {}
     for info in video_metadata:
