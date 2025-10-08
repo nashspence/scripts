@@ -211,6 +211,12 @@ def _export_stream(
     ]
     cmd += _metadata_copy_args(stream_types)
     cmd += [
+        "-avoid_negative_ts",
+        "make_non_negative",
+        "-muxpreload",
+        "0",
+        "-muxdelay",
+        "0",
         "-c",
         "copy",
         "-f",
@@ -233,7 +239,21 @@ def _export_attachments(
         cmd += ["-stats", "-loglevel", "info"]
     else:
         cmd += ["-hide_banner", "-loglevel", "warning"]
-    cmd += ["-dump_attachment:t", "", "-i", src, "-f", "null", os.devnull]
+    cmd += [
+        "-dump_attachment:t",
+        "",
+        "-i",
+        src,
+        "-avoid_negative_ts",
+        "make_non_negative",
+        "-muxpreload",
+        "0",
+        "-muxdelay",
+        "0",
+        "-f",
+        "null",
+        os.devnull,
+    ]
     _print_command(cmd)
     proc = subprocess.run(cmd, cwd=str(attach_dir))
     if proc.returncode != 0:
@@ -1944,6 +1964,12 @@ def main() -> None:
             ]
             video_cmd += _metadata_copy_args(["v"])
             video_cmd += [
+                "-avoid_negative_ts",
+                "make_non_negative",
+                "-muxpreload",
+                "0",
+                "-muxdelay",
+                "0",
                 "-c:v",
                 "libsvtav1",
             ]
@@ -2035,6 +2061,12 @@ def main() -> None:
                     "-dn",
                     "-af",
                     "asetpts=PTS-STARTPTS",
+                    "-avoid_negative_ts",
+                    "make_non_negative",
+                    "-muxpreload",
+                    "0",
+                    "-muxdelay",
+                    "0",
                     "-c:a",
                     "libopus",
                     "-ar",
