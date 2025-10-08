@@ -139,6 +139,52 @@ def test_dump_streams_data_fallback(monkeypatch, tmp_path):
     assert export_calls[1][1] == "data"
 
 
+def test_dump_streams_data_fallback_empty_packets(monkeypatch, tmp_path):
+    metadata = {
+        "format": {"format_name": "matroska"},
+        "streams": [
+            {
+                "index": 0,
+                "codec_type": "data",
+                "codec_name": "dvd_nav_packet",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(script, "ffprobe_json", lambda cmd: metadata)
+
+    def fake_export_stream(src, output, stream_index, muxer, verbose, *, stream_types):
+        path = Path(output)
+        if muxer == "matroska":
+            raise RuntimeError("muxer failed")
+        path.write_bytes(b"data")
+
+    monkeypatch.setattr(script, "_export_stream", fake_export_stream)
+    monkeypatch.setattr(
+        script,
+        "_collect_packet_timestamps_seconds",
+        lambda src, idx, spec: [],
+    )
+    monkeypatch.setattr(
+        script,
+        "_export_attachments",
+        lambda src, dest_dir, verbose: [],
+    )
+
+    result = script._dump_streams_and_metadata(
+        str(tmp_path / "input.mkv"), tmp_path, False, naming_stem="input"
+    )
+
+    exports = result["exports"]
+    assert len(exports) == 1
+    entry = exports[0]
+    packets_path = Path(entry["path"]).with_suffix(".packets.json")
+    assert packets_path.exists()
+    with packets_path.open("r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    assert payload == {"packets": []}
+
+
 def test_ffprobe_duration(monkeypatch):
     monkeypatch.setattr(script, "probe_media_info", lambda path: {"duration": 12.34})
     assert script.ffprobe_duration("path") == 12.34
