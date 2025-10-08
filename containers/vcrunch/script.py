@@ -2174,6 +2174,9 @@ def main() -> None:
                     )
                 else:
                     leftover_paths.add(export_path)
+                    packet_path_str = export.get("packet_timestamps_path")
+                    if packet_path_str:
+                        leftover_paths.add(pathlib.Path(packet_path_str))
 
             mkv_args, used_sidecars = _mkvmerge_args(streams_for_mux)
             if not mkv_args:
