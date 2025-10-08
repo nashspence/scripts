@@ -672,7 +672,7 @@ def _dump_streams_and_metadata(
                     timestamps = _collect_packet_timestamps_seconds(
                         src, index, stream_spec
                     )
-                if timestamps:
+                if timestamps is not None:
                     packets_path = fallback_path.with_suffix(".packets.json")
                     try:
                         with open(packets_path, "w", encoding="utf-8") as fh:
