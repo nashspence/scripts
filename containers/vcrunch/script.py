@@ -27,11 +27,15 @@ DEFAULT_SAFETY_OVERHEAD = 0.012
 VERBOSE_LEVEL = 0
 
 
-class StreamExport(TypedDict):
+class _StreamExportRequired(TypedDict):
     path: str
     stream: Dict[str, Any]
     stype: str
     mkv_ok: bool
+
+
+class StreamExport(_StreamExportRequired, total=False):
+    packet_timestamps_path: str
 
 
 class DumpedStreams(TypedDict):
@@ -524,6 +528,8 @@ def _dump_streams_and_metadata(
         type_counters[letter] = ordinal + 1
         stream_specifiers[raw_index] = f"{letter}:{ordinal}"
 
+    total_data_streams = type_counters.get("d", 0)
+
     for stream in streams:
         try:
             index = int(stream.get("index", -1))
@@ -586,6 +592,73 @@ def _dump_streams_and_metadata(
                 }
             )
         except RuntimeError as exc:
+            if (
+                stype == "d"
+                and container_format_name
+                and target_muxer == container_format_name
+                and total_data_streams == 1
+            ):
+                logging.info(
+                    "failed to export data stream %s using %s; falling back to raw data: %s",
+                    index,
+                    container_format_name,
+                    exc,
+                )
+                try:
+                    sidecar.unlink()
+                except FileNotFoundError:
+                    pass
+                fallback_path = sidecar.with_suffix(".data")
+                try:
+                    _export_stream(
+                        src,
+                        fallback_path,
+                        index,
+                        "data",
+                        verbose,
+                        stream_types=[stype],
+                    )
+                except RuntimeError as fallback_exc:
+                    logging.warning(
+                        "failed to export data stream %s as raw data: %s",
+                        index,
+                        fallback_exc,
+                    )
+                    continue
+
+                packets_path: Optional[pathlib.Path] = None
+                stream_spec = stream_specifiers.get(index)
+                if stream_spec:
+                    timestamps = _collect_packet_timestamps_seconds(
+                        src, index, stream_spec
+                    )
+                    if timestamps:
+                        packets_path = fallback_path.with_suffix(
+                            fallback_path.suffix + ".packets.json"
+                        )
+                        try:
+                            with open(packets_path, "w", encoding="utf-8") as fh:
+                                json.dump({"packets": timestamps}, fh, indent=2)
+                                fh.write("\n")
+                        except OSError as write_exc:
+                            logging.warning(
+                                "failed to write packet timestamps for stream %s: %s",
+                                index,
+                                write_exc,
+                            )
+                            packets_path = None
+
+                export_entry: StreamExport = {
+                    "path": str(fallback_path),
+                    "stream": stream,
+                    "stype": stype,
+                    "mkv_ok": False,
+                }
+                if packets_path is not None:
+                    export_entry["packet_timestamps_path"] = str(packets_path)
+                exports.append(export_entry)
+                continue
+
             logging.warning("failed to export stream %s: %s", index, exc)
 
     attachments = _export_attachments(src, dest_dir, verbose)
