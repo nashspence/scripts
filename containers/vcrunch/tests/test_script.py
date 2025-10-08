@@ -90,7 +90,17 @@ def test_dump_streams_data_fallback(monkeypatch, tmp_path):
         ],
     }
 
-    monkeypatch.setattr(script, "ffprobe_json", lambda cmd: metadata)
+    def fake_ffprobe_json(cmd):
+        if "-show_packets" in cmd:
+            return {
+                "packets": [
+                    {"pts_time": "0"},
+                    {"pts_time": "1"},
+                ]
+            }
+        return metadata
+
+    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
 
     export_calls = []
 
@@ -102,11 +112,6 @@ def test_dump_streams_data_fallback(monkeypatch, tmp_path):
         path.write_bytes(b"data")
 
     monkeypatch.setattr(script, "_export_stream", fake_export_stream)
-    monkeypatch.setattr(
-        script,
-        "_collect_packet_timestamps_seconds",
-        lambda src, idx, spec: [0.0, 1.0],
-    )
     monkeypatch.setattr(
         script,
         "_export_attachments",
@@ -151,7 +156,12 @@ def test_dump_streams_data_fallback_empty_packets(monkeypatch, tmp_path):
         ],
     }
 
-    monkeypatch.setattr(script, "ffprobe_json", lambda cmd: metadata)
+    def fake_ffprobe_json(cmd):
+        if "-show_packets" in cmd:
+            return {"packets": []}
+        return metadata
+
+    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
 
     def fake_export_stream(src, output, stream_index, muxer, verbose, *, stream_types):
         path = Path(output)
@@ -160,11 +170,6 @@ def test_dump_streams_data_fallback_empty_packets(monkeypatch, tmp_path):
         path.write_bytes(b"data")
 
     monkeypatch.setattr(script, "_export_stream", fake_export_stream)
-    monkeypatch.setattr(
-        script,
-        "_collect_packet_timestamps_seconds",
-        lambda src, idx, spec: [],
-    )
     monkeypatch.setattr(
         script,
         "_export_attachments",
@@ -183,6 +188,53 @@ def test_dump_streams_data_fallback_empty_packets(monkeypatch, tmp_path):
     with packets_path.open("r", encoding="utf-8") as fh:
         payload = json.load(fh)
     assert payload == {"packets": []}
+
+
+def test_packet_sidecar_path_prefers_recorded(tmp_path):
+    export_path = tmp_path / "sample.data"
+    export_path.write_bytes(b"")
+    recorded = tmp_path / "custom.packets.json"
+    recorded.write_text("{}", encoding="utf-8")
+    export: script.StreamExport = {
+        "path": str(export_path),
+        "stream": {},
+        "stype": "d",
+        "mkv_ok": False,
+        "packet_timestamps_path": str(recorded),
+    }
+
+    result = script._packet_sidecar_path(export, export_path)
+    assert result == recorded
+
+
+def test_packet_sidecar_path_infers_missing_record(tmp_path):
+    export_path = tmp_path / "sample.data"
+    export_path.write_bytes(b"")
+    inferred = export_path.with_suffix(".packets.json")
+    inferred.write_text("{}", encoding="utf-8")
+    export: script.StreamExport = {
+        "path": str(export_path),
+        "stream": {},
+        "stype": "d",
+        "mkv_ok": False,
+    }
+
+    result = script._packet_sidecar_path(export, export_path)
+    assert result == inferred
+
+
+def test_packet_sidecar_path_missing_file(tmp_path):
+    export_path = tmp_path / "sample.data"
+    export_path.write_bytes(b"")
+    export: script.StreamExport = {
+        "path": str(export_path),
+        "stream": {},
+        "stype": "d",
+        "mkv_ok": False,
+    }
+
+    result = script._packet_sidecar_path(export, export_path)
+    assert result is None
 
 
 def test_ffprobe_duration(monkeypatch):
