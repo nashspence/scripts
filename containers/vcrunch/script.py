@@ -24,6 +24,8 @@ MAX_SVT_KBPS = 100_000
 DEFAULT_TARGET_SIZE = "23.30G"
 DEFAULT_SAFETY_OVERHEAD = 0.012
 
+FFMPEG_GENPTS_INPUT_FLAG = "+genpts"
+
 VERBOSE_LEVEL = 0
 
 
@@ -204,6 +206,8 @@ def _export_stream(
     else:
         cmd += ["-hide_banner", "-loglevel", "warning"]
     cmd += [
+        "-fflags",
+        FFMPEG_GENPTS_INPUT_FLAG,
         "-i",
         src,
         "-map",
@@ -242,6 +246,8 @@ def _export_attachments(
     cmd += [
         "-dump_attachment:t",
         "",
+        "-fflags",
+        FFMPEG_GENPTS_INPUT_FLAG,
         "-i",
         src,
         "-avoid_negative_ts",
@@ -1956,7 +1962,7 @@ def main() -> None:
                 "-y",
                 "-ignore_unknown",
                 "-fflags",
-                "+genpts+igndts",
+                f"{FFMPEG_GENPTS_INPUT_FLAG}+igndts",
                 "-i",
                 stage_src,
                 "-map",
@@ -2049,6 +2055,8 @@ def main() -> None:
                 audio_cmd += [
                     "-y",
                     "-ignore_unknown",
+                    "-fflags",
+                    FFMPEG_GENPTS_INPUT_FLAG,
                     "-i",
                     stage_src,
                     "-map",
