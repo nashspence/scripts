@@ -127,7 +127,7 @@ def test_dump_streams_data_fallback(monkeypatch, tmp_path):
     assert data_path.exists()
     assert data_path.suffix == ".data"
 
-    packets_path = data_path.with_suffix(data_path.suffix + ".packets.json")
+    packets_path = data_path.with_suffix(".packets.json")
     assert packets_path.exists()
     with packets_path.open("r", encoding="utf-8") as fh:
         payload = json.load(fh)
@@ -378,6 +378,21 @@ def test_copy_assets_preserves_metadata(tmp_path):
     assert dest.exists()
     assert results == [(str(src), "asset.bin")]
     assert int(dest.stat().st_mtime) == ts
+
+
+def test_copy_assets_lowercases_extension(tmp_path):
+    src = tmp_path / "asset.DATA"
+    src.write_text("payload")
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    results = script.copy_assets([str(src)], str(out_dir))
+
+    dest = out_dir / "asset.data"
+    assert dest.exists()
+    assert not (out_dir / "asset.DATA").exists()
+    assert results == [(str(src), "asset.data")]
 
 
 def test_copy_assets_renames_and_preserves_metadata(tmp_path):
