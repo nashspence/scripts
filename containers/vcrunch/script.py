@@ -481,7 +481,7 @@ def _collect_packet_timestamps_seconds(
             stream_index,
             stream_spec,
         )
-        return None
+        return []
     fixed: List[float] = []
     last = float("-inf")
     for ts in timestamps:
@@ -738,6 +738,19 @@ def _print_command(cmd: Sequence[str]) -> None:
         return
     cmdline = " ".join(shlex.quote(str(part)) for part in cmd)
     print(cmdline, file=sys.stderr)
+
+
+def _packet_sidecar_path(
+    export: StreamExport, export_path: pathlib.Path
+) -> Optional[pathlib.Path]:
+    packet_path_str = export.get("packet_timestamps_path")
+    if packet_path_str:
+        return pathlib.Path(packet_path_str)
+    if export.get("stype") == "d" and not export.get("mkv_ok"):
+        inferred = export_path.with_suffix(".packets.json")
+        if inferred.exists():
+            return inferred
+    return None
 
 
 def _apply_birthtime(path: str, birthtime: float) -> None:
@@ -2174,9 +2187,9 @@ def main() -> None:
                     )
                 else:
                     leftover_paths.add(export_path)
-                    packet_path_str = export.get("packet_timestamps_path")
-                    if packet_path_str:
-                        leftover_paths.add(pathlib.Path(packet_path_str))
+                    packet_sidecar = _packet_sidecar_path(export, export_path)
+                    if packet_sidecar is not None:
+                        leftover_paths.add(packet_sidecar)
 
             mkv_args, used_sidecars = _mkvmerge_args(streams_for_mux)
             if not mkv_args:
