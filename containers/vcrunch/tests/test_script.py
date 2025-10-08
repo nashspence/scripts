@@ -764,7 +764,15 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     assert cmd[ff_idx + 1] == "+genpts+igndts"
     assert "-copyts" not in cmd
     assert "-start_at_zero" not in cmd
-    assert "-avoid_negative_ts" not in cmd
+    assert "-avoid_negative_ts" in cmd
+    ant_idx = cmd.index("-avoid_negative_ts")
+    assert cmd[ant_idx + 1] == "make_non_negative"
+    assert "-muxpreload" in cmd
+    muxpreload_idx = cmd.index("-muxpreload")
+    assert cmd[muxpreload_idx + 1] == "0"
+    assert "-muxdelay" in cmd
+    muxdelay_idx = cmd.index("-muxdelay")
+    assert cmd[muxdelay_idx + 1] == "0"
     assert "-fps_mode" in cmd
     fps_idx = cmd.index("-fps_mode")
     assert cmd[fps_idx + 1] == "passthrough"
@@ -1136,7 +1144,15 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     assert "+genpts+igndts" in video_cmd
     assert "-copyts" not in video_cmd
     assert "-start_at_zero" not in video_cmd
-    assert "-avoid_negative_ts" not in video_cmd
+    assert "-avoid_negative_ts" in video_cmd
+    video_ant_idx = video_cmd.index("-avoid_negative_ts")
+    assert video_cmd[video_ant_idx + 1] == "make_non_negative"
+    assert "-muxpreload" in video_cmd
+    video_muxpreload_idx = video_cmd.index("-muxpreload")
+    assert video_cmd[video_muxpreload_idx + 1] == "0"
+    assert "-muxdelay" in video_cmd
+    video_muxdelay_idx = video_cmd.index("-muxdelay")
+    assert video_cmd[video_muxdelay_idx + 1] == "0"
     assert "-fps_mode" in video_cmd
     video_metadata_pairs = [
         ("-map_metadata", "0"),
@@ -1159,7 +1175,15 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     assert audio_cmd[audio_cmd.index("-c:a") + 1] == "libopus"
     assert "-copyts" not in audio_cmd
     assert "-start_at_zero" not in audio_cmd
-    assert "-avoid_negative_ts" not in audio_cmd
+    assert "-avoid_negative_ts" in audio_cmd
+    audio_ant_idx = audio_cmd.index("-avoid_negative_ts")
+    assert audio_cmd[audio_ant_idx + 1] == "make_non_negative"
+    assert "-muxpreload" in audio_cmd
+    audio_muxpreload_idx = audio_cmd.index("-muxpreload")
+    assert audio_cmd[audio_muxpreload_idx + 1] == "0"
+    assert "-muxdelay" in audio_cmd
+    audio_muxdelay_idx = audio_cmd.index("-muxdelay")
+    assert audio_cmd[audio_muxdelay_idx + 1] == "0"
     audio_metadata_pairs = [
         ("-map_metadata", "0"),
         ("-map_metadata:s:a", "0:s:a"),
