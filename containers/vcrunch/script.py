@@ -14,7 +14,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from fractions import Fraction
-from typing import Any, Dict, List, Optional, Sequence, Tuple, TypedDict, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypedDict, TypeVar, cast
 from xml.sax.saxutils import escape as xml_escape
 
 OUT_EXT = ".mkv"
@@ -186,6 +186,23 @@ def _sidecar_name(
         parts.extend(flags[:2])
     filename = ".".join([stem] + parts) + f".{ext}"
     return dest_dir / filename
+
+
+_PurePathT = TypeVar("_PurePathT", bound=pathlib.PurePath)
+
+
+def _lowercase_suffix(path: _PurePathT) -> _PurePathT:
+    suffix = path.suffix
+    if not suffix:
+        return path
+    lowered = suffix.lower()
+    if lowered == suffix:
+        return path
+    return path.with_suffix(lowered)
+
+
+def _lowercase_suffix_str(path_str: str) -> str:
+    return str(_lowercase_suffix(pathlib.PurePath(path_str)))
 
 
 def _export_stream(
@@ -650,25 +667,24 @@ def _dump_streams_and_metadata(
 
                 packets_path: Optional[pathlib.Path] = None
                 stream_spec = stream_specifiers.get(index)
+                timestamps: Optional[List[float]] = None
                 if stream_spec:
                     timestamps = _collect_packet_timestamps_seconds(
                         src, index, stream_spec
                     )
-                    if timestamps:
-                        packets_path = fallback_path.with_suffix(
-                            fallback_path.suffix + ".packets.json"
+                if timestamps:
+                    packets_path = fallback_path.with_suffix(".packets.json")
+                    try:
+                        with open(packets_path, "w", encoding="utf-8") as fh:
+                            json.dump({"packets": timestamps}, fh, indent=2)
+                            fh.write("\n")
+                    except OSError as write_exc:
+                        logging.warning(
+                            "failed to write packet timestamps for stream %s: %s",
+                            index,
+                            write_exc,
                         )
-                        try:
-                            with open(packets_path, "w", encoding="utf-8") as fh:
-                                json.dump({"packets": timestamps}, fh, indent=2)
-                                fh.write("\n")
-                        except OSError as write_exc:
-                            logging.warning(
-                                "failed to write packet timestamps for stream %s: %s",
-                                index,
-                                write_exc,
-                            )
-                            packets_path = None
+                        packets_path = None
 
                 export_entry: StreamExport = {
                     "path": str(fallback_path),
@@ -1323,6 +1339,7 @@ def copy_assets(
     for src in assets:
         dest_name = rename_map.get(src, os.path.basename(src))
         dest_name = os.path.normpath(dest_name)
+        dest_name = _lowercase_suffix_str(dest_name)
         dest = os.path.join(out_dir, dest_name)
         if os.path.abspath(src) == os.path.abspath(dest):
             continue
@@ -1807,7 +1824,7 @@ def main() -> None:
         stem = sanitize_base(pathlib.Path(src).stem)
         ext = pathlib.Path(src).suffix
         output_ext = OUT_EXT
-        out_name = f"{stem}{args.name_suffix}{output_ext}"
+        out_name = _lowercase_suffix_str(f"{stem}{args.name_suffix}{output_ext}")
         metadata = {
             "dir": os.path.abspath(os.path.dirname(src)),
             "original": os.path.basename(src),
@@ -1825,11 +1842,13 @@ def main() -> None:
             key, {"type": "video", "src": src, "output": out_name, "status": "pending"}
         )
 
-        output_rel = rec.get("output") or out_name
+        output_rel = _lowercase_suffix_str(rec.get("output") or out_name)
         desired_ext_lower = output_ext.lower()
         current_ext = os.path.splitext(output_rel)[1].lower()
         if current_ext != desired_ext_lower:
             output_rel = out_name
+        else:
+            output_rel = _lowercase_suffix_str(output_rel)
         rec["output"] = output_rel
         output_by_input[os.path.abspath(src)] = os.path.normpath(output_rel)
         final_path = os.path.join(args.output_dir, output_rel)
@@ -2239,7 +2258,7 @@ def main() -> None:
                     rel = sidecar.relative_to(streams_root)
                 except ValueError:
                     rel = pathlib.Path(sidecar.name)
-                dest_sidecar = pathlib.Path(final_dir) / rel
+                dest_sidecar = _lowercase_suffix(pathlib.Path(final_dir) / rel)
                 dest_sidecar.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(sidecar, dest_sidecar)
                 _apply_source_timestamps(src, str(dest_sidecar), st)
