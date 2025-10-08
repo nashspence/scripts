@@ -41,6 +41,26 @@ class DumpedStreams(TypedDict):
     container_tags: Dict[str, str]
 
 
+_METADATA_COPY_ARGS = [
+    "-map_metadata",
+    "0",
+    "-map_metadata:s:v",
+    "0:s:v",
+    "-map_metadata:s:a",
+    "0:s:a",
+    "-map_metadata:s:s",
+    "0:s:s",
+    "-map_metadata:s:d",
+    "0:s:d",
+    "-map_metadata:s:t",
+    "0:s:t",
+]
+
+
+def _metadata_copy_args() -> List[str]:
+    return list(_METADATA_COPY_ARGS)
+
+
 VIDEO_STREAM_MAP: Dict[str, Tuple[str, str, bool]] = {
     "h264": ("h264", "h264", True),
     "hevc": ("hevc", "h265", True),
@@ -187,6 +207,9 @@ def _export_stream(
         src,
         "-map",
         f"0:{stream_index}",
+    ]
+    cmd += _metadata_copy_args()
+    cmd += [
         "-c",
         "copy",
         "-f",
@@ -1828,6 +1851,9 @@ def main() -> None:
                 stage_src,
                 "-map",
                 "0:v:0",
+            ]
+            video_cmd += _metadata_copy_args()
+            video_cmd += [
                 "-c:v",
                 "libsvtav1",
             ]
@@ -1917,6 +1943,9 @@ def main() -> None:
                     stage_src,
                     "-map",
                     "0:a:0",
+                ]
+                audio_cmd += _metadata_copy_args()
+                audio_cmd += [
                     "-vn",
                     "-sn",
                     "-dn",
