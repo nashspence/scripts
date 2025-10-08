@@ -706,12 +706,9 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     assert "-avoid_negative_ts" in cmd
     ant_idx = cmd.index("-avoid_negative_ts")
     assert cmd[ant_idx + 1] == "make_zero"
-    assert "-vsync" in cmd
-    vsync_idx = cmd.index("-vsync")
-    assert cmd[vsync_idx + 1] == "vfr"
     assert "-fps_mode" in cmd
     fps_idx = cmd.index("-fps_mode")
-    assert cmd[fps_idx + 1] == "vfr"
+    assert cmd[fps_idx + 1] == "passthrough"
     assert "-crf" in cmd
     idx = cmd.index("-crf")
     assert cmd[idx + 1] == "32"
@@ -1083,20 +1080,21 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     assert "-avoid_negative_ts" in video_cmd
     avoid_idx = video_cmd.index("-avoid_negative_ts")
     assert video_cmd[avoid_idx + 1] == "make_zero"
-    assert "-vsync" in video_cmd
     assert "-fps_mode" in video_cmd
-    metadata_pairs = [
+    video_metadata_pairs = [
         ("-map_metadata", "0"),
         ("-map_metadata:s:v", "0:s:v"),
-        ("-map_metadata:s:a", "0:s:a"),
-        ("-map_metadata:s:s", "0:s:s"),
-        ("-map_metadata:s:d", "0:s:d"),
-        ("-map_metadata:s:t", "0:s:t"),
     ]
-    for flag, value in metadata_pairs:
+    for flag, value in video_metadata_pairs:
         assert flag in video_cmd
-        idx = video_cmd.index(flag)
-        assert video_cmd[idx + 1] == value
+    absent_metadata_flags = [
+        "-map_metadata:s:a",
+        "-map_metadata:s:s",
+        "-map_metadata:s:d",
+        "-map_metadata:s:t",
+    ]
+    for flag in absent_metadata_flags:
+        assert flag not in video_cmd
     assert "-f" in video_cmd
     assert video_cmd[video_cmd.index("-f") + 1] == "matroska"
 
@@ -1107,10 +1105,19 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     assert "-avoid_negative_ts" in audio_cmd
     ant_audio_idx = audio_cmd.index("-avoid_negative_ts")
     assert audio_cmd[ant_audio_idx + 1] == "make_zero"
-    for flag, value in metadata_pairs:
+    audio_metadata_pairs = [
+        ("-map_metadata", "0"),
+        ("-map_metadata:s:a", "0:s:a"),
+    ]
+    for flag, value in audio_metadata_pairs:
         assert flag in audio_cmd
-        idx = audio_cmd.index(flag)
-        assert audio_cmd[idx + 1] == value
+    for flag in [
+        "-map_metadata:s:v",
+        "-map_metadata:s:s",
+        "-map_metadata:s:d",
+        "-map_metadata:s:t",
+    ]:
+        assert flag not in audio_cmd
     assert "-af" in audio_cmd
     af_idx = audio_cmd.index("-af")
     assert audio_cmd[af_idx + 1] == "asetpts=PTS-STARTPTS"

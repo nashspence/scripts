@@ -41,24 +41,23 @@ class DumpedStreams(TypedDict):
     container_tags: Dict[str, str]
 
 
-_METADATA_COPY_ARGS = [
-    "-map_metadata",
-    "0",
-    "-map_metadata:s:v",
-    "0:s:v",
-    "-map_metadata:s:a",
-    "0:s:a",
-    "-map_metadata:s:s",
-    "0:s:s",
-    "-map_metadata:s:d",
-    "0:s:d",
-    "-map_metadata:s:t",
-    "0:s:t",
+_METADATA_COPY_BASE = ["-map_metadata", "0"]
+_METADATA_COPY_STREAM_MAP: List[Tuple[str, List[str]]] = [
+    ("v", ["-map_metadata:s:v", "0:s:v"]),
+    ("a", ["-map_metadata:s:a", "0:s:a"]),
+    ("s", ["-map_metadata:s:s", "0:s:s"]),
+    ("d", ["-map_metadata:s:d", "0:s:d"]),
+    ("t", ["-map_metadata:s:t", "0:s:t"]),
 ]
 
 
-def _metadata_copy_args() -> List[str]:
-    return list(_METADATA_COPY_ARGS)
+def _metadata_copy_args(stream_types: Sequence[str]) -> List[str]:
+    args = list(_METADATA_COPY_BASE)
+    present = {stype for stype in stream_types}
+    for stype, option in _METADATA_COPY_STREAM_MAP:
+        if stype in present:
+            args.extend(option)
+    return args
 
 
 VIDEO_STREAM_MAP: Dict[str, Tuple[str, str, bool]] = {
@@ -189,6 +188,8 @@ def _export_stream(
     stream_index: int,
     muxer: str,
     verbose: bool,
+    *,
+    stream_types: Sequence[str],
 ) -> None:
     cmd = [
         "ffmpeg",
@@ -208,7 +209,7 @@ def _export_stream(
         "-map",
         f"0:{stream_index}",
     ]
-    cmd += _metadata_copy_args()
+    cmd += _metadata_copy_args(stream_types)
     cmd += [
         "-c",
         "copy",
@@ -546,6 +547,13 @@ def _dump_streams_and_metadata(
             data_base = data_ext_hint or container_format_name or "mkv"
             data_token = _sanitize_token(data_base) or "mkv"
             target_ext = f"{data_token}data"
+        elif stype in {"v", "a", "s"} and not mkv_ok:
+            if container_format_name:
+                target_muxer = container_format_name
+                if source_suffix.startswith("."):
+                    target_ext = source_suffix[1:]
+                else:
+                    target_ext = _sanitize_token(container_format_name) or target_ext
         elif mkv_ok and stype in {"v", "a", "s"}:
             target_muxer = "matroska"
             target_ext = "mkv"
@@ -561,7 +569,14 @@ def _dump_streams_and_metadata(
             naming_stem=naming_stem,
         )
         try:
-            _export_stream(src, sidecar, index, target_muxer, verbose)
+            _export_stream(
+                src,
+                sidecar,
+                index,
+                target_muxer,
+                verbose,
+                stream_types=[stype],
+            )
             exports.append(
                 {
                     "path": str(sidecar),
@@ -1862,7 +1877,7 @@ def main() -> None:
                 "-map",
                 "0:v:0",
             ]
-            video_cmd += _metadata_copy_args()
+            video_cmd += _metadata_copy_args(["v"])
             video_cmd += [
                 "-c:v",
                 "libsvtav1",
@@ -1952,7 +1967,7 @@ def main() -> None:
                     "-map",
                     "0:a:0",
                 ]
-                audio_cmd += _metadata_copy_args()
+                audio_cmd += _metadata_copy_args(["a"])
                 audio_cmd += [
                     "-vn",
                     "-sn",
