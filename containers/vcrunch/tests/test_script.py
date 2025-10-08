@@ -762,11 +762,9 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     assert "-fflags" in cmd
     ff_idx = cmd.index("-fflags")
     assert cmd[ff_idx + 1] == "+genpts+igndts"
-    assert "-copyts" in cmd
-    assert "-start_at_zero" in cmd
-    assert "-avoid_negative_ts" in cmd
-    ant_idx = cmd.index("-avoid_negative_ts")
-    assert cmd[ant_idx + 1] == "make_zero"
+    assert "-copyts" not in cmd
+    assert "-start_at_zero" not in cmd
+    assert "-avoid_negative_ts" not in cmd
     assert "-fps_mode" in cmd
     fps_idx = cmd.index("-fps_mode")
     assert cmd[fps_idx + 1] == "passthrough"
@@ -1136,11 +1134,9 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     assert "-ignore_unknown" in video_cmd
     assert "-fflags" in video_cmd
     assert "+genpts+igndts" in video_cmd
-    assert "-copyts" in video_cmd
-    assert "-start_at_zero" in video_cmd
-    assert "-avoid_negative_ts" in video_cmd
-    avoid_idx = video_cmd.index("-avoid_negative_ts")
-    assert video_cmd[avoid_idx + 1] == "make_zero"
+    assert "-copyts" not in video_cmd
+    assert "-start_at_zero" not in video_cmd
+    assert "-avoid_negative_ts" not in video_cmd
     assert "-fps_mode" in video_cmd
     video_metadata_pairs = [
         ("-map_metadata", "0"),
@@ -1161,11 +1157,9 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
 
     audio_cmd = next(c for c in captured_cmds if c[0] == "ffmpeg" and "-c:a" in c)
     assert audio_cmd[audio_cmd.index("-c:a") + 1] == "libopus"
-    assert "-copyts" in audio_cmd
-    assert "-start_at_zero" in audio_cmd
-    assert "-avoid_negative_ts" in audio_cmd
-    ant_audio_idx = audio_cmd.index("-avoid_negative_ts")
-    assert audio_cmd[ant_audio_idx + 1] == "make_zero"
+    assert "-copyts" not in audio_cmd
+    assert "-start_at_zero" not in audio_cmd
+    assert "-avoid_negative_ts" not in audio_cmd
     audio_metadata_pairs = [
         ("-map_metadata", "0"),
         ("-map_metadata:s:a", "0:s:a"),

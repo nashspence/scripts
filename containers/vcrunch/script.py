@@ -204,10 +204,6 @@ def _export_stream(
     else:
         cmd += ["-hide_banner", "-loglevel", "warning"]
     cmd += [
-        "-copyts",
-        "-start_at_zero",
-        "-avoid_negative_ts",
-        "make_zero",
         "-i",
         src,
         "-map",
@@ -1941,10 +1937,6 @@ def main() -> None:
                 "-ignore_unknown",
                 "-fflags",
                 "+genpts+igndts",
-                "-copyts",
-                "-start_at_zero",
-                "-avoid_negative_ts",
-                "make_zero",
                 "-i",
                 stage_src,
                 "-map",
@@ -2031,10 +2023,6 @@ def main() -> None:
                 audio_cmd += [
                     "-y",
                     "-ignore_unknown",
-                    "-copyts",
-                    "-start_at_zero",
-                    "-avoid_negative_ts",
-                    "make_zero",
                     "-i",
                     stage_src,
                     "-map",
