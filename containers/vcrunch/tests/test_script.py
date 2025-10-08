@@ -930,6 +930,47 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
     assert pytest.approx(out_stat.st_mtime, rel=0, abs=1) == desired_mtime
 
 
+def test_dump_streams_data_sidecar_uses_container(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(cmd, **_):
+        calls.append(cmd)
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    ffprobe_output = {
+        "format": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "tags": {},
+        },
+        "streams": [
+            {
+                "index": 0,
+                "codec_type": "data",
+                "codec_name": "bin",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+    monkeypatch.setattr(script, "ffprobe_json", lambda cmd: ffprobe_output)
+
+    result = script._dump_streams_and_metadata("clip.mov", tmp_path, verbose=False)
+
+    data_exports = [exp for exp in result["exports"] if exp["stype"] == "d"]
+    assert len(data_exports) == 1
+    assert data_exports[0]["path"].endswith(".movdata")
+
+    data_cmd = next(
+        cmd for cmd in calls if cmd[0] == "ffmpeg" and cmd[-1].endswith(".movdata")
+    )
+    assert "-f" in data_cmd
+    assert data_cmd[data_cmd.index("-f") + 1] == "mov"
+
+
 def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
@@ -992,7 +1033,7 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
         video_sidecar.write_bytes(b"origvideo")
         audio_sidecar = dest / "audio.stream.aac.mkv"
         audio_sidecar.write_bytes(b"origaudio")
-        data_sidecar = dest / "data.stream.bin.mkv"
+        data_sidecar = dest / "data.stream.bin.movdata"
         data_sidecar.write_bytes(b"telemetry")
         return {
             "exports": [

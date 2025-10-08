@@ -476,15 +476,24 @@ def _dump_streams_and_metadata(
         src,
     ]
     metadata = ffprobe_json(cmd)
+    source_path = pathlib.Path(src)
+    source_suffix = source_path.suffix
+    data_ext_hint = source_suffix[1:] if source_suffix.startswith(".") else ""
+    container_format_name: Optional[str] = None
     meta_path: Optional[pathlib.Path] = None
     container_tags: Dict[str, str] = {}
     if metadata:
-        meta_path = dest_dir / (pathlib.Path(src).stem + ".metadata.json")
+        meta_path = dest_dir / (source_path.stem + ".metadata.json")
         with open(meta_path, "w", encoding="utf-8") as fh:
             json.dump(metadata, fh, indent=2)
             fh.write("\n")
         fmt_obj = metadata.get("format")
         if isinstance(fmt_obj, dict):
+            raw_format_name = fmt_obj.get("format_name")
+            if isinstance(raw_format_name, str):
+                first_format = raw_format_name.split(",")[0].strip()
+                if first_format:
+                    container_format_name = first_format
             raw_tags = fmt_obj.get("tags")
             if isinstance(raw_tags, dict):
                 for key, value in raw_tags.items():
@@ -533,12 +542,13 @@ def _dump_streams_and_metadata(
         target_muxer = muxer
         target_ext = ext
         if stype == "d":
-            target_muxer = "matroska"
-            target_ext = "mkv"
+            target_muxer = container_format_name or "matroska"
+            data_base = data_ext_hint or container_format_name or "mkv"
+            data_token = _sanitize_token(data_base) or "mkv"
+            target_ext = f"{data_token}data"
         elif mkv_ok and stype in {"v", "a", "s"}:
             target_muxer = "matroska"
             target_ext = "mkv"
-        source_path = pathlib.Path(src)
         sidecar = _sidecar_name(
             source_path,
             stype,
