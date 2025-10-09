@@ -1268,56 +1268,25 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     video_muxdelay_idx = video_cmd.index("-muxdelay")
     assert video_cmd[video_muxdelay_idx + 1] == "0"
     assert "-fps_mode" in video_cmd
-    video_metadata_pairs = [
+    metadata_pairs = [
         ("-map_metadata", "0"),
         ("-map_metadata:s:v", "0:s:v"),
+        ("-map_metadata:s:a", "0:s:a"),
     ]
-    for flag, value in video_metadata_pairs:
+    for flag, value in metadata_pairs:
         assert flag in video_cmd
-    absent_metadata_flags = [
-        "-map_metadata:s:a",
-        "-map_metadata:s:s",
-        "-map_metadata:s:d",
-        "-map_metadata:s:t",
-    ]
-    for flag in absent_metadata_flags:
+        flag_idx = video_cmd.index(flag)
+        assert video_cmd[flag_idx + 1] == value
+    for flag in ["-map_metadata:s:s", "-map_metadata:s:d", "-map_metadata:s:t"]:
         assert flag not in video_cmd
     assert "-f" in video_cmd
     assert video_cmd[video_cmd.index("-f") + 1] == "matroska"
 
-    audio_cmd = next(c for c in captured_cmds if c[0] == "ffmpeg" and "-c:a" in c)
-    assert audio_cmd[audio_cmd.index("-c:a") + 1] == "libopus"
-    assert "-copyts" in audio_cmd
-    assert "-start_at_zero" in audio_cmd
-    assert "-fflags" in audio_cmd
-    audio_ff_idx = audio_cmd.index("-fflags")
-    assert audio_cmd[audio_ff_idx + 1] == "+igndts"
-    assert "-avoid_negative_ts" in audio_cmd
-    audio_ant_idx = audio_cmd.index("-avoid_negative_ts")
-    assert audio_cmd[audio_ant_idx + 1] == "make_zero"
-    assert "-muxpreload" in audio_cmd
-    audio_muxpreload_idx = audio_cmd.index("-muxpreload")
-    assert audio_cmd[audio_muxpreload_idx + 1] == "0"
-    assert "-muxdelay" in audio_cmd
-    audio_muxdelay_idx = audio_cmd.index("-muxdelay")
-    assert audio_cmd[audio_muxdelay_idx + 1] == "0"
-    audio_metadata_pairs = [
-        ("-map_metadata", "0"),
-        ("-map_metadata:s:a", "0:s:a"),
-    ]
-    for flag, value in audio_metadata_pairs:
-        assert flag in audio_cmd
-    for flag in [
-        "-map_metadata:s:v",
-        "-map_metadata:s:s",
-        "-map_metadata:s:d",
-        "-map_metadata:s:t",
-    ]:
-        assert flag not in audio_cmd
-    assert "-ar" in audio_cmd
-    assert audio_cmd[audio_cmd.index("-ar") + 1] == "48000"
-    assert "-f" in audio_cmd
-    assert audio_cmd[audio_cmd.index("-f") + 1] == "matroska"
+    assert "-c:a" in video_cmd
+    assert video_cmd[video_cmd.index("-c:a") + 1] == "libopus"
+    assert "-ar" in video_cmd
+    assert video_cmd[video_cmd.index("-ar") + 1] == "48000"
+    assert "-b:a" in video_cmd
     mkv_cmd = next(c for c in captured_cmds if c[0] == "mkvmerge")
     assert "--timestamps" not in mkv_cmd
 
