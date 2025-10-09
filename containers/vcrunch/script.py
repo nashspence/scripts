@@ -46,6 +46,8 @@ class _StreamExportRequired(TypedDict):
 
 class StreamExport(_StreamExportRequired, total=False):
     packet_timestamps_path: str
+    stream_specifier: str
+    output_track_index: int
 
 
 class DumpedStreams(TypedDict):
@@ -628,6 +630,7 @@ def _dump_streams_and_metadata(
                     "stream": stream,
                     "stype": stype,
                     "mkv_ok": mkv_ok,
+                    "stream_specifier": stream_specifiers.get(index, ""),
                 }
             )
         except RuntimeError as exc:
@@ -692,6 +695,8 @@ def _dump_streams_and_metadata(
                     "stype": stype,
                     "mkv_ok": False,
                 }
+                if stream_spec:
+                    export_entry["stream_specifier"] = stream_spec
                 if packets_path is not None:
                     export_entry["packet_timestamps_path"] = str(packets_path)
                 exports.append(export_entry)
@@ -709,25 +714,33 @@ def _dump_streams_and_metadata(
 
 
 def _mkvmerge_args(
-    streams: List[Tuple[pathlib.Path, Dict[str, Any], str]],
+    grouped_streams: List[Tuple[pathlib.Path, List[StreamExport]]],
 ) -> Tuple[List[str], List[pathlib.Path]]:
-    order = {"v": 0, "a": 1, "s": 2, "d": 3, "t": 4}
     args: List[str] = []
     used: List[pathlib.Path] = []
-    for path, stream, stype in sorted(streams, key=lambda item: order.get(item[2], 9)):
-        if stype not in {"v", "a", "s"}:
+    for path, exports in grouped_streams:
+        usable = [exp for exp in exports if exp.get("stype") in {"v", "a", "s"}]
+        if not usable:
             continue
-        lang = _stream_language(stream)
-        title = _stream_title(stream)
-        flags = _stream_disposition_flags(stream)
-        if lang:
-            args += ["--language", f"0:{lang}"]
-        if title:
-            args += ["--track-name", f"0:{title}"]
-        if "default" in flags:
-            args += ["--default-track-flag", "0:yes"]
-        if "forced" in flags:
-            args += ["--forced-track-flag", "0:yes"]
+        group_args: List[str] = []
+        for export in sorted(
+            usable,
+            key=lambda item: int(item.get("output_track_index", 0)),
+        ):
+            track_index = int(export.get("output_track_index", 0))
+            stream = export.get("stream", {})
+            lang = _stream_language(stream)
+            title = _stream_title(stream)
+            flags = _stream_disposition_flags(stream)
+            if lang:
+                group_args += ["--language", f"{track_index}:{lang}"]
+            if title:
+                group_args += ["--track-name", f"{track_index}:{title}"]
+            if "default" in flags:
+                group_args += ["--default-track-flag", f"{track_index}:yes"]
+            if "forced" in flags:
+                group_args += ["--forced-track-flag", f"{track_index}:yes"]
+        args += group_args
         args.append(str(path))
         used.append(path)
     return args, used
@@ -1982,190 +1995,216 @@ def main() -> None:
             env["SVT_LOG"] = "4" if args.verbose else "2"
 
             base_name = pathlib.Path(src).stem
-            video_encode_path = streams_root / f"{base_name}.video.av1.mkv"
-            finally_cleanup_files.append(str(video_encode_path))
 
-            video_cmd = ["ffmpeg"]
-            if args.verbose:
-                video_cmd += ["-stats", "-loglevel", "info"]
-            else:
-                video_cmd += ["-hide_banner", "-loglevel", "warning"]
-            video_cmd += [
-                "-y",
-                "-ignore_unknown",
-            ]
-            video_cmd += FFMPEG_INPUT_FLAGS
-            video_cmd += [
-                "-i",
-                stage_src,
-                "-map",
-                "0:v:0",
-            ]
-            video_cmd += _metadata_copy_args(["v"])
-            video_cmd += FFMPEG_OUTPUT_FLAGS
-            video_cmd += [
-                "-c:v",
-                "libsvtav1",
-            ]
-            if use_constant_quality:
-                video_cmd += ["-crf", str(args.constant_quality), "-b:v", "0"]
-            else:
-                video_cmd += ["-b:v", f"{global_video_kbps}k"]
-            video_cmd += [
-                "-preset",
-                "5",
-                "-svtav1-params",
-                f"lp={args.svt_lp}",
-                "-fps_mode",
-                "passthrough",
-                "-an",
-                "-sn",
-                "-dn",
-                "-f",
-                "matroska",
-                str(video_encode_path),
+            mkv_streams = [
+                export
+                for export in exports
+                if export["mkv_ok"] and export["stype"] in {"v", "a", "s"}
             ]
 
-            _print_command(video_cmd)
-            video_proc = subprocess.run(video_cmd, env=env)
-            if video_proc.returncode != 0:
-                logging.error("video encode failed for %s", src)
-                mark_pending(f"video encode exited with code {video_proc.returncode}")
+            if not mkv_streams:
+                logging.error("no mkvmerge-compatible streams for %s", src)
+                mark_pending("no mkvmerge-compatible streams")
                 continue
 
-            if not video_encode_path.exists():
-                logging.error("expected encoded video missing for %s", src)
-                mark_pending("encoded video missing")
+            mkv_streams.sort(key=lambda exp: cast(int, exp["stream"].get("index", 0)))
+
+            stream_plan: List[Dict[str, Any]] = []
+            type_counts: Dict[str, int] = {"v": 0, "a": 0, "s": 0}
+            for export in mkv_streams:
+                stype = export["stype"]
+                if stype not in {"v", "a", "s"}:
+                    continue
+                type_index = type_counts.get(stype, 0)
+                type_counts[stype] = type_index + 1
+                spec = export.get("stream_specifier") or f"{stype}:{type_index}"
+                stream_plan.append(
+                    {
+                        "export": export,
+                        "specifier": spec,
+                        "stype": stype,
+                        "type_index": type_index,
+                        "global_index": len(stream_plan),
+                    }
+                )
+
+            if not stream_plan:
+                logging.error("no mkvmerge-compatible streams for %s", src)
+                mark_pending("no mkvmerge-compatible streams")
+                continue
+
+            reencode_path = streams_root / f"{base_name}.reencoded.mkv"
+            finally_cleanup_files.append(str(reencode_path))
+
+            def build_ffmpeg_command(
+                output_path: pathlib.Path, *, encode: bool
+            ) -> List[str]:
+                cmd = ["ffmpeg"]
+                if args.verbose:
+                    cmd += ["-stats", "-loglevel", "info"]
+                else:
+                    cmd += ["-hide_banner", "-loglevel", "warning"]
+                cmd += ["-y", "-ignore_unknown"]
+                cmd += FFMPEG_INPUT_FLAGS
+                cmd += ["-i", stage_src]
+                stream_types_for_metadata: List[str] = []
+                for plan_entry in stream_plan:
+                    cmd += ["-map", f"0:{plan_entry['specifier']}"]
+                    stream_types_for_metadata.append(plan_entry["stype"])
+                cmd += _metadata_copy_args(stream_types_for_metadata)
+                cmd += FFMPEG_OUTPUT_FLAGS
+                video_indices = [
+                    cast(int, plan_entry["type_index"])
+                    for plan_entry in stream_plan
+                    if plan_entry["stype"] == "v"
+                ]
+                audio_indices = [
+                    cast(int, plan_entry["type_index"])
+                    for plan_entry in stream_plan
+                    if plan_entry["stype"] == "a"
+                ]
+                subtitle_indices = [
+                    cast(int, plan_entry["type_index"])
+                    for plan_entry in stream_plan
+                    if plan_entry["stype"] == "s"
+                ]
+                if encode and video_indices:
+                    cmd += ["-c:v", "libsvtav1"]
+                    if use_constant_quality:
+                        cmd += ["-crf", str(args.constant_quality), "-b:v", "0"]
+                    else:
+                        cmd += ["-b:v", f"{global_video_kbps}k"]
+                    cmd += [
+                        "-preset",
+                        "5",
+                        "-svtav1-params",
+                        f"lp={args.svt_lp}",
+                        "-fps_mode",
+                        "passthrough",
+                    ]
+                    for extra_idx in video_indices[1:]:
+                        cmd += [f"-c:v:{extra_idx}", "copy"]
+                elif video_indices:
+                    cmd += ["-c:v", "copy"]
+                    for extra_idx in video_indices[1:]:
+                        cmd += [f"-c:v:{extra_idx}", "copy"]
+                if audio_indices:
+                    if encode and original_audio is not None:
+                        cmd += [
+                            "-c:a",
+                            "libopus",
+                            "-ar",
+                            "48000",
+                            "-b:a",
+                            f"{audio_kbps}k",
+                        ]
+                    else:
+                        cmd += ["-c:a", "copy"]
+                    for extra_idx in audio_indices[1:]:
+                        cmd += [f"-c:a:{extra_idx}", "copy"]
+                if subtitle_indices:
+                    for idx in subtitle_indices:
+                        cmd += [f"-c:s:{idx}", "copy"]
+                cmd += ["-f", "matroska", str(output_path)]
+                return cmd
+
+            def build_entries(
+                output_path: pathlib.Path, *, encoded: bool
+            ) -> List[StreamExport]:
+                entries: List[StreamExport] = []
+                video_seen = 0
+                audio_seen = 0
+                for plan_entry in stream_plan:
+                    export = cast(StreamExport, plan_entry["export"])
+                    stream_copy = json.loads(json.dumps(export["stream"]))
+                    stype = cast(str, plan_entry["stype"])
+                    if encoded and stype == "v":
+                        if video_seen == 0:
+                            stream_copy["codec_name"] = "av1"
+                            stream_copy["codec_tag_string"] = "av01"
+                        video_seen += 1
+                    elif stype == "v":
+                        video_seen += 1
+                    if encoded and stype == "a" and original_audio is not None:
+                        if audio_seen == 0:
+                            stream_copy["codec_name"] = "opus"
+                            stream_copy["codec_tag_string"] = "Opus"
+                        audio_seen += 1
+                    elif stype == "a":
+                        audio_seen += 1
+                    entry: StreamExport = {
+                        "path": str(output_path),
+                        "stream": stream_copy,
+                        "stype": stype,
+                        "mkv_ok": True,
+                        "output_track_index": cast(int, plan_entry["global_index"]),
+                    }
+                    entries.append(entry)
+                return entries
+
+            reencode_cmd = build_ffmpeg_command(reencode_path, encode=True)
+            _print_command(reencode_cmd)
+            reencode_proc = subprocess.run(reencode_cmd, env=env)
+            if reencode_proc.returncode != 0:
+                logging.error("video/audio encode failed for %s", src)
+                mark_pending(f"encode exited with code {reencode_proc.returncode}")
+                continue
+
+            if not reencode_path.exists():
+                logging.error("expected encoded mkv missing for %s", src)
+                mark_pending("encoded mkv missing")
                 continue
 
             try:
-                encoded_video_size = video_encode_path.stat().st_size
-                original_video_size = os.path.getsize(original_video["path"])
+                encoded_entries = build_entries(reencode_path, encoded=True)
+                encoded_size = reencode_path.stat().st_size
+                original_container_size = os.path.getsize(stage_src)
             except OSError as exc:
-                logging.error("failed to stat video streams for %s: %s", src, exc)
-                mark_pending("failed to stat video streams")
+                logging.error("failed to stat encoded output for %s: %s", src, exc)
+                mark_pending("failed to stat encoded output")
                 continue
 
-            video_entry: StreamExport
-            skip_paths: set[pathlib.Path] = set()
-            if encoded_video_size >= original_video_size:
+            skip_paths: set[pathlib.Path] = {
+                pathlib.Path(exp["path"]) for exp in mkv_streams
+            }
+
+            chosen_entries = encoded_entries
+            chosen_path = reencode_path
+
+            if encoded_size >= original_container_size:
                 logging.info(
-                    "encoded video larger than source stream; keeping original for %s",
+                    "encoded mkv larger than source; remuxing original for %s",
                     src,
                 )
                 try:
-                    video_encode_path.unlink()
+                    reencode_path.unlink()
                 except FileNotFoundError:
                     pass
-                video_entry = original_video
-            else:
-                new_stream = json.loads(json.dumps(original_video["stream"]))
-                new_stream["codec_name"] = "av1"
-                new_stream["codec_tag_string"] = "av01"
-                video_entry = {
-                    "path": str(video_encode_path),
-                    "stream": new_stream,
-                    "stype": "v",
-                    "mkv_ok": True,
-                }
-                skip_paths.add(pathlib.Path(original_video["path"]))
-
-            audio_entry: Optional[StreamExport] = None
-            audio_encode_path: Optional[pathlib.Path] = None
-            if original_audio is not None:
-                audio_encode_path = streams_root / f"{base_name}.audio.opus.mkv"
-                finally_cleanup_files.append(str(audio_encode_path))
-                audio_cmd = ["ffmpeg"]
-                if args.verbose:
-                    audio_cmd += ["-stats", "-loglevel", "info"]
-                else:
-                    audio_cmd += ["-hide_banner", "-loglevel", "warning"]
-                audio_cmd += [
-                    "-y",
-                    "-ignore_unknown",
-                ]
-                audio_cmd += FFMPEG_INPUT_FLAGS
-                audio_cmd += [
-                    "-i",
-                    stage_src,
-                    "-map",
-                    "0:a:0",
-                ]
-                audio_cmd += _metadata_copy_args(["a"])
-                audio_cmd += [
-                    "-vn",
-                    "-sn",
-                    "-dn",
-                ]
-                audio_cmd += FFMPEG_OUTPUT_FLAGS
-                audio_cmd += [
-                    "-c:a",
-                    "libopus",
-                    "-ar",
-                    "48000",
-                    "-b:a",
-                    f"{audio_kbps}k",
-                    "-f",
-                    "matroska",
-                    str(audio_encode_path),
-                ]
-                _print_command(audio_cmd)
-                audio_proc = subprocess.run(audio_cmd)
-                if audio_proc.returncode != 0:
-                    logging.error("audio encode failed for %s", src)
-                    mark_pending(
-                        f"audio encode exited with code {audio_proc.returncode}"
-                    )
+                original_mux_path = streams_root / f"{base_name}.original.mkv"
+                finally_cleanup_files.append(str(original_mux_path))
+                remux_cmd = build_ffmpeg_command(original_mux_path, encode=False)
+                _print_command(remux_cmd)
+                remux_proc = subprocess.run(remux_cmd)
+                if remux_proc.returncode != 0:
+                    logging.error("remuxing original streams failed for %s", src)
+                    mark_pending(f"remux exited with code {remux_proc.returncode}")
                     continue
-
-                if not audio_encode_path.exists():
-                    logging.error("expected encoded audio missing for %s", src)
-                    mark_pending("encoded audio missing")
+                if not original_mux_path.exists():
+                    logging.error("expected remuxed original mkv missing for %s", src)
+                    mark_pending("remuxed original mkv missing")
                     continue
+                chosen_entries = build_entries(original_mux_path, encoded=False)
+                chosen_path = original_mux_path
 
-                try:
-                    encoded_audio_size = audio_encode_path.stat().st_size
-                    original_audio_size = os.path.getsize(original_audio["path"])
-                except OSError as exc:
-                    logging.error("failed to stat audio streams for %s: %s", src, exc)
-                    mark_pending("failed to stat audio streams")
-                    continue
+            streams_for_mux_groups: List[Tuple[pathlib.Path, List[StreamExport]]] = []
 
-                if encoded_audio_size >= original_audio_size:
-                    logging.info(
-                        "encoded audio larger than source stream; keeping original for %s",
-                        src,
-                    )
-                    try:
-                        audio_encode_path.unlink()
-                    except FileNotFoundError:
-                        pass
-                    audio_entry = original_audio
-                else:
-                    new_audio_stream = json.loads(json.dumps(original_audio["stream"]))
-                    new_audio_stream["codec_name"] = "opus"
-                    new_audio_stream["codec_tag_string"] = "Opus"
-                    audio_entry = {
-                        "path": str(audio_encode_path),
-                        "stream": new_audio_stream,
-                        "stype": "a",
-                        "mkv_ok": True,
-                    }
-                    skip_paths.add(pathlib.Path(original_audio["path"]))
-
-            streams_for_mux: List[Tuple[pathlib.Path, Dict[str, Any], str]] = []
-            streams_for_mux.append(
-                (pathlib.Path(video_entry["path"]), video_entry["stream"], "v")
-            )
-            if audio_entry is not None:
-                streams_for_mux.append(
-                    (pathlib.Path(audio_entry["path"]), audio_entry["stream"], "a")
-                )
+            if chosen_entries:
+                streams_for_mux_groups.append((chosen_path, chosen_entries))
 
             leftover_paths: set[pathlib.Path] = set()
-            selected_paths = {pathlib.Path(video_entry["path"])}
-            if audio_entry is not None:
-                selected_paths.add(pathlib.Path(audio_entry["path"]))
+            selected_paths: set[pathlib.Path] = set()
+            if chosen_entries:
+                selected_paths.add(chosen_path)
 
             for export in exports:
                 export_path = pathlib.Path(export["path"])
@@ -2174,16 +2213,22 @@ def main() -> None:
                 if export_path in selected_paths:
                     continue
                 if export["mkv_ok"] and export["stype"] in {"v", "a", "s"}:
-                    streams_for_mux.append(
-                        (export_path, export["stream"], export["stype"])
-                    )
+                    export_entry: StreamExport = {
+                        "path": export["path"],
+                        "stream": export["stream"],
+                        "stype": export["stype"],
+                        "mkv_ok": True,
+                        "output_track_index": 0,
+                    }
+                    streams_for_mux_groups.append((export_path, [export_entry]))
+                    selected_paths.add(export_path)
                 else:
                     leftover_paths.add(export_path)
                     packet_sidecar = _packet_sidecar_path(export, export_path)
                     if packet_sidecar is not None:
                         leftover_paths.add(packet_sidecar)
 
-            mkv_args, used_sidecars = _mkvmerge_args(streams_for_mux)
+            mkv_args, used_sidecars = _mkvmerge_args(streams_for_mux_groups)
             if not mkv_args:
                 logging.error("no mkvmerge-compatible streams for %s", src)
                 mark_pending("no mkvmerge-compatible streams")
