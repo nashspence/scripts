@@ -853,11 +853,29 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
             ],
             "attachments": [],
             "metadata_path": None,
-            "extras": [],
             "container_tags": {"title": "Example Title", "comment": "Example"},
+            "stream_infos": [
+                {
+                    "index": 0,
+                    "stream": {"codec_type": "video", "codec_name": "h264", "index": 0},
+                    "stype": "v",
+                    "mkv_ok": True,
+                    "spec": "v:0",
+                },
+                {
+                    "index": 1,
+                    "stream": {"codec_type": "audio", "codec_name": "aac", "index": 1},
+                    "stype": "a",
+                    "mkv_ok": True,
+                    "spec": "a:0",
+                },
+            ],
         }
 
     monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
+    monkeypatch.setattr(
+        script, "_pick_real_video_stream_index", lambda path: (0, "v:0")
+    )
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
 
     script.main()
@@ -940,10 +958,7 @@ def test_constant_quality_ignores_fit_short_circuit(monkeypatch, tmp_path):
         elif cmd[0] == "mkvmerge":
             Path(cmd[2]).write_bytes(b"remuxed")
 
-        class R:
-            returncode = 0
-
-        return R()
+        return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
 
@@ -970,15 +985,33 @@ def test_constant_quality_ignores_fit_short_circuit(monkeypatch, tmp_path):
             ],
             "attachments": [],
             "metadata_path": None,
-            "extras": [],
             "container_tags": {
                 "title": "Original Title",
                 "creation_time": "2024-09-28T15:42:11Z",
                 "comment": "Container comment",
             },
+            "stream_infos": [
+                {
+                    "index": 0,
+                    "stream": {"codec_type": "video", "codec_name": "h264", "index": 0},
+                    "stype": "v",
+                    "mkv_ok": True,
+                    "spec": "v:0",
+                },
+                {
+                    "index": 1,
+                    "stream": {"codec_type": "audio", "codec_name": "aac", "index": 1},
+                    "stype": "a",
+                    "mkv_ok": True,
+                    "spec": "a:0",
+                },
+            ],
         }
 
     monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
+    monkeypatch.setattr(
+        script, "_pick_real_video_stream_index", lambda path: (0, "v:0")
+    )
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
 
     script.main()
@@ -1073,14 +1106,32 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
             ],
             "attachments": [],
             "metadata_path": None,
-            "extras": [],
             "container_tags": {
                 "title": "Original Title",
                 "comment": "Container comment",
             },
+            "stream_infos": [
+                {
+                    "index": 0,
+                    "stream": {"codec_type": "video", "codec_name": "h264", "index": 0},
+                    "stype": "v",
+                    "mkv_ok": True,
+                    "spec": "v:0",
+                },
+                {
+                    "index": 1,
+                    "stream": {"codec_type": "audio", "codec_name": "aac", "index": 1},
+                    "stype": "a",
+                    "mkv_ok": True,
+                    "spec": "a:0",
+                },
+            ],
         }
 
     monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
+    monkeypatch.setattr(
+        script, "_pick_real_video_stream_index", lambda path: (0, "v:0")
+    )
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
 
     script.main()
@@ -1196,11 +1247,7 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"remuxed")
 
-        class R:
-            returncode = 0
-            stdout = b""
-
-        return R()
+        return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
 
@@ -1235,11 +1282,36 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
             ],
             "attachments": [],
             "metadata_path": None,
-            "extras": [],
             "container_tags": {},
+            "stream_infos": [
+                {
+                    "index": 0,
+                    "stream": {"codec_type": "video", "codec_name": "h264", "index": 0},
+                    "stype": "v",
+                    "mkv_ok": True,
+                    "spec": "v:0",
+                },
+                {
+                    "index": 1,
+                    "stream": {"codec_type": "audio", "codec_name": "aac", "index": 1},
+                    "stype": "a",
+                    "mkv_ok": True,
+                    "spec": "a:0",
+                },
+                {
+                    "index": 2,
+                    "stream": {"codec_type": "data", "codec_name": "bin", "index": 2},
+                    "stype": "d",
+                    "mkv_ok": False,
+                    "spec": "d:0",
+                },
+            ],
         }
 
     monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
+    monkeypatch.setattr(
+        script, "_pick_real_video_stream_index", lambda path: (0, "v:0")
+    )
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
 
     script.main()
@@ -1249,75 +1321,44 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     output_video = out_dir / "clip.mkv"
     assert output_video.exists()
 
-    video_cmd = next(
-        c for c in captured_cmds if c[0] == "ffmpeg" and "-map" in c and "0:v:0" in c
+    ffmpeg_cmds = [c for c in captured_cmds if c[0] == "ffmpeg"]
+    assert len(ffmpeg_cmds) == 1
+    encode_cmd = ffmpeg_cmds[0]
+    assert "-ignore_unknown" in encode_cmd
+    assert "-copyts" in encode_cmd
+    assert "-start_at_zero" in encode_cmd
+    assert "-fflags" in encode_cmd
+    ff_idx = encode_cmd.index("-fflags")
+    assert encode_cmd[ff_idx + 1] == "+igndts"
+    assert "-avoid_negative_ts" in encode_cmd
+    ant_idx = encode_cmd.index("-avoid_negative_ts")
+    assert encode_cmd[ant_idx + 1] == "make_zero"
+    assert "-muxpreload" in encode_cmd
+    muxpreload_idx = encode_cmd.index("-muxpreload")
+    assert encode_cmd[muxpreload_idx + 1] == "0"
+    assert "-muxdelay" in encode_cmd
+    muxdelay_idx = encode_cmd.index("-muxdelay")
+    assert encode_cmd[muxdelay_idx + 1] == "0"
+    assert "-fps_mode" in encode_cmd
+    assert "0:v:0" in encode_cmd
+    assert "0:a:0" in encode_cmd
+    assert (
+        "-c:v" in encode_cmd and encode_cmd[encode_cmd.index("-c:v") + 1] == "libsvtav1"
     )
-    assert "-ignore_unknown" in video_cmd
-    assert "-copyts" in video_cmd
-    assert "-start_at_zero" in video_cmd
-    assert "-fflags" in video_cmd
-    ff_idx = video_cmd.index("-fflags")
-    assert video_cmd[ff_idx + 1] == "+igndts"
-    assert "-avoid_negative_ts" in video_cmd
-    video_ant_idx = video_cmd.index("-avoid_negative_ts")
-    assert video_cmd[video_ant_idx + 1] == "make_zero"
-    assert "-muxpreload" in video_cmd
-    video_muxpreload_idx = video_cmd.index("-muxpreload")
-    assert video_cmd[video_muxpreload_idx + 1] == "0"
-    assert "-muxdelay" in video_cmd
-    video_muxdelay_idx = video_cmd.index("-muxdelay")
-    assert video_cmd[video_muxdelay_idx + 1] == "0"
-    assert "-fps_mode" in video_cmd
-    video_metadata_pairs = [
+    assert (
+        "-c:a" in encode_cmd and encode_cmd[encode_cmd.index("-c:a") + 1] == "libopus"
+    )
+    assert "-ar" in encode_cmd and encode_cmd[encode_cmd.index("-ar") + 1] == "48000"
+    assert "-f" in encode_cmd and encode_cmd[encode_cmd.index("-f") + 1] == "matroska"
+    for flag, value in [
         ("-map_metadata", "0"),
         ("-map_metadata:s:v", "0:s:v"),
-    ]
-    for flag, value in video_metadata_pairs:
-        assert flag in video_cmd
-    absent_metadata_flags = [
-        "-map_metadata:s:a",
-        "-map_metadata:s:s",
-        "-map_metadata:s:d",
-        "-map_metadata:s:t",
-    ]
-    for flag in absent_metadata_flags:
-        assert flag not in video_cmd
-    assert "-f" in video_cmd
-    assert video_cmd[video_cmd.index("-f") + 1] == "matroska"
-
-    audio_cmd = next(c for c in captured_cmds if c[0] == "ffmpeg" and "-c:a" in c)
-    assert audio_cmd[audio_cmd.index("-c:a") + 1] == "libopus"
-    assert "-copyts" in audio_cmd
-    assert "-start_at_zero" in audio_cmd
-    assert "-fflags" in audio_cmd
-    audio_ff_idx = audio_cmd.index("-fflags")
-    assert audio_cmd[audio_ff_idx + 1] == "+igndts"
-    assert "-avoid_negative_ts" in audio_cmd
-    audio_ant_idx = audio_cmd.index("-avoid_negative_ts")
-    assert audio_cmd[audio_ant_idx + 1] == "make_zero"
-    assert "-muxpreload" in audio_cmd
-    audio_muxpreload_idx = audio_cmd.index("-muxpreload")
-    assert audio_cmd[audio_muxpreload_idx + 1] == "0"
-    assert "-muxdelay" in audio_cmd
-    audio_muxdelay_idx = audio_cmd.index("-muxdelay")
-    assert audio_cmd[audio_muxdelay_idx + 1] == "0"
-    audio_metadata_pairs = [
-        ("-map_metadata", "0"),
         ("-map_metadata:s:a", "0:s:a"),
-    ]
-    for flag, value in audio_metadata_pairs:
-        assert flag in audio_cmd
-    for flag in [
-        "-map_metadata:s:v",
-        "-map_metadata:s:s",
-        "-map_metadata:s:d",
-        "-map_metadata:s:t",
     ]:
-        assert flag not in audio_cmd
-    assert "-ar" in audio_cmd
-    assert audio_cmd[audio_cmd.index("-ar") + 1] == "48000"
-    assert "-f" in audio_cmd
-    assert audio_cmd[audio_cmd.index("-f") + 1] == "matroska"
+        assert flag in encode_cmd
+        assert value in encode_cmd
+    for flag in ["-map_metadata:s:s", "-map_metadata:s:d", "-map_metadata:s:t"]:
+        assert flag not in encode_cmd
     mkv_cmd = next(c for c in captured_cmds if c[0] == "mkvmerge")
     assert "--timestamps" not in mkv_cmd
 
@@ -1371,10 +1412,7 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"remuxed")
 
-        class R:
-            returncode = 0
-
-        return R()
+        return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
 
@@ -1401,11 +1439,29 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
             ],
             "attachments": [],
             "metadata_path": None,
-            "extras": [],
             "container_tags": {},
+            "stream_infos": [
+                {
+                    "index": 0,
+                    "stream": {"codec_type": "video", "codec_name": "h264", "index": 0},
+                    "stype": "v",
+                    "mkv_ok": True,
+                    "spec": "v:0",
+                },
+                {
+                    "index": 1,
+                    "stream": {"codec_type": "audio", "codec_name": "aac", "index": 1},
+                    "stype": "a",
+                    "mkv_ok": True,
+                    "spec": "a:0",
+                },
+            ],
         }
 
     monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
+    monkeypatch.setattr(
+        script, "_pick_real_video_stream_index", lambda path: (0, "v:0")
+    )
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
 
     script.main()
