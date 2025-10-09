@@ -24,7 +24,15 @@ MAX_SVT_KBPS = 100_000
 DEFAULT_TARGET_SIZE = "23.30G"
 DEFAULT_SAFETY_OVERHEAD = 0.012
 
-FFMPEG_GENPTS_INPUT_FLAG = "+genpts"
+FFMPEG_INPUT_FLAGS = ["-copyts", "-start_at_zero", "-fflags", "+igndts"]
+FFMPEG_OUTPUT_FLAGS = [
+    "-avoid_negative_ts",
+    "make_zero",
+    "-muxpreload",
+    "0",
+    "-muxdelay",
+    "0",
+]
 
 VERBOSE_LEVEL = 0
 
@@ -222,22 +230,16 @@ def _export_stream(
         cmd += ["-stats", "-loglevel", "info"]
     else:
         cmd += ["-hide_banner", "-loglevel", "warning"]
+    cmd += FFMPEG_INPUT_FLAGS
     cmd += [
-        "-fflags",
-        FFMPEG_GENPTS_INPUT_FLAG,
         "-i",
         src,
         "-map",
         f"0:{stream_index}",
     ]
     cmd += _metadata_copy_args(stream_types)
+    cmd += FFMPEG_OUTPUT_FLAGS
     cmd += [
-        "-avoid_negative_ts",
-        "make_non_negative",
-        "-muxpreload",
-        "0",
-        "-muxdelay",
-        "0",
         "-c",
         "copy",
         "-f",
@@ -263,16 +265,14 @@ def _export_attachments(
     cmd += [
         "-dump_attachment:t",
         "",
-        "-fflags",
-        FFMPEG_GENPTS_INPUT_FLAG,
+    ]
+    cmd += FFMPEG_INPUT_FLAGS
+    cmd += [
         "-i",
         src,
-        "-avoid_negative_ts",
-        "make_non_negative",
-        "-muxpreload",
-        "0",
-        "-muxdelay",
-        "0",
+    ]
+    cmd += FFMPEG_OUTPUT_FLAGS
+    cmd += [
         "-f",
         "null",
         os.devnull,
@@ -1993,21 +1993,17 @@ def main() -> None:
             video_cmd += [
                 "-y",
                 "-ignore_unknown",
-                "-fflags",
-                f"{FFMPEG_GENPTS_INPUT_FLAG}+igndts",
+            ]
+            video_cmd += FFMPEG_INPUT_FLAGS
+            video_cmd += [
                 "-i",
                 stage_src,
                 "-map",
                 "0:v:0",
             ]
             video_cmd += _metadata_copy_args(["v"])
+            video_cmd += FFMPEG_OUTPUT_FLAGS
             video_cmd += [
-                "-avoid_negative_ts",
-                "make_non_negative",
-                "-muxpreload",
-                "0",
-                "-muxdelay",
-                "0",
                 "-c:v",
                 "libsvtav1",
             ]
@@ -2087,8 +2083,9 @@ def main() -> None:
                 audio_cmd += [
                     "-y",
                     "-ignore_unknown",
-                    "-fflags",
-                    FFMPEG_GENPTS_INPUT_FLAG,
+                ]
+                audio_cmd += FFMPEG_INPUT_FLAGS
+                audio_cmd += [
                     "-i",
                     stage_src,
                     "-map",
@@ -2099,14 +2096,9 @@ def main() -> None:
                     "-vn",
                     "-sn",
                     "-dn",
-                    "-af",
-                    "asetpts=PTS-STARTPTS",
-                    "-avoid_negative_ts",
-                    "make_non_negative",
-                    "-muxpreload",
-                    "0",
-                    "-muxdelay",
-                    "0",
+                ]
+                audio_cmd += FFMPEG_OUTPUT_FLAGS
+                audio_cmd += [
                     "-c:a",
                     "libopus",
                     "-ar",
