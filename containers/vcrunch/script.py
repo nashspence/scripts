@@ -24,13 +24,11 @@ MAX_SVT_KBPS = 100_000
 DEFAULT_TARGET_SIZE = "23.30G"
 DEFAULT_SAFETY_OVERHEAD = 0.012
 
-FFMPEG_INPUT_FLAGS = ["-copyts", "-start_at_zero", "-fflags", "+igndts"]
+FFMPEG_INPUT_FLAGS = ["-fflags", "+genpts"]
 FFMPEG_OUTPUT_FLAGS = [
     "-avoid_negative_ts",
     "make_zero",
-    "-muxpreload",
-    "0",
-    "-muxdelay",
+    "-max_interleave_delta", 
     "0",
 ]
 
