@@ -872,14 +872,14 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     rec = next(iter(manifest_data["items"].values()))
     assert rec["output"] == "a.mkv"
     cmd = next(c for c in captured_cmds if c[0] == "ffmpeg" and "libsvtav1" in c)
+    assert "-copyts" in cmd
+    assert "-start_at_zero" in cmd
     assert "-fflags" in cmd
     ff_idx = cmd.index("-fflags")
-    assert cmd[ff_idx + 1] == "+genpts+igndts"
-    assert "-copyts" not in cmd
-    assert "-start_at_zero" not in cmd
+    assert cmd[ff_idx + 1] == "+igndts"
     assert "-avoid_negative_ts" in cmd
     ant_idx = cmd.index("-avoid_negative_ts")
-    assert cmd[ant_idx + 1] == "make_non_negative"
+    assert cmd[ant_idx + 1] == "make_zero"
     assert "-muxpreload" in cmd
     muxpreload_idx = cmd.index("-muxpreload")
     assert cmd[muxpreload_idx + 1] == "0"
@@ -1253,13 +1253,14 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
         c for c in captured_cmds if c[0] == "ffmpeg" and "-map" in c and "0:v:0" in c
     )
     assert "-ignore_unknown" in video_cmd
+    assert "-copyts" in video_cmd
+    assert "-start_at_zero" in video_cmd
     assert "-fflags" in video_cmd
-    assert "+genpts+igndts" in video_cmd
-    assert "-copyts" not in video_cmd
-    assert "-start_at_zero" not in video_cmd
+    ff_idx = video_cmd.index("-fflags")
+    assert video_cmd[ff_idx + 1] == "+igndts"
     assert "-avoid_negative_ts" in video_cmd
     video_ant_idx = video_cmd.index("-avoid_negative_ts")
-    assert video_cmd[video_ant_idx + 1] == "make_non_negative"
+    assert video_cmd[video_ant_idx + 1] == "make_zero"
     assert "-muxpreload" in video_cmd
     video_muxpreload_idx = video_cmd.index("-muxpreload")
     assert video_cmd[video_muxpreload_idx + 1] == "0"
@@ -1286,11 +1287,14 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
 
     audio_cmd = next(c for c in captured_cmds if c[0] == "ffmpeg" and "-c:a" in c)
     assert audio_cmd[audio_cmd.index("-c:a") + 1] == "libopus"
-    assert "-copyts" not in audio_cmd
-    assert "-start_at_zero" not in audio_cmd
+    assert "-copyts" in audio_cmd
+    assert "-start_at_zero" in audio_cmd
+    assert "-fflags" in audio_cmd
+    audio_ff_idx = audio_cmd.index("-fflags")
+    assert audio_cmd[audio_ff_idx + 1] == "+igndts"
     assert "-avoid_negative_ts" in audio_cmd
     audio_ant_idx = audio_cmd.index("-avoid_negative_ts")
-    assert audio_cmd[audio_ant_idx + 1] == "make_non_negative"
+    assert audio_cmd[audio_ant_idx + 1] == "make_zero"
     assert "-muxpreload" in audio_cmd
     audio_muxpreload_idx = audio_cmd.index("-muxpreload")
     assert audio_cmd[audio_muxpreload_idx + 1] == "0"
@@ -1310,9 +1314,6 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
         "-map_metadata:s:t",
     ]:
         assert flag not in audio_cmd
-    assert "-af" in audio_cmd
-    af_idx = audio_cmd.index("-af")
-    assert audio_cmd[af_idx + 1] == "asetpts=PTS-STARTPTS"
     assert "-ar" in audio_cmd
     assert audio_cmd[audio_cmd.index("-ar") + 1] == "48000"
     assert "-f" in audio_cmd
