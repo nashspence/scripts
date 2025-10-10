@@ -129,11 +129,12 @@ def test_dump_streams_data_fallback(monkeypatch, tmp_path):
     assert entry["mkv_ok"] is False
 
     data_path = Path(entry["path"])
+    assert data_path.name.startswith("legacy_stream_")
     assert data_path.suffix == ".data"
     assert entry.get("muxer") == "data"
     assert not data_path.exists()
 
-    packets_path = data_path.with_suffix(".packets.json")
+    packets_path = data_path.with_suffix(".timing.json")
     assert packets_path.exists()
     with packets_path.open("r", encoding="utf-8") as fh:
         payload = json.load(fh)
@@ -184,7 +185,7 @@ def test_dump_streams_data_fallback_empty_packets(monkeypatch, tmp_path):
     exports = result["exports"]
     assert len(exports) == 1
     entry = exports[0]
-    packets_path = Path(entry["path"]).with_suffix(".packets.json")
+    packets_path = Path(entry["path"]).with_suffix(".timing.json")
     assert packets_path.exists()
     with packets_path.open("r", encoding="utf-8") as fh:
         payload = json.load(fh)
@@ -229,22 +230,24 @@ def test_dump_streams_subtitle_uses_container_data(monkeypatch, tmp_path):
     entry = exports[0]
     assert entry["stype"] == "s"
     assert entry["mkv_ok"] is False
-    assert entry["path"].endswith(".movdata")
+    assert entry["path"].endswith(".mov")
     assert entry.get("muxer") == "mov"
     assert entry.get("spec") == "s:0"
     sidecar_path = Path(entry["path"])
+    assert sidecar_path.name.startswith("legacy_streams")
     assert not sidecar_path.exists()
     assert calls
     recorded_path, recorded_muxer, stream_types = calls[0]
     assert recorded_muxer == "mov"
     assert stream_types == ("s",)
-    assert recorded_path.suffix == ".movdata"
+    assert recorded_path.name.startswith("legacy_streams")
+    assert recorded_path.suffix == ".mov"
 
 
 def test_packet_sidecar_path_prefers_recorded(tmp_path):
     export_path = tmp_path / "sample.data"
     export_path.write_bytes(b"")
-    recorded = tmp_path / "custom.packets.json"
+    recorded = tmp_path / "custom.timing.json"
     recorded.write_text("{}", encoding="utf-8")
     export: script.StreamExport = {
         "path": str(export_path),
@@ -261,7 +264,7 @@ def test_packet_sidecar_path_prefers_recorded(tmp_path):
 def test_packet_sidecar_path_infers_missing_record(tmp_path):
     export_path = tmp_path / "sample.data"
     export_path.write_bytes(b"")
-    inferred = export_path.with_suffix(".packets.json")
+    inferred = export_path.with_suffix(".timing.json")
     inferred.write_text("{}", encoding="utf-8")
     export: script.StreamExport = {
         "path": str(export_path),
@@ -1150,7 +1153,7 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
         video_sidecar.write_bytes(b"origvideo")
         audio_sidecar = dest / "audio.stream.aac.mkv"
         audio_sidecar.write_bytes(b"origaudio")
-        metadata_path = dest / "video.metadata.json"
+        metadata_path = dest / "legacy_metadata.json"
         metadata_path.write_text("{}\n", encoding="utf-8")
         created_metadata_files.append(metadata_path)
         return {
@@ -1280,10 +1283,11 @@ def test_dump_streams_data_sidecar_uses_container(monkeypatch, tmp_path):
 
     data_exports = [exp for exp in result["exports"] if exp["stype"] == "d"]
     assert len(data_exports) == 1
-    assert data_exports[0]["path"].endswith(".movdata")
+    assert data_exports[0]["path"].endswith(".mov")
+    assert Path(data_exports[0]["path"]).name.startswith("legacy_streams")
 
     data_cmd = next(
-        cmd for cmd in calls if cmd[0] == "ffmpeg" and cmd[-1].endswith(".movdata")
+        cmd for cmd in calls if cmd[0] == "ffmpeg" and cmd[-1].endswith(".mov")
     )
     assert "-f" in data_cmd
     assert data_cmd[data_cmd.index("-f") + 1] == "mov"
@@ -1349,7 +1353,7 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
         video_sidecar.write_bytes(b"origvideo")
         audio_sidecar = dest / "audio.stream.aac.mkv"
         audio_sidecar.write_bytes(b"origaudio")
-        data_sidecar = dest / "data.stream.bin.movdata"
+        data_sidecar = dest / "legacy_streams.mov"
         data_sidecar.write_bytes(b"telemetry")
         return {
             "exports": [
