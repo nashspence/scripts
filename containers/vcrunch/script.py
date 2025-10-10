@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import pathlib
 import platform
@@ -28,7 +29,7 @@ FFMPEG_INPUT_FLAGS = ["-fflags", "+genpts"]
 FFMPEG_OUTPUT_FLAGS = [
     "-avoid_negative_ts",
     "make_zero",
-    "-max_interleave_delta", 
+    "-max_interleave_delta",
     "0",
 ]
 
@@ -44,6 +45,8 @@ class _StreamExportRequired(TypedDict):
 
 class StreamExport(_StreamExportRequired, total=False):
     packet_timestamps_path: str
+    spec: str
+    muxer: str
 
 
 class StreamInfo(TypedDict):
@@ -120,6 +123,13 @@ SUBTITLE_STREAM_MAP: Dict[str, Tuple[str, str, bool]] = {
 
 
 RAW_STREAM_DUMP = ("data", "bin", False)
+
+
+def _data_sidecar_suffix(token: str) -> str:
+    clean = token or "data"
+    if clean.endswith("data"):
+        return clean
+    return f"{clean}data"
 
 
 def _sanitize_token(value: Optional[str]) -> str:
@@ -532,9 +542,10 @@ def _dump_streams_and_metadata(
     data_ext_hint = source_suffix[1:] if source_suffix.startswith(".") else ""
     container_format_name: Optional[str] = None
     meta_path: Optional[pathlib.Path] = None
+    metadata_stem = naming_stem or source_path.stem
     container_tags: Dict[str, str] = {}
     if metadata:
-        meta_path = dest_dir / (source_path.stem + ".metadata.json")
+        meta_path = dest_dir / f"{metadata_stem}.metadata.json"
         with open(meta_path, "w", encoding="utf-8") as fh:
             json.dump(metadata, fh, indent=2)
             fh.write("\n")
@@ -613,14 +624,15 @@ def _dump_streams_and_metadata(
             target_muxer = container_format_name or "matroska"
             data_base = data_ext_hint or container_format_name or "mkv"
             data_token = _sanitize_token(data_base) or "mkv"
-            target_ext = f"{data_token}data"
+            target_ext = _data_sidecar_suffix(data_token)
         elif stype == "s" and not mkv_ok:
             if container_format_name:
                 target_muxer = container_format_name
-                if source_suffix.startswith("."):
-                    target_ext = source_suffix[1:]
-                else:
-                    target_ext = _sanitize_token(container_format_name) or target_ext
+            container_token = (
+                _sanitize_token(container_format_name or data_ext_hint or target_ext)
+                or target_ext
+            )
+            target_ext = _data_sidecar_suffix(container_token)
         sidecar = _sidecar_name(
             source_path,
             stype,
@@ -641,14 +653,19 @@ def _dump_streams_and_metadata(
                 verbose,
                 stream_types=[stype],
             )
-            exports.append(
-                {
-                    "path": str(sidecar),
-                    "stream": stream,
-                    "stype": stype,
-                    "mkv_ok": mkv_ok,
-                }
-            )
+            export_entry: StreamExport = {
+                "path": str(sidecar),
+                "stream": stream,
+                "stype": stype,
+                "mkv_ok": mkv_ok,
+                "spec": spec,
+                "muxer": target_muxer,
+            }
+            exports.append(export_entry)
+            try:
+                sidecar.unlink()
+            except FileNotFoundError:
+                pass
         except RuntimeError as exc:
             if (
                 stype == "d"
@@ -705,15 +722,21 @@ def _dump_streams_and_metadata(
                         )
                         packets_path = None
 
-                export_entry: StreamExport = {
+                fallback_entry: StreamExport = {
                     "path": str(fallback_path),
                     "stream": stream,
                     "stype": stype,
                     "mkv_ok": False,
+                    "spec": spec,
+                    "muxer": "data",
                 }
                 if packets_path is not None:
-                    export_entry["packet_timestamps_path"] = str(packets_path)
-                exports.append(export_entry)
+                    fallback_entry["packet_timestamps_path"] = str(packets_path)
+                exports.append(fallback_entry)
+                try:
+                    fallback_path.unlink()
+                except FileNotFoundError:
+                    pass
                 continue
 
             logging.warning("failed to export stream %s: %s", index, exc)
@@ -771,6 +794,46 @@ def _packet_sidecar_path(
         if inferred.exists():
             return inferred
     return None
+
+
+def _guess_mime_type(path: pathlib.Path) -> str:
+    mime, _ = mimetypes.guess_type(path.name)
+    if mime:
+        return mime
+    return "application/octet-stream"
+
+
+def _clean_attachment_description(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", text.strip())
+    cleaned = cleaned.replace(":", ";")
+    if not cleaned:
+        return "attachment"
+    return cleaned[:120]
+
+
+def _attach_sidecar_files(
+    mkv_path: str, attachments: Sequence[Tuple[pathlib.Path, str, str]]
+) -> None:
+    if not attachments:
+        return
+    for path, description, mime_type in attachments:
+        if not path.exists():
+            continue
+        desc = _clean_attachment_description(description)
+        if not desc:
+            desc = path.name
+        cmd = [
+            "mkvpropedit",
+            mkv_path,
+            "--add-attachment",
+            f"name={path.name},mime-type={mime_type},description={desc}:{path}",
+        ]
+        _print_command(cmd)
+        proc = subprocess.run(cmd)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"mkvpropedit failed to attach {path} with code {proc.returncode}"
+            )
 
 
 def _apply_birthtime(path: str, birthtime: float) -> None:
@@ -1995,17 +2058,32 @@ def main() -> None:
                 mark_pending("missing video stream metadata")
                 continue
 
-            selected_video_spec = video_stream_info.get("spec") or video_stream_spec
-            if not selected_video_spec:
+            primary_video_spec = video_stream_info.get("spec") or video_stream_spec
+            if not primary_video_spec:
                 logging.error("missing video stream specifier for %s", src)
                 mark_pending("missing video stream specifier")
                 continue
 
-            audio_infos = [info for info in stream_infos if info["stype"] == "a"]
-            subtitle_infos = [
-                info for info in stream_infos if info["stype"] == "s" and info["mkv_ok"]
-            ]
-            attachment_infos = [info for info in stream_infos if info["stype"] == "t"]
+            video_infos = sorted(
+                [info for info in stream_infos if info["stype"] == "v"],
+                key=lambda item: item["index"],
+            )
+            audio_infos = sorted(
+                [info for info in stream_infos if info["stype"] == "a"],
+                key=lambda item: item["index"],
+            )
+            subtitle_infos = sorted(
+                [
+                    info
+                    for info in stream_infos
+                    if info["stype"] == "s" and info["mkv_ok"]
+                ],
+                key=lambda item: item["index"],
+            )
+            attachment_infos = sorted(
+                [info for info in stream_infos if info["stype"] == "t"],
+                key=lambda item: item["index"],
+            )
 
             rec.pop("error", None)
             rec.update(
@@ -2040,46 +2118,46 @@ def main() -> None:
                 stage_src,
             ]
 
-            stream_types_for_metadata: List[str] = []
+            encode_outputs: List[List[str]] = []
 
-            encode_cmd += ["-map", f"0:{selected_video_spec}"]
-            stream_types_for_metadata.append("v")
+            main_stream_types: List[str] = []
 
-            for info in audio_infos:
+            def _register_main_stream(stype: str) -> None:
+                if stype not in main_stream_types:
+                    main_stream_types.append(stype)
+
+            main_output_opts: List[str] = []
+            for info in sorted(stream_infos, key=lambda item: item["index"]):
                 spec = info.get("spec")
                 if not spec:
                     continue
-                encode_cmd += ["-map", f"0:{spec}"]
-            if audio_infos:
-                stream_types_for_metadata.append("a")
+                stype = info.get("stype")
+                if stype == "v":
+                    main_output_opts += ["-map", f"0:{spec}"]
+                    _register_main_stream("v")
+                elif stype == "a":
+                    main_output_opts += ["-map", f"0:{spec}"]
+                    _register_main_stream("a")
+                elif stype == "s" and info.get("mkv_ok"):
+                    main_output_opts += ["-map", f"0:{spec}"]
+                    _register_main_stream("s")
+                elif stype == "t":
+                    main_output_opts += ["-map", f"0:{spec}"]
+                    _register_main_stream("t")
 
-            for info in subtitle_infos:
-                spec = info.get("spec")
-                if not spec:
-                    continue
-                encode_cmd += ["-map", f"0:{spec}"]
-            if subtitle_infos:
-                stream_types_for_metadata.append("s")
+            if "v" not in main_stream_types:
+                logging.error("no video streams mapped for %s", src)
+                mark_pending("no video streams mapped")
+                continue
 
-            for info in attachment_infos:
-                spec = info.get("spec")
-                if not spec:
-                    continue
-                encode_cmd += ["-map", f"0:{spec}"]
-            if attachment_infos:
-                stream_types_for_metadata.append("t")
-
-            encode_cmd += _metadata_copy_args(stream_types_for_metadata)
-            encode_cmd += FFMPEG_OUTPUT_FLAGS
-            encode_cmd += [
-                "-c:v",
-                "libsvtav1",
-            ]
+            main_output_opts += _metadata_copy_args(main_stream_types)
+            main_output_opts += FFMPEG_OUTPUT_FLAGS
+            main_output_opts += ["-c:v", "libsvtav1"]
             if use_constant_quality:
-                encode_cmd += ["-crf", str(args.constant_quality), "-b:v", "0"]
+                main_output_opts += ["-crf", str(args.constant_quality), "-b:v", "0"]
             else:
-                encode_cmd += ["-b:v", f"{global_video_kbps}k"]
-            encode_cmd += [
+                main_output_opts += ["-b:v", f"{global_video_kbps}k"]
+            main_output_opts += [
                 "-preset",
                 "5",
                 "-svtav1-params",
@@ -2087,8 +2165,8 @@ def main() -> None:
                 "-fps_mode",
                 "passthrough",
             ]
-            if audio_infos:
-                encode_cmd += [
+            if "a" in main_stream_types:
+                main_output_opts += [
                     "-c:a",
                     "libopus",
                     "-ar",
@@ -2096,17 +2174,41 @@ def main() -> None:
                     "-b:a",
                     f"{audio_kbps}k",
                 ]
-            else:
-                encode_cmd.append("-an")
-            if subtitle_infos:
-                encode_cmd += ["-c:s", "copy"]
-            if attachment_infos:
-                encode_cmd += ["-c:t", "copy"]
-            encode_cmd += [
+            if "s" in main_stream_types:
+                main_output_opts += ["-c:s", "copy"]
+            if "t" in main_stream_types:
+                main_output_opts += ["-c:t", "copy"]
+            main_output_opts += [
                 "-f",
                 "matroska",
                 str(encode_output_path),
             ]
+            encode_outputs.append(main_output_opts)
+
+            for export in exports:
+                spec = export.get("spec")
+                if not spec:
+                    continue
+                export_path = pathlib.Path(export["path"])
+                export_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    export_path.unlink()
+                except FileNotFoundError:
+                    pass
+                finally_cleanup_files.append(str(export_path))
+                export_stream_types = [export["stype"]]
+                extra_opts: List[str] = ["-map", f"0:{spec}"]
+                extra_opts += _metadata_copy_args(export_stream_types)
+                extra_opts += FFMPEG_OUTPUT_FLAGS
+                muxer = export.get("muxer") or "matroska"
+                if muxer == "data":
+                    extra_opts += ["-c", "copy", "-f", "data", str(export_path)]
+                else:
+                    extra_opts += ["-c", "copy", "-f", muxer, str(export_path)]
+                encode_outputs.append(extra_opts)
+
+            for output_opts in encode_outputs:
+                encode_cmd.extend(output_opts)
 
             _print_command(encode_cmd)
             encode_proc = subprocess.run(encode_cmd, env=env)
@@ -2120,20 +2222,27 @@ def main() -> None:
                 mark_pending("encoded output missing")
                 continue
 
-            perform_size_check = False
-            video_mkv_ok = bool(video_stream_info.get("mkv_ok"))
-            audio_all_mkv_ok = (
-                all(info.get("mkv_ok") for info in audio_infos)
-                if audio_infos
-                else False
+            missing_exports = False
+            for export in exports:
+                export_path = pathlib.Path(export["path"])
+                if not export_path.exists():
+                    logging.error(
+                        "expected auxiliary export missing for %s stream %s",
+                        src,
+                        export.get("spec"),
+                    )
+                    missing_exports = True
+            if missing_exports:
+                mark_pending("auxiliary export missing")
+                continue
+
+            all_video_mkv_ok = bool(video_infos) and all(
+                info.get("mkv_ok") for info in video_infos
             )
-            has_audio = bool(audio_infos)
-            if has_audio and video_stream_info:
-                perform_size_check = video_mkv_ok and audio_all_mkv_ok
-            elif video_stream_info and not has_audio:
-                perform_size_check = video_mkv_ok
-            elif has_audio and not video_stream_info:
-                perform_size_check = audio_all_mkv_ok
+            all_audio_mkv_ok = all(info.get("mkv_ok") for info in audio_infos)
+            perform_size_check = (
+                bool(video_infos) and all_video_mkv_ok and all_audio_mkv_ok
+            )
 
             selected_output_path = encode_output_path
             if perform_size_check:
@@ -2165,17 +2274,26 @@ def main() -> None:
                             stage_src,
                         ]
                         remux_stream_types: List[str] = []
-                        if video_mkv_ok:
-                            remux_cmd += ["-map", f"0:{selected_video_spec}"]
+                        mapped_video = False
+                        if all_video_mkv_ok:
+                            for info in video_infos:
+                                spec = info.get("spec")
+                                if not spec:
+                                    continue
+                                remux_cmd += ["-map", f"0:{spec}"]
+                                mapped_video = True
+                        if mapped_video:
                             remux_stream_types.append("v")
-                        if audio_all_mkv_ok:
+                        mapped_audio = False
+                        if all_audio_mkv_ok:
                             for info in audio_infos:
                                 spec = info.get("spec")
                                 if not spec:
                                     continue
                                 remux_cmd += ["-map", f"0:{spec}"]
-                            if audio_infos:
-                                remux_stream_types.append("a")
+                                mapped_audio = True
+                        if mapped_audio:
+                            remux_stream_types.append("a")
                         for info in subtitle_infos:
                             spec = info.get("spec")
                             if not spec:
@@ -2192,9 +2310,9 @@ def main() -> None:
                             remux_stream_types.append("t")
                         remux_cmd += _metadata_copy_args(remux_stream_types)
                         remux_cmd += FFMPEG_OUTPUT_FLAGS
-                        if video_mkv_ok:
+                        if mapped_video:
                             remux_cmd += ["-c:v", "copy"]
-                        if audio_all_mkv_ok:
+                        if mapped_audio:
                             remux_cmd += ["-c:a", "copy"]
                         if subtitle_infos:
                             remux_cmd += ["-c:s", "copy"]
@@ -2221,13 +2339,45 @@ def main() -> None:
                             selected_output_path = remux_source_path
                             metadata["used_original"] = True
 
-            leftover_paths: set[pathlib.Path] = set()
+            attachment_entries: List[Tuple[pathlib.Path, str, str]] = []
             for export in exports:
                 export_path = pathlib.Path(export["path"])
-                leftover_paths.add(export_path)
+                stream = export.get("stream", {})
+                codec_hint = cast(
+                    str,
+                    (
+                        stream.get("codec_name")
+                        or stream.get("codec_tag_string")
+                        or "unknown"
+                    ),
+                )
+                description = f"{export['stype'].upper()} stream export ({codec_hint})"
+                attachment_entries.append(
+                    (export_path, description, _guess_mime_type(export_path))
+                )
                 packet_sidecar = _packet_sidecar_path(export, export_path)
-                if packet_sidecar is not None:
-                    leftover_paths.add(packet_sidecar)
+                if packet_sidecar is not None and packet_sidecar.exists():
+                    attachment_entries.append(
+                        (
+                            packet_sidecar,
+                            f"{export['stype'].upper()} stream packet timestamps",
+                            "application/json",
+                        )
+                    )
+
+            for attachment in attachments:
+                attachment_entries.append(
+                    (
+                        attachment,
+                        f"Container attachment copy ({attachment.name})",
+                        _guess_mime_type(attachment),
+                    )
+                )
+
+            metadata_copy_paths: List[pathlib.Path] = []
+            if metadata_sidecar is not None:
+                metadata_copy_paths.append(metadata_sidecar)
+                finally_cleanup_files.append(str(metadata_sidecar))
 
             mux_cmd = [
                 "mkvmerge",
@@ -2254,11 +2404,6 @@ def main() -> None:
                 logging.error("failed to finalize remuxed output for %s: %s", src, exc)
                 mark_pending("failed to finalize remuxed output")
                 continue
-            if metadata_sidecar is not None:
-                leftover_paths.add(metadata_sidecar)
-            for attachment in attachments:
-                leftover_paths.add(attachment)
-
             creation_date_to_apply = original_creation_date
             if not creation_date_to_apply:
                 for key_name in ("creation_time", "com.apple.quicktime.creationdate"):
@@ -2281,6 +2426,13 @@ def main() -> None:
                 continue
 
             try:
+                _attach_sidecar_files(stage_part, attachment_entries)
+            except RuntimeError as exc:
+                logging.error("failed to attach auxiliary outputs for %s: %s", src, exc)
+                mark_pending("failed to attach auxiliary outputs")
+                continue
+
+            try:
                 shutil.copy2(stage_part, part_path)
                 _apply_source_timestamps(src, part_path, st)
             except Exception as e:
@@ -2290,16 +2442,16 @@ def main() -> None:
 
             os.replace(part_path, final_path)
 
-            for sidecar in sorted(leftover_paths):
-                if not sidecar.exists():
+            for meta_path in metadata_copy_paths:
+                if not meta_path.exists():
                     continue
                 try:
-                    rel = sidecar.relative_to(streams_root)
+                    rel = meta_path.relative_to(streams_root)
                 except ValueError:
-                    rel = pathlib.Path(sidecar.name)
+                    rel = pathlib.Path(meta_path.name)
                 dest_sidecar = _lowercase_suffix(pathlib.Path(final_dir) / rel)
                 dest_sidecar.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(sidecar, dest_sidecar)
+                shutil.copy2(meta_path, dest_sidecar)
                 _apply_source_timestamps(src, str(dest_sidecar), st)
 
             rec.update({"status": "done", "finished_at": now_utc_iso()})
