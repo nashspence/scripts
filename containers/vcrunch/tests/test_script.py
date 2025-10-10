@@ -129,8 +129,9 @@ def test_dump_streams_data_fallback(monkeypatch, tmp_path):
     assert entry["mkv_ok"] is False
 
     data_path = Path(entry["path"])
-    assert data_path.exists()
     assert data_path.suffix == ".data"
+    assert entry.get("muxer") == "data"
+    assert not data_path.exists()
 
     packets_path = data_path.with_suffix(".packets.json")
     assert packets_path.exists()
@@ -188,6 +189,56 @@ def test_dump_streams_data_fallback_empty_packets(monkeypatch, tmp_path):
     with packets_path.open("r", encoding="utf-8") as fh:
         payload = json.load(fh)
     assert payload == {"packets": []}
+
+
+def test_dump_streams_subtitle_uses_container_data(monkeypatch, tmp_path):
+    metadata = {
+        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+        "streams": [
+            {"index": 0, "codec_type": "video", "codec_name": "h264"},
+            {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+            {
+                "index": 2,
+                "codec_type": "subtitle",
+                "codec_name": "tx3g",
+                "tags": {"language": "eng"},
+            },
+        ],
+    }
+
+    monkeypatch.setattr(script, "ffprobe_json", lambda cmd: metadata)
+    monkeypatch.setattr(
+        script,
+        "_export_attachments",
+        lambda src, dest_dir, verbose: [],
+    )
+
+    calls = []
+
+    def fake_export_stream(src, output, stream_index, muxer, verbose, *, stream_types):
+        path = Path(output)
+        calls.append((path, muxer, tuple(stream_types)))
+        path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(script, "_export_stream", fake_export_stream)
+
+    result = script._dump_streams_and_metadata("clip.mov", tmp_path, verbose=False)
+
+    exports = result["exports"]
+    assert len(exports) == 1
+    entry = exports[0]
+    assert entry["stype"] == "s"
+    assert entry["mkv_ok"] is False
+    assert entry["path"].endswith(".movdata")
+    assert entry.get("muxer") == "mov"
+    assert entry.get("spec") == "s:0"
+    sidecar_path = Path(entry["path"])
+    assert not sidecar_path.exists()
+    assert calls
+    recorded_path, recorded_muxer, stream_types = calls[0]
+    assert recorded_muxer == "mov"
+    assert stream_types == ("s",)
+    assert recorded_path.suffix == ".movdata"
 
 
 def test_packet_sidecar_path_prefers_recorded(tmp_path):
@@ -591,7 +642,11 @@ def test_main_keeps_original_name_when_larger(monkeypatch, tmp_path):
 
     def fake_run(cmd, *args, **kwargs):
         if isinstance(cmd, list) and cmd and cmd[0] == "ffmpeg":
-            Path(cmd[-1]).write_bytes(b"encoded-output-is-larger")
+            for idx, token in enumerate(cmd):
+                if token == "-f" and idx + 2 < len(cmd):
+                    output_path = Path(cmd[idx + 2])
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(b"encoded-output-is-larger")
 
         class Result:
             returncode = 0
@@ -816,8 +871,11 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     def fake_run(cmd, env=None, **kwargs):
         captured_cmds.append(cmd)
         if cmd[0] == "ffmpeg":
-            stage_part = Path(cmd[-1])
-            stage_part.write_bytes(b"encoded")
+            for idx, token in enumerate(cmd):
+                if token == "-f" and idx + 2 < len(cmd):
+                    output_path = Path(cmd[idx + 2])
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
             output_path = Path(cmd[2])
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -890,20 +948,15 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     rec = next(iter(manifest_data["items"].values()))
     assert rec["output"] == "a.mkv"
     cmd = next(c for c in captured_cmds if c[0] == "ffmpeg" and "libsvtav1" in c)
-    assert "-copyts" in cmd
-    assert "-start_at_zero" in cmd
     assert "-fflags" in cmd
     ff_idx = cmd.index("-fflags")
-    assert cmd[ff_idx + 1] == "+igndts"
+    assert cmd[ff_idx + 1] == "+genpts"
     assert "-avoid_negative_ts" in cmd
     ant_idx = cmd.index("-avoid_negative_ts")
     assert cmd[ant_idx + 1] == "make_zero"
-    assert "-muxpreload" in cmd
-    muxpreload_idx = cmd.index("-muxpreload")
-    assert cmd[muxpreload_idx + 1] == "0"
-    assert "-muxdelay" in cmd
-    muxdelay_idx = cmd.index("-muxdelay")
-    assert cmd[muxdelay_idx + 1] == "0"
+    assert "-max_interleave_delta" in cmd
+    mid_idx = cmd.index("-max_interleave_delta")
+    assert cmd[mid_idx + 1] == "0"
     assert "-fps_mode" in cmd
     fps_idx = cmd.index("-fps_mode")
     assert cmd[fps_idx + 1] == "passthrough"
@@ -954,7 +1007,11 @@ def test_constant_quality_ignores_fit_short_circuit(monkeypatch, tmp_path):
     def fake_run(cmd, env=None, **kwargs):
         captured_cmds.append(cmd)
         if cmd[0] == "ffmpeg":
-            Path(cmd[-1]).write_bytes(b"encoded")
+            for idx, token in enumerate(cmd):
+                if token == "-f" and idx + 2 < len(cmd):
+                    output_path = Path(cmd[idx + 2])
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
             Path(cmd[2]).write_bytes(b"remuxed")
 
@@ -1067,8 +1124,11 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
 
     def fake_run(cmd, env=None, **kwargs):
         if cmd[0] == "ffmpeg":
-            stage_part = Path(cmd[-1])
-            stage_part.write_bytes(b"encoded")
+            for idx, token in enumerate(cmd):
+                if token == "-f" and idx + 2 < len(cmd):
+                    output_path = Path(cmd[idx + 2])
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(b"encoded")
             return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         if cmd[0] == "mkvmerge":
             captured_mux_cmds.append(cmd)
@@ -1239,9 +1299,11 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     def fake_run(cmd, env=None, **kwargs):
         captured_cmds.append(cmd)
         if cmd[0] == "ffmpeg":
-            output_path = Path(cmd[-1])
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(b"encoded")
+            for idx, token in enumerate(cmd):
+                if token == "-f" and idx + 2 < len(cmd):
+                    output_path = Path(cmd[idx + 2])
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
             output_path = Path(cmd[2])
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1325,20 +1387,15 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     assert len(ffmpeg_cmds) == 1
     encode_cmd = ffmpeg_cmds[0]
     assert "-ignore_unknown" in encode_cmd
-    assert "-copyts" in encode_cmd
-    assert "-start_at_zero" in encode_cmd
     assert "-fflags" in encode_cmd
     ff_idx = encode_cmd.index("-fflags")
-    assert encode_cmd[ff_idx + 1] == "+igndts"
+    assert encode_cmd[ff_idx + 1] == "+genpts"
     assert "-avoid_negative_ts" in encode_cmd
     ant_idx = encode_cmd.index("-avoid_negative_ts")
     assert encode_cmd[ant_idx + 1] == "make_zero"
-    assert "-muxpreload" in encode_cmd
-    muxpreload_idx = encode_cmd.index("-muxpreload")
-    assert encode_cmd[muxpreload_idx + 1] == "0"
-    assert "-muxdelay" in encode_cmd
-    muxdelay_idx = encode_cmd.index("-muxdelay")
-    assert encode_cmd[muxdelay_idx + 1] == "0"
+    assert "-max_interleave_delta" in encode_cmd
+    mid_idx = encode_cmd.index("-max_interleave_delta")
+    assert encode_cmd[mid_idx + 1] == "0"
     assert "-fps_mode" in encode_cmd
     assert "0:v:0" in encode_cmd
     assert "0:a:0" in encode_cmd
@@ -1405,8 +1462,11 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
 
     def fake_run(cmd, env=None, **kwargs):
         if cmd[0] == "ffmpeg":
-            stage_part = Path(cmd[-1])
-            stage_part.write_bytes(b"encoded")
+            for idx, token in enumerate(cmd):
+                if token == "-f" and idx + 2 < len(cmd):
+                    output_path = Path(cmd[idx + 2])
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
             output_path = Path(cmd[2])
             output_path.parent.mkdir(parents=True, exist_ok=True)
