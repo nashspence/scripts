@@ -826,8 +826,14 @@ def _attach_sidecar_files(
             "mkvpropedit",
             mkv_path,
             "--add-attachment",
-            f"name={path.name},mime-type={mime_type},description={desc}:{path}",
+            str(path),
         ]
+        if path.name:
+            cmd.extend(["--attachment-name", path.name])
+        if mime_type:
+            cmd.extend(["--attachment-mime-type", mime_type])
+        if desc:
+            cmd.extend(["--attachment-description", desc])
         _print_command(cmd)
         proc = subprocess.run(cmd)
         if proc.returncode != 0:
