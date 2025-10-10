@@ -1121,6 +1121,7 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
 
     captured_mux_cmds: list[list[str]] = []
     captured_edit_cmds: list[list[str]] = []
+    created_metadata_files: list[Path] = []
 
     def fake_run(cmd, env=None, **kwargs):
         if cmd[0] == "ffmpeg":
@@ -1149,6 +1150,9 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
         video_sidecar.write_bytes(b"origvideo")
         audio_sidecar = dest / "audio.stream.aac.mkv"
         audio_sidecar.write_bytes(b"origaudio")
+        metadata_path = dest / "video.metadata.json"
+        metadata_path.write_text("{}\n", encoding="utf-8")
+        created_metadata_files.append(metadata_path)
         return {
             "exports": [
                 {
@@ -1165,7 +1169,7 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
                 },
             ],
             "attachments": [],
-            "metadata_path": None,
+            "metadata_path": metadata_path,
             "container_tags": {
                 "title": "Original Title",
                 "comment": "Container comment",
@@ -1216,6 +1220,15 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
     assert prop_cmd[tags_index + 1].startswith("global:")
     out_stat = output_video.stat()
     assert pytest.approx(out_stat.st_mtime, rel=0, abs=1) == desired_mtime
+    assert created_metadata_files
+    metadata_file = created_metadata_files[0]
+    metadata_cmd = next(
+        cmd
+        for cmd in captured_edit_cmds
+        if "--add-attachment" in cmd and metadata_file.name in cmd[-1]
+    )
+    assert "Pre-re-encode metadata" in metadata_cmd[-1]
+    assert str(metadata_file) in metadata_cmd[-1]
 
 
 def test_dump_streams_data_sidecar_uses_container(monkeypatch, tmp_path):

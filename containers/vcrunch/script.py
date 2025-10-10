@@ -2374,9 +2374,15 @@ def main() -> None:
                     )
                 )
 
-            metadata_copy_paths: List[pathlib.Path] = []
             if metadata_sidecar is not None:
-                metadata_copy_paths.append(metadata_sidecar)
+                if metadata_sidecar.exists():
+                    attachment_entries.append(
+                        (
+                            metadata_sidecar,
+                            "Pre-re-encode metadata",
+                            "application/json",
+                        )
+                    )
                 finally_cleanup_files.append(str(metadata_sidecar))
 
             mux_cmd = [
@@ -2441,18 +2447,6 @@ def main() -> None:
                 continue
 
             os.replace(part_path, final_path)
-
-            for meta_path in metadata_copy_paths:
-                if not meta_path.exists():
-                    continue
-                try:
-                    rel = meta_path.relative_to(streams_root)
-                except ValueError:
-                    rel = pathlib.Path(meta_path.name)
-                dest_sidecar = _lowercase_suffix(pathlib.Path(final_dir) / rel)
-                dest_sidecar.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(meta_path, dest_sidecar)
-                _apply_source_timestamps(src, str(dest_sidecar), st)
 
             rec.update({"status": "done", "finished_at": now_utc_iso()})
             manifest["items"][key] = rec
