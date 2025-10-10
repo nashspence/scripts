@@ -125,18 +125,72 @@ SUBTITLE_STREAM_MAP: Dict[str, Tuple[str, str, bool]] = {
 RAW_STREAM_DUMP = ("data", "bin", False)
 
 
-def _data_sidecar_suffix(token: str) -> str:
-    clean = token or "data"
-    if clean.endswith("data"):
-        return clean
-    return f"{clean}data"
+_EXTENSION_OVERRIDES = {
+    "matroska": "mkv",
+    "quicktime": "mov",
+}
 
 
-def _sanitize_token(value: Optional[str]) -> str:
-    if not value:
-        return ""
-    cleaned = re.sub(r"[^\w\-\+.]+", "_", value.strip())
-    return cleaned[:48]
+def _normalize_component(value: Optional[str], fallback: str) -> str:
+    text = (value or "").strip().lower()
+    if not text:
+        text = fallback
+    cleaned = re.sub(r"[^0-9a-z]+", "_", text)
+    cleaned = cleaned.strip("_")
+    if not cleaned:
+        return fallback
+    return cleaned
+
+
+def _build_stream_identifier(stype: str, index: int, stream: Dict[str, Any]) -> str:
+    kind = "s" if stype == "s" else "d"
+    inferred_type = "subtitle" if kind == "s" else "data"
+    codec_type = _normalize_component(stream.get("codec_type"), inferred_type)
+    codec_tag = _normalize_component(stream.get("codec_tag_string"), "unknown")
+    return f"{kind}{index}.{codec_type}.{codec_tag}"
+
+
+def _select_extension(*candidates: Optional[str]) -> str:
+    for candidate in candidates:
+        if not candidate:
+            continue
+        text = str(candidate).strip().lower()
+        if not text:
+            continue
+        text = text.split(",")[0].strip()
+        if not text:
+            continue
+        override = _EXTENSION_OVERRIDES.get(text)
+        if override:
+            return override
+        cleaned = re.sub(r"[^0-9a-z]+", "", text)
+        if cleaned:
+            return cleaned
+    return "bin"
+
+
+def _allocate_filename(base: str, ext: str, used: Dict[str, int]) -> Tuple[str, str]:
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    key = f"{base}{ext}"
+    current = used.get(key, 0)
+    next_count = current + 1
+    used[key] = next_count
+    if current == 0:
+        return f"{base}{ext}", key
+    return f"{base}__n{next_count}{ext}", key
+
+
+def _release_allocated_name(key: str, used: Dict[str, int]) -> None:
+    if not key:
+        return
+    current = used.get(key)
+    if not current:
+        return
+    if current <= 1:
+        used.pop(key, None)
+    else:
+        used[key] = current - 1
 
 
 def _stream_language(stream: Dict[str, Any]) -> str:
@@ -185,32 +239,6 @@ def _classify_stream(stream: Dict[str, Any]) -> Tuple[str, Tuple[str, str, bool]
     if codec_type == "attachment":
         return "t", RAW_STREAM_DUMP
     return "d", RAW_STREAM_DUMP
-
-
-def _sidecar_name(
-    base: pathlib.Path,
-    stype: str,
-    index: int,
-    codec_hint: str,
-    lang: str,
-    flags: List[str],
-    ext: str,
-    dest_dir: pathlib.Path,
-    *,
-    naming_stem: Optional[str] = None,
-) -> pathlib.Path:
-    stem = naming_stem or base.stem
-    if naming_stem is None:
-        match = re.match(r"^(?P<root>.+?)\.[0-9a-f]{8}$", stem)
-        if match:
-            stem = match.group("root")
-    parts = [f"{stype}{index}-{_sanitize_token(codec_hint) or 'unknown'}"]
-    if lang:
-        parts.append(lang)
-    if flags:
-        parts.extend(flags[:2])
-    filename = ".".join([stem] + parts) + f".{ext}"
-    return dest_dir / filename
 
 
 _PurePathT = TypeVar("_PurePathT", bound=pathlib.PurePath)
@@ -542,10 +570,9 @@ def _dump_streams_and_metadata(
     data_ext_hint = source_suffix[1:] if source_suffix.startswith(".") else ""
     container_format_name: Optional[str] = None
     meta_path: Optional[pathlib.Path] = None
-    metadata_stem = naming_stem or source_path.stem
     container_tags: Dict[str, str] = {}
     if metadata:
-        meta_path = dest_dir / f"{metadata_stem}.metadata.json"
+        meta_path = dest_dir / "legacy_metadata.json"
         with open(meta_path, "w", encoding="utf-8") as fh:
             json.dump(metadata, fh, indent=2)
             fh.write("\n")
@@ -564,6 +591,7 @@ def _dump_streams_and_metadata(
 
     exports: List[StreamExport] = []
     stream_infos: List[StreamInfo] = []
+    used_filenames: Dict[str, int] = {}
     streams = cast(List[Dict[str, Any]], metadata.get("streams") or [])
     type_map = {
         "video": "v",
@@ -610,40 +638,31 @@ def _dump_streams_and_metadata(
             continue
         if stype == "s" and mkv_ok:
             continue
-        codec_hint = cast(
-            str,
-            (
-                stream.get("codec_name") or stream.get("codec_tag_string") or "unknown"
-            ).lower(),
-        )
-        lang = _stream_language(stream)
-        flags = _stream_disposition_flags(stream)
         target_muxer = muxer
-        target_ext = ext
+        primary_extension = ext
+        stream_id: Optional[str] = None
+        if stype in {"d", "s"}:
+            stream_id = _build_stream_identifier(stype, index, stream)
         if stype == "d":
             target_muxer = container_format_name or "matroska"
-            data_base = data_ext_hint or container_format_name or "mkv"
-            data_token = _sanitize_token(data_base) or "mkv"
-            target_ext = _data_sidecar_suffix(data_token)
+            primary_extension = _select_extension(
+                data_ext_hint,
+                container_format_name,
+                target_muxer,
+                primary_extension,
+            )
         elif stype == "s" and not mkv_ok:
             if container_format_name:
                 target_muxer = container_format_name
-            container_token = (
-                _sanitize_token(container_format_name or data_ext_hint or target_ext)
-                or target_ext
+            primary_extension = _select_extension(
+                container_format_name,
+                data_ext_hint,
+                primary_extension,
             )
-            target_ext = _data_sidecar_suffix(container_token)
-        sidecar = _sidecar_name(
-            source_path,
-            stype,
-            index,
-            codec_hint,
-            lang,
-            flags,
-            target_ext,
-            dest_dir,
-            naming_stem=naming_stem,
+        sidecar_name, sidecar_key = _allocate_filename(
+            "legacy_streams", f".{primary_extension}", used_filenames
         )
+        sidecar = dest_dir / sidecar_name
         try:
             _export_stream(
                 src,
@@ -667,6 +686,7 @@ def _dump_streams_and_metadata(
             except FileNotFoundError:
                 pass
         except RuntimeError as exc:
+            _release_allocated_name(sidecar_key, used_filenames)
             if (
                 stype == "d"
                 and container_format_name
@@ -683,7 +703,13 @@ def _dump_streams_and_metadata(
                     sidecar.unlink()
                 except FileNotFoundError:
                     pass
-                fallback_path = sidecar.with_suffix(".data")
+                fallback_base = (
+                    f"legacy_stream_{stream_id}" if stream_id else "legacy_stream"
+                )
+                fallback_name, fallback_key = _allocate_filename(
+                    fallback_base, ".data", used_filenames
+                )
+                fallback_path = dest_dir / fallback_name
                 try:
                     _export_stream(
                         src,
@@ -694,6 +720,7 @@ def _dump_streams_and_metadata(
                         stream_types=[stype],
                     )
                 except RuntimeError as fallback_exc:
+                    _release_allocated_name(fallback_key, used_filenames)
                     logging.warning(
                         "failed to export data stream %s as raw data: %s",
                         index,
@@ -709,7 +736,7 @@ def _dump_streams_and_metadata(
                         src, index, stream_spec
                     )
                 if timestamps is not None:
-                    packets_path = fallback_path.with_suffix(".packets.json")
+                    packets_path = fallback_path.with_suffix(".timing.json")
                     try:
                         with open(packets_path, "w", encoding="utf-8") as fh:
                             json.dump({"packets": timestamps}, fh, indent=2)
@@ -790,9 +817,9 @@ def _packet_sidecar_path(
     if packet_path_str:
         return pathlib.Path(packet_path_str)
     if export.get("stype") == "d" and not export.get("mkv_ok"):
-        inferred = export_path.with_suffix(".packets.json")
-        if inferred.exists():
-            return inferred
+        timing_path = export_path.with_suffix(".timing.json")
+        if timing_path.exists():
+            return timing_path
     return None
 
 
