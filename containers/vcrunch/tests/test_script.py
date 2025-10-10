@@ -1225,10 +1225,27 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
     metadata_cmd = next(
         cmd
         for cmd in captured_edit_cmds
-        if "--add-attachment" in cmd and metadata_file.name in cmd[-1]
+        if "--add-attachment" in cmd
+        and str(metadata_file) == cmd[cmd.index("--add-attachment") + 1]
     )
-    assert "Pre-re-encode metadata" in metadata_cmd[-1]
-    assert str(metadata_file) in metadata_cmd[-1]
+    add_index = metadata_cmd.index("--add-attachment")
+    assert "--attachment-name" in metadata_cmd
+    assert (
+        metadata_file.name == metadata_cmd[metadata_cmd.index("--attachment-name") + 1]
+    )
+    assert metadata_cmd.index("--attachment-name") < add_index
+    assert "--attachment-mime-type" in metadata_cmd
+    assert (
+        "application/json"
+        == metadata_cmd[metadata_cmd.index("--attachment-mime-type") + 1]
+    )
+    assert metadata_cmd.index("--attachment-mime-type") < add_index
+    assert "--attachment-description" in metadata_cmd
+    assert (
+        "Pre-re-encode metadata"
+        == metadata_cmd[metadata_cmd.index("--attachment-description") + 1]
+    )
+    assert metadata_cmd.index("--attachment-description") < add_index
 
 
 def test_dump_streams_data_sidecar_uses_container(monkeypatch, tmp_path):
