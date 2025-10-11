@@ -129,8 +129,7 @@ def test_dump_streams_data_fallback(monkeypatch, tmp_path):
     assert entry["mkv_ok"] is False
 
     data_path = Path(entry["path"])
-    assert data_path.name.startswith("legacy_stream_")
-    assert data_path.suffix == ".data"
+    assert data_path.name == "legacy_stream_d0.data.unknown.data"
     assert entry.get("muxer") == "data"
     assert not data_path.exists()
 
@@ -234,14 +233,13 @@ def test_dump_streams_subtitle_uses_container_data(monkeypatch, tmp_path):
     assert entry.get("muxer") == "mov"
     assert entry.get("spec") == "s:0"
     sidecar_path = Path(entry["path"])
-    assert sidecar_path.name.startswith("legacy_streams")
+    assert sidecar_path.name == "legacy_stream_s2.subtitle.unknown.mov"
     assert not sidecar_path.exists()
     assert calls
     recorded_path, recorded_muxer, stream_types = calls[0]
     assert recorded_muxer == "mov"
     assert stream_types == ("s",)
-    assert recorded_path.name.startswith("legacy_streams")
-    assert recorded_path.suffix == ".mov"
+    assert recorded_path.name == "legacy_stream_s2.subtitle.unknown.mov"
 
 
 def test_packet_sidecar_path_prefers_recorded(tmp_path):
@@ -1284,7 +1282,7 @@ def test_dump_streams_data_sidecar_uses_container(monkeypatch, tmp_path):
     data_exports = [exp for exp in result["exports"] if exp["stype"] == "d"]
     assert len(data_exports) == 1
     assert data_exports[0]["path"].endswith(".mov")
-    assert Path(data_exports[0]["path"]).name.startswith("legacy_streams")
+    assert Path(data_exports[0]["path"]).name == "legacy_stream_d0.data.unknown.mov"
 
     data_cmd = next(
         cmd for cmd in calls if cmd[0] == "ffmpeg" and cmd[-1].endswith(".mov")
@@ -1353,7 +1351,7 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
         video_sidecar.write_bytes(b"origvideo")
         audio_sidecar = dest / "audio.stream.aac.mkv"
         audio_sidecar.write_bytes(b"origaudio")
-        data_sidecar = dest / "legacy_streams.mov"
+        data_sidecar = dest / "legacy_stream_d2.data.unknown.mov"
         data_sidecar.write_bytes(b"telemetry")
         return {
             "exports": [

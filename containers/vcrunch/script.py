@@ -169,28 +169,21 @@ def _select_extension(*candidates: Optional[str]) -> str:
     return "bin"
 
 
-def _allocate_filename(base: str, ext: str, used: Dict[str, int]) -> Tuple[str, str]:
-    if not ext.startswith("."):
-        ext = f".{ext}"
-    key = f"{base}{ext}"
-    current = used.get(key, 0)
-    next_count = current + 1
-    used[key] = next_count
-    if current == 0:
-        return f"{base}{ext}", key
-    return f"{base}__n{next_count}{ext}", key
+def _normalize_extension(ext: Optional[str]) -> str:
+    text = str(ext or "").strip().lower()
+    text = text.lstrip(".")
+    text = re.sub(r"[^0-9a-z]+", "", text)
+    if not text:
+        return "data"
+    return text
 
 
-def _release_allocated_name(key: str, used: Dict[str, int]) -> None:
-    if not key:
-        return
-    current = used.get(key)
-    if not current:
-        return
-    if current <= 1:
-        used.pop(key, None)
-    else:
-        used[key] = current - 1
+def _build_stream_attachment_name(
+    stype: str, index: int, stream: Dict[str, Any], extension: str
+) -> str:
+    identifier = _build_stream_identifier(stype, index, stream)
+    normalized_ext = _normalize_extension(extension)
+    return f"legacy_stream_{identifier}.{normalized_ext}"
 
 
 def _stream_language(stream: Dict[str, Any]) -> str:
@@ -591,7 +584,6 @@ def _dump_streams_and_metadata(
 
     exports: List[StreamExport] = []
     stream_infos: List[StreamInfo] = []
-    used_filenames: Dict[str, int] = {}
     streams = cast(List[Dict[str, Any]], metadata.get("streams") or [])
     type_map = {
         "video": "v",
@@ -640,9 +632,6 @@ def _dump_streams_and_metadata(
             continue
         target_muxer = muxer
         primary_extension = ext
-        stream_id: Optional[str] = None
-        if stype in {"d", "s"}:
-            stream_id = _build_stream_identifier(stype, index, stream)
         if stype == "d":
             target_muxer = container_format_name or "matroska"
             primary_extension = _select_extension(
@@ -659,8 +648,8 @@ def _dump_streams_and_metadata(
                 data_ext_hint,
                 primary_extension,
             )
-        sidecar_name, sidecar_key = _allocate_filename(
-            "legacy_streams", f".{primary_extension}", used_filenames
+        sidecar_name = _build_stream_attachment_name(
+            stype, index, stream, primary_extension
         )
         sidecar = dest_dir / sidecar_name
         try:
@@ -686,7 +675,6 @@ def _dump_streams_and_metadata(
             except FileNotFoundError:
                 pass
         except RuntimeError as exc:
-            _release_allocated_name(sidecar_key, used_filenames)
             if (
                 stype == "d"
                 and container_format_name
@@ -703,13 +691,9 @@ def _dump_streams_and_metadata(
                     sidecar.unlink()
                 except FileNotFoundError:
                     pass
-                fallback_base = (
-                    f"legacy_stream_{stream_id}" if stream_id else "legacy_stream"
+                fallback_path = dest_dir / _build_stream_attachment_name(
+                    stype, index, stream, "data"
                 )
-                fallback_name, fallback_key = _allocate_filename(
-                    fallback_base, ".data", used_filenames
-                )
-                fallback_path = dest_dir / fallback_name
                 try:
                     _export_stream(
                         src,
@@ -720,7 +704,6 @@ def _dump_streams_and_metadata(
                         stream_types=[stype],
                     )
                 except RuntimeError as fallback_exc:
-                    _release_allocated_name(fallback_key, used_filenames)
                     logging.warning(
                         "failed to export data stream %s as raw data: %s",
                         index,
