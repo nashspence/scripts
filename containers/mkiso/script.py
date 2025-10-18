@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 import argparse
+import math
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
 
@@ -83,25 +87,106 @@ def resolve_out_file(out_dir: str, out_file: str) -> str:
     return os.path.join(out_dir, out_file)
 
 
-def run_genisoimage(src_dir: str, label: str, out_path: str) -> None:
-    cmd: list[str] = [
-        "genisoimage",
-        "-quiet",
-        "-o",
-        out_path,
-        "-V",
-        label,
-        "-udf",
-        src_dir,
-    ]
-    vlog(f"+ {' '.join(cmd)}")
+def calc_udf_blocks(n_bytes: int, block_size: int = 2048) -> int:
+    """Return the number of blocks required for the filesystem image."""
+
+    # Allow some slack for filesystem metadata while keeping the image
+    # reasonably sized. Provide a floor so empty trees still produce a valid
+    # filesystem. The heuristics are conservative to avoid running out of
+    # space mid-copy when the metadata grows slightly beyond the data size.
+    min_blocks = max((32 * 1024 * 1024) // block_size, 1)  # 32 MiB minimum image
+    if n_bytes <= 0:
+        return min_blocks
+
+    overhead = max(16 * 1024 * 1024, int(n_bytes * 0.1))
+    total = n_bytes + overhead
+    blocks = math.ceil(total / block_size)
+    return max(blocks, min_blocks)
+
+
+def run_mkudffs(
+    src_dir: str, label: str, out_path: str, n_bytes: int, media_type: str
+) -> None:
+    block_size = 2048
+    blocks = calc_udf_blocks(n_bytes, block_size)
+    out_dir = os.path.dirname(os.path.abspath(out_path)) or os.getcwd()
+    tmp_path = f"{out_path}.tmp"
+    with suppress(FileNotFoundError):
+        os.remove(tmp_path)
+
+    success = False
+    size_bytes = blocks * block_size
+    media_arg = media_type.strip() or "bdr"
+    truncate_cmd = ["truncate", "-s", str(size_bytes), tmp_path]
+    vlog(f"+ {' '.join(truncate_cmd)}")
     proc = subprocess.run(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+        truncate_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
     if proc.returncode != 0:
         if proc.stderr:
             eprint(proc.stderr.strip())
+        with suppress(FileNotFoundError):
+            os.remove(tmp_path)
         raise SystemExit(proc.returncode)
+    mkudffs_cmd: list[str] = [
+        "mkudffs",
+        "--utf8",
+        "--new-file",
+        f"--label={label}",
+        "--blocksize=2048",
+        f"--media-type={media_arg}",
+        "--udfrev=0x0201",
+        tmp_path,
+        str(blocks),
+    ]
+    vlog(f"+ {' '.join(mkudffs_cmd)}")
+    try:
+        proc = subprocess.run(
+            mkudffs_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        if proc.returncode != 0:
+            if proc.stderr:
+                eprint(proc.stderr.strip())
+            raise SystemExit(proc.returncode)
+
+        mount_dir = tempfile.mkdtemp(prefix="mkiso-", dir=out_dir)
+        try:
+            mount_cmd = ["mount", "-t", "udf", "-o", "loop", tmp_path, mount_dir]
+            vlog(f"+ {' '.join(mount_cmd)}")
+            mnt = subprocess.run(
+                mount_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            if mnt.returncode != 0:
+                if mnt.stderr:
+                    eprint(mnt.stderr.strip())
+                raise SystemExit(mnt.returncode)
+
+            try:
+                shutil.copytree(src_dir, mount_dir, dirs_exist_ok=True, symlinks=True)
+            except Exception as exc:  # pragma: no cover - defensive error path
+                eprint(f"[mkiso] ERROR: failed to populate image: {exc}")
+                raise SystemExit(1) from exc
+            finally:
+                with suppress(AttributeError):
+                    os.sync()
+        finally:
+            umount_cmd = ["umount", mount_dir]
+            vlog(f"+ {' '.join(umount_cmd)}")
+            umnt = subprocess.run(
+                umount_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            if umnt.returncode != 0:
+                if umnt.stderr:
+                    eprint(umnt.stderr.strip())
+                raise SystemExit(umnt.returncode)
+            os.rmdir(mount_dir)
+
+        os.replace(tmp_path, out_path)
+        success = True
+    finally:
+        if not success:
+            with suppress(FileNotFoundError):
+                os.remove(tmp_path)
 
 
 # ---------- main ----------
@@ -124,6 +209,11 @@ def main() -> None:
         help="Filename or path for the output .iso. "
         "If a bare filename is given, it is placed in --out-dir. "
         "Overrides auto-naming.",
+    )
+    ap.add_argument(
+        "--media-type",
+        default="bdr",
+        help="Media type hint for mkudffs (default: bdr).",
     )
     ap.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging."
@@ -155,7 +245,7 @@ def main() -> None:
     vlog(f"out={out_path}")
 
     # Build ISO directly from src_dir
-    run_genisoimage(args.src_dir, label, out_path)
+    run_mkudffs(args.src_dir, label, out_path, n_bytes, args.media_type)
 
     # Final summary
     size: int = 0
