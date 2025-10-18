@@ -212,7 +212,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--media-type",
-        default="bdr",
+        default="hd",
         help="Media type hint for mkudffs (default: bdr).",
     )
     ap.add_argument(
