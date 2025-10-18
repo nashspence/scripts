@@ -42,6 +42,7 @@ repos:
         additional_dependencies:
           - types-Pillow
           - types-python-dateutil
+          - pycdlib
           - pytest>=8
   - repo: local
     hooks:

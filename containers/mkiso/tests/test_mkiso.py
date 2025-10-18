@@ -1,10 +1,29 @@
 """Tests for mkiso script."""
 
-import os
 import sys
+import types
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
+
+fake_pycdlib = cast(Any, types.ModuleType("pycdlib"))
+
+
+class _StubPyCdlib:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        raise NotImplementedError("pycdlib stub")
+
+
+fake_pycdlib.PyCdlib = _StubPyCdlib
+fake_pycdlibexception = cast(Any, types.ModuleType("pycdlib.pycdlibexception"))
+
+
+class _StubPyCdlibException(Exception):
+    pass
+
+
+fake_pycdlibexception.PyCdlibException = _StubPyCdlibException
+sys.modules.setdefault("pycdlib", fake_pycdlib)
+sys.modules.setdefault("pycdlib.pycdlibexception", fake_pycdlibexception)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 import containers.mkiso.script as script  # noqa: E402
@@ -40,7 +59,7 @@ def test_stdout_is_output_filename(
             }
         )
 
-    monkeypatch.setattr(script, "run_mkudffs", fake_run)
+    monkeypatch.setattr(script, "build_udf_image", fake_run)
     script.main()
     captured = capsys.readouterr()
     assert captured.out.strip() == "foo.iso"
@@ -69,61 +88,78 @@ def test_media_type_passthrough(tmp_path: Path, monkeypatch: Any, capsys: Any) -
     def fake_run(src: str, lbl: str, out: str, size: int, media: str) -> None:
         recorded["media"] = media
 
-    monkeypatch.setattr(script, "run_mkudffs", fake_run)
+    monkeypatch.setattr(script, "build_udf_image", fake_run)
     script.main()
     captured = capsys.readouterr()
     assert captured.out.strip() == "bar.iso"
     assert recorded["media"] == "cdr"
 
 
-def test_run_mkudffs_uses_output_dir(tmp_path: Path, monkeypatch: Any) -> None:
+def test_build_udf_image_creates_udf_tree(tmp_path: Path, monkeypatch: Any) -> None:
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     (src_dir / "data.bin").write_bytes(b"payload")
+    (src_dir / "folder").mkdir()
+    (src_dir / "folder" / "nested.txt").write_text("nested")
+    (src_dir / "link").symlink_to("folder/nested.txt")
 
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     out_path = out_dir / "disk.iso"
 
-    created_mount_dirs: list[str] = []
+    added_dirs: list[str] = []
+    added_files: list[tuple[str, str, bytes]] = []
+    added_links: list[tuple[str, str]] = []
 
-    def fake_mkdtemp(prefix: str, dir: str) -> str:
-        assert dir == str(out_dir)
-        mount_path = Path(dir) / "mkiso-test"
-        mount_path.mkdir()
-        created_mount_dirs.append(str(mount_path))
-        return str(mount_path)
+    class FakeIso:
+        def __init__(self) -> None:
+            self.closed = False
+            self.vol_ident: str | None = None
+            self.udf_rev: str | None = None
 
-    monkeypatch.setattr("containers.mkiso.script.tempfile.mkdtemp", fake_mkdtemp)
+        def new(self, *, vol_ident: str, udf: str) -> None:
+            self.vol_ident = vol_ident
+            self.udf_rev = udf
 
-    def fake_copytree(src: str, dst: str, **_: Any) -> None:
-        assert Path(src) == src_dir
-        assert dst == created_mount_dirs[-1]
+        def add_directory(self, udf_path: str, **_: Any) -> None:
+            added_dirs.append(udf_path)
 
-    monkeypatch.setattr("containers.mkiso.script.shutil.copytree", fake_copytree)
+        def add_fp(
+            self, fp: Any, length: int, iso_path: str, *, udf_path: str, **__: Any
+        ) -> None:
+            added_files.append((iso_path, udf_path, fp.read()))
+            assert length == len(added_files[-1][2])
 
-    def fake_sync() -> None:
-        pass
+        def add_symlink(
+            self, *, udf_symlink_path: str, udf_target: str, **_: Any
+        ) -> None:
+            added_links.append((udf_symlink_path, udf_target))
 
-    monkeypatch.setattr("containers.mkiso.script.os.sync", fake_sync)
+        def write(self, path: str) -> None:
+            Path(path).write_bytes(b"iso")
 
-    def fake_run(cmd: list[str], **_: Any) -> SimpleNamespace:
-        if cmd and cmd[0] == "truncate":
-            Path(cmd[-1]).touch()
-        return SimpleNamespace(returncode=0, stderr="", stdout="")
+        def close(self) -> None:
+            self.closed = True
 
-    monkeypatch.setattr("containers.mkiso.script.subprocess.run", fake_run)
+    fake_iso_instances: list[FakeIso] = []
 
-    real_rmdir = os.rmdir
+    def fake_pycdlib() -> FakeIso:
+        inst = FakeIso()
+        fake_iso_instances.append(inst)
+        return inst
 
-    def fake_rmdir(path: Any) -> None:
-        assert Path(path) == Path(created_mount_dirs[-1])
-        real_rmdir(path)
+    monkeypatch.setattr(script, "PyCdlib", fake_pycdlib)
 
-    monkeypatch.setattr("containers.mkiso.script.os.rmdir", fake_rmdir)
+    script.build_udf_image(str(src_dir), "Label 01", str(out_path), 1024, "bdr")
 
-    script.run_mkudffs(str(src_dir), "LABEL", str(out_path), 1024, "bdr")
-
-    assert created_mount_dirs
-    assert all(Path(p).parent == out_dir for p in created_mount_dirs)
     assert out_path.exists()
+    assert out_path.read_bytes() == b"iso"
+    assert not (out_path.parent / "disk.iso.tmp").exists()
+
+    assert fake_iso_instances and fake_iso_instances[0].closed is True
+    assert fake_iso_instances[0].udf_rev == "2.01"
+    assert fake_iso_instances[0].vol_ident == script.sanitize_volume_ident("Label 01")
+
+    assert "/folder" in added_dirs
+    assert any(udf == "/folder/nested.txt" for _, udf, _ in added_files)
+    assert any(link == "/link" for link, _ in added_links)

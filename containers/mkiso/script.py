@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 import argparse
-import math
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
 import time
 from contextlib import suppress
 from datetime import datetime, timezone
-from typing import Any
+from itertools import count
+from pathlib import Path
+from string import ascii_uppercase, digits
+from typing import Any, cast
+
+import pycdlib
+from pycdlib.pycdlibexception import PyCdlibException
+
+PyCdlib: type[Any] = cast(Any, pycdlib).PyCdlib
 
 VERBOSE: bool = False
 
@@ -87,106 +91,80 @@ def resolve_out_file(out_dir: str, out_file: str) -> str:
     return os.path.join(out_dir, out_file)
 
 
-def calc_udf_blocks(n_bytes: int, block_size: int = 2048) -> int:
-    """Return the number of blocks required for the filesystem image."""
-
-    # Allow some slack for filesystem metadata while keeping the image
-    # reasonably sized. Provide a floor so empty trees still produce a valid
-    # filesystem. The heuristics are conservative to avoid running out of
-    # space mid-copy when the metadata grows slightly beyond the data size.
-    min_blocks = max((32 * 1024 * 1024) // block_size, 1)  # 32 MiB minimum image
-    if n_bytes <= 0:
-        return min_blocks
-
-    overhead = max(16 * 1024 * 1024, int(n_bytes * 0.1))
-    total = n_bytes + overhead
-    blocks = math.ceil(total / block_size)
-    return max(blocks, min_blocks)
+def sanitize_volume_ident(label: str) -> str:
+    allowed = set(ascii_uppercase + digits + "_")
+    sanitized = [ch if ch in allowed else "_" for ch in label.upper()]
+    result = "".join(sanitized)[:32]
+    return result or "MKISO"
 
 
-def run_mkudffs(
-    src_dir: str, label: str, out_path: str, n_bytes: int, media_type: str
+def build_udf_image(
+    src_dir: str,
+    label: str,
+    out_path: str,
+    n_bytes: int,
+    media_type: str,
+    udf_revision: str = "2.01",
 ) -> None:
-    block_size = 2048
-    blocks = calc_udf_blocks(n_bytes, block_size)
-    out_dir = os.path.dirname(os.path.abspath(out_path)) or os.getcwd()
+    del n_bytes  # Size is unused with pycdlib but retained for compatibility.
+    media_hint = media_type.strip() or "bdr"
+    vlog(f"[mkiso] building UDF {udf_revision} image via pycdlib (media={media_hint})")
+
+    base = Path(src_dir)
     tmp_path = f"{out_path}.tmp"
     with suppress(FileNotFoundError):
         os.remove(tmp_path)
 
+    iso = PyCdlib()
     success = False
-    size_bytes = blocks * block_size
-    media_arg = media_type.strip() or "bdr"
-    truncate_cmd = ["truncate", "-s", str(size_bytes), tmp_path]
-    vlog(f"+ {' '.join(truncate_cmd)}")
-    proc = subprocess.run(
-        truncate_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-    )
-    if proc.returncode != 0:
-        if proc.stderr:
-            eprint(proc.stderr.strip())
-        with suppress(FileNotFoundError):
-            os.remove(tmp_path)
-        raise SystemExit(proc.returncode)
-    mkudffs_cmd: list[str] = [
-        "mkudffs",
-        "--utf8",
-        "--new-file",
-        f"--label={label}",
-        "--blocksize=2048",
-        f"--media-type={media_arg}",
-        "--udfrev=0x0201",
-        tmp_path,
-        str(blocks),
-    ]
-    vlog(f"+ {' '.join(mkudffs_cmd)}")
+    alias_counter = count(1)
+
     try:
-        proc = subprocess.run(
-            mkudffs_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        vol_ident = sanitize_volume_ident(label)
+        if vol_ident != label:
+            vlog(f"[mkiso] sanitized volume identifier to '{vol_ident}'")
+        iso.new(vol_ident=vol_ident, udf=udf_revision)
+
+        directories = sorted(
+            (p for p in base.rglob("*") if p.is_dir()),
+            key=lambda p: p.relative_to(base).as_posix(),
         )
-        if proc.returncode != 0:
-            if proc.stderr:
-                eprint(proc.stderr.strip())
-            raise SystemExit(proc.returncode)
+        for directory in directories:
+            rel = directory.relative_to(base)
+            if not rel.parts:
+                continue
+            udf_path = "/" + rel.as_posix()
+            iso.add_directory(udf_path=udf_path)
 
-        mount_dir = tempfile.mkdtemp(prefix="mkiso-", dir=out_dir)
-        try:
-            mount_cmd = ["mount", "-t", "udf", "-o", "loop", tmp_path, mount_dir]
-            vlog(f"+ {' '.join(mount_cmd)}")
-            mnt = subprocess.run(
-                mount_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-            )
-            if mnt.returncode != 0:
-                if mnt.stderr:
-                    eprint(mnt.stderr.strip())
-                raise SystemExit(mnt.returncode)
+        entries = sorted(
+            (p for p in base.rglob("*") if p.is_file() or p.is_symlink()),
+            key=lambda p: p.relative_to(base).as_posix(),
+        )
+        for entry in entries:
+            rel_posix = entry.relative_to(base).as_posix()
+            udf_path = "/" + rel_posix
+            if entry.is_symlink():
+                target = os.readlink(entry)
+                iso.add_symlink(udf_symlink_path=udf_path, udf_target=target)
+                continue
 
-            try:
-                shutil.copytree(src_dir, mount_dir, dirs_exist_ok=True, symlinks=True)
-            except Exception as exc:  # pragma: no cover - defensive error path
-                eprint(f"[mkiso] ERROR: failed to populate image: {exc}")
-                raise SystemExit(1) from exc
-            finally:
-                with suppress(AttributeError):
-                    os.sync()
-        finally:
-            umount_cmd = ["umount", mount_dir]
-            vlog(f"+ {' '.join(umount_cmd)}")
-            umnt = subprocess.run(
-                umount_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-            )
-            if umnt.returncode != 0:
-                if umnt.stderr:
-                    eprint(umnt.stderr.strip())
-                raise SystemExit(umnt.returncode)
-            os.rmdir(mount_dir)
+            iso_alias = f"/F{next(alias_counter):06d}.;1"
+            with entry.open("rb") as fp:
+                iso.add_fp(fp, entry.stat().st_size, iso_alias, udf_path=udf_path)
 
-        os.replace(tmp_path, out_path)
+        iso.write(tmp_path)
         success = True
+    except PyCdlibException as exc:
+        eprint(f"[mkiso] ERROR: failed to build UDF image: {exc}")
+        raise SystemExit(1) from exc
     finally:
+        with suppress(PyCdlibException):
+            iso.close()
         if not success:
             with suppress(FileNotFoundError):
                 os.remove(tmp_path)
+
+    os.replace(tmp_path, out_path)
 
 
 # ---------- main ----------
@@ -212,8 +190,8 @@ def main() -> None:
     )
     ap.add_argument(
         "--media-type",
-        default="hd",
-        help="Media type hint for mkudffs (default: bdr).",
+        default="bdr",
+        help="Media type hint (retained for compatibility; default: bdr).",
     )
     ap.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging."
@@ -245,7 +223,7 @@ def main() -> None:
     vlog(f"out={out_path}")
 
     # Build ISO directly from src_dir
-    run_mkudffs(args.src_dir, label, out_path, n_bytes, args.media_type)
+    build_udf_image(args.src_dir, label, out_path, n_bytes, args.media_type)
 
     # Final summary
     size: int = 0
