@@ -5,8 +5,7 @@ ARG VCS_URL
 LABEL org.opencontainers.image.source="${VCS_URL}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.version="${VERSION}"
-RUN apk add --no-cache coreutils \
-    && pip install --no-cache-dir pycdlib
+RUN apk add --no-cache cdrkit coreutils
 WORKDIR /app
 COPY script.py /app/mkiso
 ENTRYPOINT ["python", "/app/mkiso"]

@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import subprocess
 import sys
 import time
-from contextlib import suppress
 from datetime import datetime, timezone
-from itertools import count
-from pathlib import Path
-from string import ascii_uppercase, digits
-from typing import Any, cast
-
-import pycdlib
-from pycdlib.pycdlibexception import PyCdlibException
-
-PyCdlib: type[Any] = cast(Any, pycdlib).PyCdlib
+from typing import Any
 
 VERBOSE: bool = False
 
@@ -91,80 +83,25 @@ def resolve_out_file(out_dir: str, out_file: str) -> str:
     return os.path.join(out_dir, out_file)
 
 
-def sanitize_volume_ident(label: str) -> str:
-    allowed = set(ascii_uppercase + digits + "_")
-    sanitized = [ch if ch in allowed else "_" for ch in label.upper()]
-    result = "".join(sanitized)[:32]
-    return result or "MKISO"
-
-
-def build_udf_image(
-    src_dir: str,
-    label: str,
-    out_path: str,
-    n_bytes: int,
-    media_type: str,
-    udf_revision: str = "2.01",
-) -> None:
-    del n_bytes  # Size is unused with pycdlib but retained for compatibility.
-    media_hint = media_type.strip() or "bdr"
-    vlog(f"[mkiso] building UDF {udf_revision} image via pycdlib (media={media_hint})")
-
-    base = Path(src_dir)
-    tmp_path = f"{out_path}.tmp"
-    with suppress(FileNotFoundError):
-        os.remove(tmp_path)
-
-    iso = PyCdlib()
-    success = False
-    alias_counter = count(1)
-
-    try:
-        vol_ident = sanitize_volume_ident(label)
-        if vol_ident != label:
-            vlog(f"[mkiso] sanitized volume identifier to '{vol_ident}'")
-        iso.new(vol_ident=vol_ident, udf=udf_revision)
-
-        directories = sorted(
-            (p for p in base.rglob("*") if p.is_dir()),
-            key=lambda p: p.relative_to(base).as_posix(),
-        )
-        for directory in directories:
-            rel = directory.relative_to(base)
-            if not rel.parts:
-                continue
-            udf_path = "/" + rel.as_posix()
-            iso.add_directory(udf_path=udf_path)
-
-        entries = sorted(
-            (p for p in base.rglob("*") if p.is_file() or p.is_symlink()),
-            key=lambda p: p.relative_to(base).as_posix(),
-        )
-        for entry in entries:
-            rel_posix = entry.relative_to(base).as_posix()
-            udf_path = "/" + rel_posix
-            if entry.is_symlink():
-                target = os.readlink(entry)
-                iso.add_symlink(udf_symlink_path=udf_path, udf_target=target)
-                continue
-
-            iso_alias = f"/F{next(alias_counter):06d}.;1"
-            with entry.open("rb") as fp:
-                iso.add_fp(fp, entry.stat().st_size, iso_alias, udf_path=udf_path)
-
-        iso.write(tmp_path)
-        success = True
-    except PyCdlibException as exc:
-        eprint(f"[mkiso] ERROR: failed to build UDF image: {exc}")
-        raise SystemExit(1) from exc
-    finally:
-        with suppress(PyCdlibException):
-            iso.close()
-        if not success:
-            with suppress(FileNotFoundError):
-                os.remove(tmp_path)
-
-    os.replace(tmp_path, out_path)
+def run_genisoimage(src_dir: str, label: str, out_path: str) -> None:
+    cmd: list[str] = [
+        "genisoimage",
+        "-quiet",
+        "-o",
+        out_path,
+        "-V",
+        label,
+        "-udf",
+        src_dir,
+    ]
+    vlog(f"+ {' '.join(cmd)}")
+    proc = subprocess.run(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+    )
+    if proc.returncode != 0:
+        if proc.stderr:
+            eprint(proc.stderr.strip())
+        raise SystemExit(proc.returncode)
 
 
 # ---------- main ----------
@@ -187,11 +124,6 @@ def main() -> None:
         help="Filename or path for the output .iso. "
         "If a bare filename is given, it is placed in --out-dir. "
         "Overrides auto-naming.",
-    )
-    ap.add_argument(
-        "--media-type",
-        default="bdr",
-        help="Media type hint (retained for compatibility; default: bdr).",
     )
     ap.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging."
@@ -223,7 +155,7 @@ def main() -> None:
     vlog(f"out={out_path}")
 
     # Build ISO directly from src_dir
-    build_udf_image(args.src_dir, label, out_path, n_bytes, args.media_type)
+    run_genisoimage(args.src_dir, label, out_path)
 
     # Final summary
     size: int = 0
