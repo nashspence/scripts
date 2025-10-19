@@ -1,0 +1,37 @@
+#!/bin/sh
+# macOS: build a UDF+ISO9660+Joliet hybrid from a folder.
+# Usage: mkhybrid.sh <input_dir> <output_path_or_dir> [VOLUME_LABEL]
+set -eu
+
+if [ $# -lt 2 ]; then
+  echo "usage: $0 <input_dir> <output_path_or_dir> [VOLUME_LABEL]" >&2
+  exit 2
+fi
+
+IN=$1
+OUT=$2
+LABEL=${3:-$(date -u +%Y%m%dT%H%M%SZ)}
+
+[ -d "$IN" ] || { echo "error: input dir not found: $IN" >&2; exit 3; }
+
+# If OUT is an existing directory, use LABEL.iso inside it.
+if [ -d "$OUT" ]; then
+  OUT="$OUT/$LABEL.iso"
+fi
+
+# Ensure .iso suffix.
+case "$OUT" in
+  *.iso) : ;;
+  *) OUT="${OUT}.iso" ;;
+esac
+
+# Ensure parent directory exists.
+mkdir -p "$(dirname "$OUT")"
+
+# Build hybrid image. Large files supported via UDF.
+hdiutil makehybrid \
+  -o "$OUT" "$IN" \
+  -udf -iso -joliet \
+  -default-volume-name "$LABEL"
+
+echo "$OUT"
