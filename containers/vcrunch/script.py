@@ -1407,6 +1407,29 @@ def save_manifest(manifest: dict[str, Any], path: str) -> None:
     os.replace(tmp, path)
 
 
+def manifest_error_basenames(manifest: dict[str, Any]) -> List[str]:
+    names: List[str] = []
+    items = manifest.get("items")
+    if not isinstance(items, dict):
+        return names
+    for rec in items.values():
+        if not isinstance(rec, dict):
+            continue
+        if not rec.get("error"):
+            continue
+        name: Optional[str] = None
+        src = rec.get("src")
+        if isinstance(src, str) and src:
+            name = os.path.basename(src)
+        if not name:
+            output = rec.get("output")
+            if isinstance(output, str) and output:
+                name = os.path.basename(output)
+        if name:
+            names.append(name)
+    return names
+
+
 def src_key(src_abs: str, st: os.stat_result) -> str:
     return f"{src_abs}|{st.st_size}|{int(st.st_mtime)}"
 
@@ -1643,6 +1666,11 @@ def main() -> None:
         help="Local work dir inside the container; inputs are staged here before encoding.",
     )
     ap.add_argument(
+        "--list-errors",
+        action="store_true",
+        help="List manifest items with errors and exit.",
+    )
+    ap.add_argument(
         "--svt-lp",
         type=int,
         default=int(os.getenv("SVT_LP", "5")),
@@ -1692,10 +1720,16 @@ def main() -> None:
         else (preset["safety_overhead"] if preset else DEFAULT_SAFETY_OVERHEAD)
     )
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs(args.stage_dir, exist_ok=True)
     manifest_path = os.path.join(args.output_dir, args.manifest_name)
     manifest = load_manifest(manifest_path)
+
+    if args.list_errors:
+        for name in sorted(set(manifest_error_basenames(manifest))):
+            print(name)
+        return
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.stage_dir, exist_ok=True)
 
     inputs: List[str] = []
     if args.paths_from:

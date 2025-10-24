@@ -751,6 +751,51 @@ def test_save_manifest(monkeypatch, tmp_path):
     assert data["updated"] == "TS2"
 
 
+def test_manifest_error_basenames():
+    manifest = {
+        "items": {
+            "a": {"src": "/path/to/foo.mkv", "error": "fail"},
+            "b": {"output": "bar.mov", "error": "nope"},
+            "c": {"src": "/path/baz.mp4"},
+            "d": "not-a-dict",
+        }
+    }
+    result = script.manifest_error_basenames(manifest)
+    assert sorted(result) == ["bar.mov", "foo.mkv"]
+
+
+def test_main_list_errors(monkeypatch, tmp_path, capsys):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    stage_dir = tmp_path / "stage"
+    manifest = {
+        "items": {
+            "1": {"src": "/a/foo.mkv", "error": "fail"},
+            "2": {"output": "bar.mov", "error": "bad"},
+            "3": {"src": "/b/no-error.mkv"},
+        }
+    }
+    (out_dir / script.MANIFEST_NAME).write_text(json.dumps(manifest))
+
+    monkeypatch.setattr(
+        script.sys,
+        "argv",
+        [
+            "vcrunch",
+            "--output-dir",
+            str(out_dir),
+            "--stage-dir",
+            str(stage_dir),
+            "--list-errors",
+        ],
+    )
+
+    script.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == ["bar.mov", "foo.mkv"]
+
+
 def test_src_key():
     st = types.SimpleNamespace(st_size=123, st_mtime=456.7)
     assert script.src_key("/abs", st) == "/abs|123|456"
