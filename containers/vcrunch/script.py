@@ -761,6 +761,157 @@ def _dump_streams_and_metadata(
     }
 
 
+def _stream_tag_int(stream: Dict[str, Any], *keys: str) -> Optional[int]:
+    tags = stream.get("tags")
+    if not isinstance(tags, dict):
+        return None
+    for key in keys:
+        value = tags.get(key)
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                continue
+            try:
+                parsed = int(float(s))
+            except ValueError:
+                continue
+            if parsed > 0:
+                return parsed
+    return None
+
+
+def _extract_stream_bitrate(stream: Dict[str, Any]) -> Optional[int]:
+    candidates = [
+        stream.get("bit_rate"),
+        _stream_tag_int(
+            stream,
+            "BPS",
+            "bps",
+            "BPS-eng",
+            "BPS-ENG",
+            "NBPS",
+            "bit_rate",
+        ),
+    ]
+    for candidate in candidates:
+        value: Optional[int] = None
+        if candidate is None:
+            continue
+        try:
+            if isinstance(candidate, str):
+                value = int(float(candidate.strip()))
+            elif isinstance(candidate, (int, float)):
+                value = int(candidate)
+            else:
+                continue
+        except ValueError:
+            continue
+        if value and value > 0:
+            return value
+    return None
+
+
+def _is_attached_picture_stream(stream: Dict[str, Any]) -> bool:
+    disp = stream.get("disposition")
+    if not isinstance(disp, dict):
+        return False
+    value = disp.get("attached_pic")
+    if isinstance(value, (int, float)):
+        return int(value) == 1
+    if isinstance(value, str):
+        try:
+            return int(value) == 1
+        except ValueError:
+            return False
+    return False
+
+
+def _probe_stream_infos_only(src: str) -> List[StreamInfo]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_streams",
+        src,
+    ]
+    metadata = ffprobe_json(cmd)
+    streams = cast(List[Dict[str, Any]], metadata.get("streams") or [])
+    type_map = {
+        "video": "v",
+        "audio": "a",
+        "subtitle": "s",
+        "data": "d",
+        "attachment": "t",
+    }
+    type_counters: Dict[str, int] = {}
+    stream_specifiers: Dict[int, str] = {}
+    for raw_stream in streams:
+        try:
+            raw_index = int(raw_stream.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        letter = type_map.get(cast(str, raw_stream.get("codec_type") or ""))
+        if not letter:
+            continue
+        ordinal = type_counters.get(letter, 0)
+        type_counters[letter] = ordinal + 1
+        stream_specifiers[raw_index] = f"{letter}:{ordinal}"
+
+    stream_infos: List[StreamInfo] = []
+    for stream in streams:
+        try:
+            index = int(stream.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        stype, (_muxer, _ext, mkv_ok) = _classify_stream(stream)
+        spec = stream_specifiers.get(index, "")
+        stream_infos.append(
+            {
+                "index": index,
+                "stream": stream,
+                "stype": stype,
+                "mkv_ok": mkv_ok,
+                "spec": spec,
+            }
+        )
+    return stream_infos
+
+
+def _stream_duration_or(stream: Dict[str, Any], fallback: float) -> float:
+    duration_val = _parse_duration_value(stream.get("duration"))
+    if duration_val is not None and duration_val > 0:
+        return float(duration_val)
+    return float(fallback)
+
+
+def _estimate_other_stream_bytes(
+    stream: Dict[str, Any], duration: float, stype: str
+) -> int:
+    size_tag = _stream_tag_int(
+        stream,
+        "NUMBER_OF_BYTES",
+        "NumberOfBytes",
+        "FILESIZE",
+        "FileSize",
+        "filesize",
+    )
+    if size_tag:
+        return size_tag
+    bitrate = _extract_stream_bitrate(stream)
+    if bitrate:
+        return int((bitrate / 8.0) * duration)
+    if stype == "s":
+        # Approximate text subtitle size at ~1 KiB/s.
+        return int(duration * 1024)
+    if stype == "t":
+        # Assume attachments average around 2 MiB when no better data exists.
+        return 2_000_000
+    # Treat other data streams as small auxiliary payloads.
+    return int(duration * 4000)
+
+
 def _mkvmerge_args(
     streams: List[Tuple[pathlib.Path, Dict[str, Any], str]],
 ) -> Tuple[List[str], List[pathlib.Path]]:
@@ -1799,14 +1950,15 @@ def main() -> None:
             entry = None
         if entry is None:
             probe_result = probe_media_info(path)
-            entry = {
+            new_entry: ProbeCacheEntry = {
                 "path": os.path.abspath(path),
                 "is_video": bool(probe_result.get("is_video")),
             }
             duration_value = probe_result.get("duration")
             if duration_value is not None:
-                entry["duration"] = float(duration_value)
-            probe_cache[key] = entry
+                new_entry["duration"] = float(duration_value)
+            probe_cache[key] = new_entry
+            entry = new_entry
             save_manifest(manifest, manifest_path)
 
         is_video = bool(entry.get("is_video"))
@@ -1883,8 +2035,8 @@ def main() -> None:
 
     audio_bps = kbps_to_bps(args.audio_bitrate)
     total_duration = 0.0
-    total_audio_bytes = 0
     durations: List[float] = []
+    per_video_duration: Dict[str, float] = {}
     for src in videos:
         duration = video_durations.get(src)
         if duration is None:
@@ -1895,53 +2047,219 @@ def main() -> None:
                 sys.exit(1)
             probe_key = probe_keys.get(src)
             if probe_key:
-                entry = probe_cache.get(probe_key)
-                if entry is not None:
-                    entry["duration"] = float(duration)
+                cache_entry = probe_cache.get(probe_key)
+                if isinstance(cache_entry, dict):
+                    cache_entry["duration"] = float(duration)
+                    probe_cache[probe_key] = cache_entry
                     save_manifest(manifest, manifest_path)
             video_durations[src] = float(duration)
         durations.append(float(duration))
         total_duration += float(duration)
-        total_audio_bytes += int((audio_bps / 8.0) * float(duration))
+        per_video_duration[src] = float(duration)
 
-    global_video_kbps = 0
+    audio_copy_specs: Dict[str, set[str]] = {}
+    video_copy_specs: Dict[str, set[str]] = {}
+    total_audio_bytes = 0
+    other_stream_bytes = 0
+    video_entries: List[Dict[str, Any]] = []
+
     if use_constant_quality:
         logging.info("using constant quality: CRF=%s", args.constant_quality)
         if videos and total_duration <= 0:
             logging.error("total video duration is zero; cannot proceed")
             sys.exit(1)
+        for src in videos:
+            duration = per_video_duration.get(src, 0.0)
+            total_audio_bytes += int((audio_bps / 8.0) * float(duration))
     else:
+        for src in videos:
+            duration = per_video_duration.get(src, 0.0)
+            try:
+                stream_infos = _probe_stream_infos_only(src)
+            except Exception as exc:
+                logging.warning("failed to inspect streams for %s: %s", src, exc)
+                stream_infos = []
+            audio_copy_specs.setdefault(src, set())
+            video_copy_specs.setdefault(src, set())
+            audio_found = False
+            for info in stream_infos:
+                stype_val = info.get("stype")
+                if not isinstance(stype_val, str):
+                    continue
+                stype = stype_val
+                stream_obj = info.get("stream")
+                if not isinstance(stream_obj, dict):
+                    continue
+                stream: Dict[str, Any] = stream_obj
+                stream_duration = _stream_duration_or(stream, duration)
+                if stype == "a":
+                    audio_found = True
+                    bitrate = _extract_stream_bitrate(stream)
+                    if (
+                        info.get("mkv_ok")
+                        and bitrate is not None
+                        and bitrate > 0
+                        and bitrate <= audio_bps
+                    ):
+                        spec_val = info.get("spec")
+                        if isinstance(spec_val, str) and spec_val:
+                            audio_copy_specs[src].add(spec_val)
+                        stream_bytes = int((bitrate / 8.0) * stream_duration)
+                    else:
+                        stream_bytes = int((audio_bps / 8.0) * stream_duration)
+                    total_audio_bytes += stream_bytes
+                elif stype == "v":
+                    if _is_attached_picture_stream(stream):
+                        other_stream_bytes += _estimate_other_stream_bytes(
+                            stream, stream_duration, "t"
+                        )
+                        continue
+                    spec_val = info.get("spec")
+                    spec_text = spec_val if isinstance(spec_val, str) else ""
+                    video_entries.append(
+                        {
+                            "src": src,
+                            "spec": spec_text,
+                            "duration": stream_duration,
+                            "bitrate": _extract_stream_bitrate(stream),
+                            "mkv_ok": bool(info.get("mkv_ok")),
+                        }
+                    )
+                else:
+                    other_stream_bytes += _estimate_other_stream_bytes(
+                        stream,
+                        stream_duration,
+                        stype,
+                    )
+            if not audio_found and duration > 0:
+                total_audio_bytes += int((audio_bps / 8.0) * duration)
+
+    global_video_kbps = 0
+    computed_kbps = 0
+    video_budget_bytes = 0
+    video_copy_bytes = 0
+    if not use_constant_quality:
         reserved = int(target_bytes * safety_overhead) + 20_000_000
-        video_budget_bytes = target_bytes - asset_bytes - total_audio_bytes - reserved
-        if video_budget_bytes <= 0 and videos:
+        base_video_budget = (
+            target_bytes
+            - asset_bytes
+            - total_audio_bytes
+            - other_stream_bytes
+            - reserved
+        )
+        if base_video_budget <= 0 and videos:
             logging.error(
                 "assets + audio + overhead exceed target size; no room for video"
             )
             sys.exit(1)
 
-        avg_video_bps = 0
-        if videos:
-            if total_duration <= 0:
-                logging.error("total video duration is zero; cannot compute bitrate")
+        copy_set: set[Tuple[str, str]] = set()
+        while True:
+            video_copy_bytes = 0
+            video_encode_duration = 0.0
+            for video_entry in video_entries:
+                spec_val = video_entry.get("spec")
+                spec = spec_val if isinstance(spec_val, str) else ""
+                bitrate_val = video_entry.get("bitrate")
+                bitrate = bitrate_val if isinstance(bitrate_val, int) else None
+                duration_val = video_entry.get("duration")
+                duration_float = (
+                    float(duration_val)
+                    if isinstance(duration_val, (int, float))
+                    else 0.0
+                )
+                source_id = video_entry.get("src")
+                if (
+                    isinstance(source_id, str)
+                    and (source_id, spec) in copy_set
+                    and bitrate
+                    and bitrate > 0
+                ):
+                    video_copy_bytes += int((bitrate / 8.0) * duration_float)
+                else:
+                    video_encode_duration += duration_float
+
+            video_budget_bytes = base_video_budget - video_copy_bytes
+            if video_budget_bytes <= 0 and videos and video_encode_duration > 0:
+                logging.error(
+                    "assets + audio + overhead exceed target size; no room for video"
+                )
                 sys.exit(1)
-            avg_video_bps = int((video_budget_bytes * 8) / total_duration)
+
+            if video_encode_duration <= 0:
+                global_video_kbps = 0
+                break
+
+            avg_video_bps = int((video_budget_bytes * 8) / video_encode_duration)
             if avg_video_bps < 50_000:
                 logging.error("computed video bitrate unrealistically low")
                 sys.exit(1)
 
-        computed_kbps = max(1, int(avg_video_bps / 1000)) if avg_video_bps else 1
-        if computed_kbps > MAX_SVT_KBPS:
-            logging.warning(
-                "computed average video bitrate %s kbps exceeds SVT-AV1 max %s kbps; clamping; final size will undershoot",
-                computed_kbps,
-                MAX_SVT_KBPS,
-            )
-            global_video_kbps = MAX_SVT_KBPS
-        else:
-            global_video_kbps = computed_kbps
+            computed_kbps = max(1, int(avg_video_bps / 1000)) if avg_video_bps else 1
+            if computed_kbps > MAX_SVT_KBPS:
+                logging.warning(
+                    "computed average video bitrate %s kbps exceeds SVT-AV1 max %s kbps; clamping; final size will undershoot",
+                    computed_kbps,
+                    MAX_SVT_KBPS,
+                )
+                global_video_kbps = MAX_SVT_KBPS
+            else:
+                global_video_kbps = computed_kbps
+
+            threshold_bps = global_video_kbps * 1000
+            candidate_set: set[Tuple[str, str]] = set()
+            for video_entry in video_entries:
+                if not video_entry.get("mkv_ok"):
+                    continue
+                spec_val = video_entry.get("spec")
+                spec = spec_val if isinstance(spec_val, str) else ""
+                if not spec:
+                    continue
+                bitrate_val = video_entry.get("bitrate")
+                bitrate = bitrate_val if isinstance(bitrate_val, int) else None
+                if bitrate is None or bitrate <= 0:
+                    continue
+                if threshold_bps and bitrate < threshold_bps:
+                    source_id = video_entry.get("src")
+                    if isinstance(source_id, str):
+                        candidate_set.add((source_id, spec))
+            if candidate_set == copy_set:
+                break
+            copy_set = candidate_set
+
+        video_copy_bytes = 0
+        for video_entry in video_entries:
+            spec_val = video_entry.get("spec")
+            spec = spec_val if isinstance(spec_val, str) else ""
+            source_id = video_entry.get("src")
+            if not isinstance(source_id, str):
+                continue
+            copy_key = (source_id, spec)
+            if copy_key in copy_set:
+                bitrate_val = video_entry.get("bitrate")
+                bitrate = bitrate_val if isinstance(bitrate_val, int) else None
+                duration_val = video_entry.get("duration")
+                duration_float = (
+                    float(duration_val)
+                    if isinstance(duration_val, (int, float))
+                    else 0.0
+                )
+                if bitrate and bitrate > 0:
+                    video_copy_bytes += int((bitrate / 8.0) * duration_float)
+                if spec:
+                    video_copy_specs.setdefault(source_id, set()).add(spec)
+        video_budget_bytes = base_video_budget - video_copy_bytes
+        if video_budget_bytes < 0:
+            video_budget_bytes = 0
 
     logging.info("target bytes: %s", f"{target_bytes:,}")
     logging.info("asset bytes: %s", f"{asset_bytes:,}")
+    if not use_constant_quality:
+        logging.info(
+            "stream overhead bytes: %s; copied video bytes: %s",
+            f"{other_stream_bytes:,}",
+            f"{video_copy_bytes:,}",
+        )
     logging.info(
         "video duration hours: %.2f; audio bytes: %s",
         total_duration / 3600 if videos else 0.0,
@@ -2173,16 +2491,28 @@ def main() -> None:
                     main_stream_types.append(stype)
 
             main_output_opts: List[str] = []
+            video_output_indices: Dict[str, int] = {}
+            audio_output_indices: Dict[str, int] = {}
+            video_out_count = 0
+            audio_out_count = 0
             for info in sorted(stream_infos, key=lambda item: item["index"]):
-                spec = info.get("spec")
-                if not spec:
+                spec_val = info.get("spec")
+                if not isinstance(spec_val, str) or not spec_val:
                     continue
-                stype = info.get("stype")
+                spec = spec_val
+                stype_val = info.get("stype")
+                if not isinstance(stype_val, str):
+                    continue
+                stype = stype_val
                 if stype == "v":
                     main_output_opts += ["-map", f"0:{spec}"]
+                    video_output_indices[spec] = video_out_count
+                    video_out_count += 1
                     _register_main_stream("v")
                 elif stype == "a":
                     main_output_opts += ["-map", f"0:{spec}"]
+                    audio_output_indices[spec] = audio_out_count
+                    audio_out_count += 1
                     _register_main_stream("a")
                 elif stype == "s" and info.get("mkv_ok"):
                     main_output_opts += ["-map", f"0:{spec}"]
@@ -2198,28 +2528,51 @@ def main() -> None:
 
             main_output_opts += _metadata_copy_args(main_stream_types)
             main_output_opts += FFMPEG_OUTPUT_FLAGS
-            main_output_opts += ["-c:v", "libsvtav1"]
-            if use_constant_quality:
-                main_output_opts += ["-crf", str(args.constant_quality), "-b:v", "0"]
-            else:
-                main_output_opts += ["-b:v", f"{global_video_kbps}k"]
-            main_output_opts += [
-                "-preset",
-                "5",
-                "-svtav1-params",
-                f"lp={args.svt_lp}",
-                "-fps_mode",
-                "passthrough",
-            ]
-            if "a" in main_stream_types:
-                main_output_opts += [
-                    "-c:a",
-                    "libopus",
-                    "-ar",
-                    "48000",
-                    "-b:a",
-                    f"{audio_kbps}k",
-                ]
+            src_video_copy = video_copy_specs.get(src, set())
+            src_audio_copy = audio_copy_specs.get(src, set())
+            codec_opts: List[str] = []
+            for spec, out_idx in sorted(
+                video_output_indices.items(), key=lambda item: item[1]
+            ):
+                if spec in src_video_copy:
+                    codec_opts += [f"-c:v:{out_idx}", "copy"]
+                else:
+                    codec_opts += [f"-c:v:{out_idx}", "libsvtav1"]
+                    if use_constant_quality:
+                        codec_opts += [
+                            f"-crf:v:{out_idx}",
+                            str(args.constant_quality),
+                            f"-b:v:{out_idx}",
+                            "0",
+                        ]
+                    else:
+                        codec_opts += [
+                            f"-b:v:{out_idx}",
+                            f"{global_video_kbps}k",
+                        ]
+                    codec_opts += [
+                        f"-preset:v:{out_idx}",
+                        "5",
+                        f"-svtav1-params:v:{out_idx}",
+                        f"lp={args.svt_lp}",
+                        f"-fps_mode:v:{out_idx}",
+                        "passthrough",
+                    ]
+            for spec, out_idx in sorted(
+                audio_output_indices.items(), key=lambda item: item[1]
+            ):
+                if spec in src_audio_copy:
+                    codec_opts += [f"-c:a:{out_idx}", "copy"]
+                else:
+                    codec_opts += [
+                        f"-c:a:{out_idx}",
+                        "libopus",
+                        f"-ar:a:{out_idx}",
+                        "48000",
+                        f"-b:a:{out_idx}",
+                        f"{audio_kbps}k",
+                    ]
+            main_output_opts += codec_opts
             if "s" in main_stream_types:
                 main_output_opts += ["-c:s", "copy"]
             if "t" in main_stream_types:
@@ -2232,9 +2585,10 @@ def main() -> None:
             encode_outputs.append(main_output_opts)
 
             for export in exports:
-                spec = export.get("spec")
-                if not spec:
+                spec_val = export.get("spec")
+                if not isinstance(spec_val, str) or not spec_val:
                     continue
+                spec = spec_val
                 export_path = pathlib.Path(export["path"])
                 export_path.parent.mkdir(parents=True, exist_ok=True)
                 try:
@@ -2323,35 +2677,35 @@ def main() -> None:
                         mapped_video = False
                         if all_video_mkv_ok:
                             for info in video_infos:
-                                spec = info.get("spec")
-                                if not spec:
+                                spec_val = info.get("spec")
+                                if not isinstance(spec_val, str) or not spec_val:
                                     continue
-                                remux_cmd += ["-map", f"0:{spec}"]
+                                remux_cmd += ["-map", f"0:{spec_val}"]
                                 mapped_video = True
                         if mapped_video:
                             remux_stream_types.append("v")
                         mapped_audio = False
                         if all_audio_mkv_ok:
                             for info in audio_infos:
-                                spec = info.get("spec")
-                                if not spec:
+                                spec_val = info.get("spec")
+                                if not isinstance(spec_val, str) or not spec_val:
                                     continue
-                                remux_cmd += ["-map", f"0:{spec}"]
+                                remux_cmd += ["-map", f"0:{spec_val}"]
                                 mapped_audio = True
                         if mapped_audio:
                             remux_stream_types.append("a")
                         for info in subtitle_infos:
-                            spec = info.get("spec")
-                            if not spec:
+                            spec_val = info.get("spec")
+                            if not isinstance(spec_val, str) or not spec_val:
                                 continue
-                            remux_cmd += ["-map", f"0:{spec}"]
+                            remux_cmd += ["-map", f"0:{spec_val}"]
                         if subtitle_infos:
                             remux_stream_types.append("s")
                         for info in attachment_infos:
-                            spec = info.get("spec")
-                            if not spec:
+                            spec_val = info.get("spec")
+                            if not isinstance(spec_val, str) or not spec_val:
                                 continue
-                            remux_cmd += ["-map", f"0:{spec}"]
+                            remux_cmd += ["-map", f"0:{spec_val}"]
                         if attachment_infos:
                             remux_stream_types.append("t")
                         remux_cmd += _metadata_copy_args(remux_stream_types)
