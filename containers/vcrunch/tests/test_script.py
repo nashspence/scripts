@@ -493,16 +493,17 @@ def test_video_copy_budget_uses_measured_bytes(monkeypatch, tmp_path, caplog):
     assert "2,500,000" in record.getMessage()
     assert any(spec == "v:0" for _, spec, _ in compute_calls)
 
-    input_log = next(
-        (rec for rec in caplog.records if "input file clip.mp4" in rec.getMessage()),
+    budget_header = next(
+        (
+            rec
+            for rec in caplog.records
+            if "stream budget for clip.mp4" in rec.getMessage()
+        ),
         None,
     )
-    assert input_log is not None
-    output_log = next(
-        (rec for rec in caplog.records if "output target clip.mp4" in rec.getMessage()),
-        None,
-    )
-    assert output_log is not None
+    assert budget_header is not None
+    assert any("v stream v:0" in rec.getMessage() for rec in caplog.records)
+    assert any("difference   ->" in rec.getMessage() for rec in caplog.records)
     assert any(
         "bitrate calculation steps" in rec.getMessage() for rec in caplog.records
     )

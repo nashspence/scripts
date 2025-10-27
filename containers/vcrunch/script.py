@@ -2847,50 +2847,6 @@ def main() -> None:
             return int(raw)
         return 0
 
-    if args.verbose and videos:
-        logging.info("input stream sizes:")
-        for src in videos:
-            file_size = input_file_sizes.get(src, 0)
-            display_name = os.path.basename(src)
-            entries: List[BudgetDebugEntry] = [
-                cast(BudgetDebugEntry, dict(entry))
-                for entry in input_stream_records.get(src, [])
-            ]
-            stream_total = sum(_entry_bytes(entry) for entry in entries)
-            diff = file_size - stream_total
-            if diff < 0 and entries:
-                adjust = entries[-1]
-                current = int(adjust.get("bytes", 0))
-                adjusted_value = max(0, current + diff)
-                adjust["bytes"] = adjusted_value
-                stream_total = sum(int(entry.get("bytes", 0)) for entry in entries)
-                diff = file_size - stream_total
-            container_bytes = diff if diff > 0 else 0
-            logging.info(
-                "input file %s (%s bytes):",
-                display_name,
-                f"{file_size:,}",
-            )
-            for stream_entry in entries:
-                entry_bytes = _entry_bytes(stream_entry)
-                logging.info(
-                    "  %s stream %s -> %.2f MiB (%s)",
-                    stream_entry.get("stype", "?"),
-                    stream_entry.get("spec") or "<none>",
-                    entry_bytes / float(1024**2),
-                    stream_entry.get("method", ""),
-                )
-            logging.info(
-                "  container overhead -> %.2f MiB (%s bytes)",
-                container_bytes / float(1024**2),
-                f"{container_bytes:,}",
-            )
-            logging.info(
-                "  total -> %.2f MiB (%s bytes)",
-                file_size / float(1024**2) if file_size else 0.0,
-                f"{file_size:,}",
-            )
-
     output_container_share: Dict[str, int] = {src: 0 for src in videos}
     if videos and not use_constant_quality and reserved > 0:
         basis_values = [per_video_duration.get(src, 0.0) for src in videos]
@@ -2924,42 +2880,147 @@ def main() -> None:
             videos[idx]: shares[idx] for idx in range(len(videos))
         }
 
-    if args.verbose and videos and not use_constant_quality:
-        logging.info("output target stream budgets:")
+    if args.verbose and videos:
+        logging.info("stream budgets by file:")
+        order_map = {"v": 0, "a": 1, "s": 2, "d": 3, "t": 4, "container": 5}
         for src in videos:
+            file_size = input_file_sizes.get(src, 0)
+            display_name = os.path.basename(src)
+            input_entries: List[BudgetDebugEntry] = [
+                cast(BudgetDebugEntry, dict(entry))
+                for entry in input_stream_records.get(src, [])
+            ]
             output_entries: List[BudgetDebugEntry] = [
                 cast(BudgetDebugEntry, dict(entry))
                 for entry in output_stream_records.get(src, [])
             ]
-            stream_total = sum(_entry_bytes(entry) for entry in output_entries)
-            container_bytes = output_container_share.get(src, 0)
-            target_total = stream_total + container_bytes
-            display_name = os.path.basename(src)
-            logging.info(
-                "output target %s (%s bytes):",
-                display_name,
-                f"{target_total:,}",
+            input_stream_total = sum(_entry_bytes(entry) for entry in input_entries)
+            diff = file_size - input_stream_total
+            if diff < 0 and input_entries:
+                adjust = input_entries[-1]
+                current = _entry_bytes(adjust)
+                adjusted_value = max(0, current + diff)
+                adjust["bytes"] = adjusted_value
+                input_stream_total = sum(_entry_bytes(entry) for entry in input_entries)
+                diff = file_size - input_stream_total
+            container_in_bytes = diff if diff > 0 else 0
+            input_total_bytes = input_stream_total + container_in_bytes
+            output_stream_total = sum(_entry_bytes(entry) for entry in output_entries)
+            container_out_bytes = output_container_share.get(src, 0)
+            target_total = output_stream_total + container_out_bytes
+
+            combined: Dict[Tuple[str, str], Dict[str, List[BudgetDebugEntry]]] = {}
+
+            def _append_combined(kind: str, entry: BudgetDebugEntry) -> None:
+                spec_val = entry.get("spec")
+                spec = spec_val if isinstance(spec_val, str) else ""
+                stype_val = entry.get("stype")
+                stype = stype_val if isinstance(stype_val, str) else "?"
+                key = (stype, spec)
+                bucket = combined.setdefault(key, {"input": [], "output": []})
+                bucket[kind].append(entry)
+
+            for input_entry in input_entries:
+                _append_combined("input", input_entry)
+            for output_entry in output_entries:
+                _append_combined("output", output_entry)
+
+            container_spec = "<container>"
+            container_key = ("container", container_spec)
+            container_bucket = combined.setdefault(
+                container_key, {"input": [], "output": []}
             )
-            for stream_entry in output_entries:
-                entry_bytes = _entry_bytes(stream_entry)
-                logging.info(
-                    "  %s stream %s -> %.2f MiB (%s)",
-                    stream_entry.get("stype", "?"),
-                    stream_entry.get("spec") or "<none>",
-                    entry_bytes / float(1024**2),
-                    stream_entry.get("method", ""),
+            container_bucket["input"].append(
+                cast(
+                    BudgetDebugEntry,
+                    {
+                        "stype": "container",
+                        "spec": container_spec,
+                        "bytes": container_in_bytes,
+                        "method": "input-container",
+                    },
                 )
-            logging.info(
-                "  container overhead -> %.2f MiB (%s bytes)",
-                container_bytes / float(1024**2),
-                f"{container_bytes:,}",
             )
+            container_bucket["output"].append(
+                cast(
+                    BudgetDebugEntry,
+                    {
+                        "stype": "container",
+                        "spec": container_spec,
+                        "bytes": container_out_bytes,
+                        "method": "output-container",
+                    },
+                )
+            )
+
             logging.info(
-                "  total -> %.2f MiB (%s bytes)",
-                target_total / float(1024**2) if target_total else 0.0,
+                "  stream budget for %s: input=%s bytes; target=%s bytes",
+                display_name,
+                f"{input_total_bytes:,}",
                 f"{target_total:,}",
             )
 
+            def _log_kind(label: str, records: List[BudgetDebugEntry]) -> None:
+                if not records:
+                    logging.info(
+                        "    %s: %.2f MiB (0 bytes)",
+                        label,
+                        0.0,
+                    )
+                    return
+                for idx, record in enumerate(records, start=1):
+                    prefix = label if len(records) == 1 else f"{label}[{idx}]"
+                    entry_bytes = _entry_bytes(record)
+                    message = (
+                        f"{prefix}: {entry_bytes / float(1024**2):.2f} MiB "
+                        f"({entry_bytes:,} bytes)"
+                    )
+                    method_val = record.get("method")
+                    extras: List[str] = []
+                    if isinstance(method_val, str) and method_val:
+                        extras.append(method_val)
+                    bitrate_val = record.get("bitrate")
+                    if isinstance(bitrate_val, (int, float)) and bitrate_val > 0:
+                        extras.append(f"bitrate={bitrate_val / 1000:.1f} kbps")
+                    if extras:
+                        message += f" [{'; '.join(extras)}]"
+                    logging.info("    %s", message)
+
+            for stype_spec, buckets in sorted(
+                combined.items(),
+                key=lambda item: (
+                    order_map.get(item[0][0], 99),
+                    item[0][0],
+                    item[0][1],
+                ),
+            ):
+                stype, spec = stype_spec
+                if stype == "container":
+                    heading = "container overhead"
+                else:
+                    heading = f"{stype} stream {spec or '<none>'}"
+                logging.info("    %s:", heading)
+                _log_kind("input", buckets.get("input", []))
+                _log_kind("output", buckets.get("output", []))
+
+            logging.info(
+                "    input total  -> %.2f MiB (%s bytes)",
+                input_total_bytes / float(1024**2) if input_total_bytes else 0.0,
+                f"{input_total_bytes:,}",
+            )
+            logging.info(
+                "    output total -> %.2f MiB (%s bytes)",
+                target_total / float(1024**2) if target_total else 0.0,
+                f"{target_total:,}",
+            )
+            diff_bytes = target_total - input_total_bytes
+            logging.info(
+                "    difference   -> %+0.2f MiB (%+s bytes)",
+                diff_bytes / float(1024**2) if diff_bytes else 0.0,
+                f"{diff_bytes:+,}",
+            )
+
+    if args.verbose and videos and not use_constant_quality:
         logging.info("bitrate calculation steps:")
         after_assets = target_bytes - asset_bytes
         after_audio = after_assets - total_audio_bytes
