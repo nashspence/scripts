@@ -191,6 +191,119 @@ def test_dump_streams_data_fallback_empty_packets(monkeypatch, tmp_path):
     assert payload == {"packets": []}
 
 
+def test_compute_stream_bitrate_aggregates_packets(monkeypatch):
+    calls = []
+
+    def fake_ffprobe_json(cmd):
+        calls.append(cmd)
+        if "-show_packets" in cmd:
+            return {
+                "packets": [
+                    {
+                        "stream_index": "3",
+                        "pts_time": "0",
+                        "duration_time": "1",
+                        "size": "1000",
+                    },
+                    {
+                        "stream_index": "3",
+                        "pts_time": "1",
+                        "duration_time": "1",
+                        "size": "1000",
+                    },
+                    {
+                        "stream_index": "4",
+                        "pts_time": "0",
+                        "duration_time": "2",
+                        "size": "2000",
+                    },
+                ]
+            }
+        return {
+            "format": {"duration": "4"},
+            "streams": [
+                {"index": 3, "duration": "3"},
+                {"index": 4, "duration": "3.5"},
+            ],
+        }
+
+    monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
+    monkeypatch.setattr(script.shutil, "which", lambda name: "/usr/bin/ffprobe")
+
+    metrics = script._compute_stream_bitrate("clip.mkv", "d:0", stream_index=3)
+    assert metrics is not None
+    assert metrics["bitrate"] == pytest.approx(8_000.0)
+    assert metrics["total_bytes"] == 2000
+    assert any("-show_packets" in cmd for cmd in calls)
+
+
+def test_estimate_other_stream_bytes_uses_packet_probe(monkeypatch):
+    stream = {"codec_type": "data", "index": 2}
+
+    def fake_compute(source_path, spec, *, stream_index=None):
+        assert source_path == "clip.mkv"
+        assert spec == "d:0"
+        assert stream_index == 2
+        return {"bitrate": 24_000.0, "duration": 10.0, "total_bytes": 30_000}
+
+    monkeypatch.setattr(script, "_compute_stream_bitrate", fake_compute)
+
+    estimated = script._estimate_other_stream_bytes(
+        stream,
+        10.0,
+        "d",
+        source_path="clip.mkv",
+        stream_spec="d:0",
+    )
+    assert estimated == 30_000
+
+
+def test_estimate_other_stream_bytes_defaults_when_probe_missing(monkeypatch):
+    stream = {"codec_type": "data"}
+    monkeypatch.setattr(script, "_compute_stream_bitrate", lambda *args, **kwargs: None)
+
+    estimated = script._estimate_other_stream_bytes(
+        stream,
+        2.5,
+        "d",
+        source_path="clip.mkv",
+        stream_spec="d:0",
+    )
+    assert estimated == int(2.5 * 4000)
+
+
+def test_estimate_other_stream_bytes_records_debug(monkeypatch):
+    stream = {"codec_type": "data", "index": 1}
+    entries: list[script.BudgetDebugEntry] = []
+
+    monkeypatch.setattr(
+        script,
+        "_compute_stream_bitrate",
+        lambda *args, **kwargs: {
+            "bitrate": 12_000.0,
+            "duration": 5.0,
+            "total_bytes": 7_500,
+        },
+    )
+
+    estimated = script._estimate_other_stream_bytes(
+        stream,
+        5.0,
+        "d",
+        source_path="clip.mkv",
+        stream_spec="d:0",
+        debug_entries=entries,
+        debug_source="clip",
+    )
+
+    assert estimated == 7_500
+    assert entries
+    entry = entries[0]
+    assert entry["source"] == "clip"
+    assert entry["bytes"] == 7_500
+    assert entry["method"] == "packet-bytes"
+
+
 def test_dump_streams_subtitle_uses_container_data(monkeypatch, tmp_path):
     metadata = {
         "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
