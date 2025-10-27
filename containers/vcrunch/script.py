@@ -65,6 +65,19 @@ class DumpedStreams(TypedDict):
     stream_infos: List[StreamInfo]
 
 
+class _PacketGroup(TypedDict, total=False):
+    total_bytes: int
+    t_min: Optional[float]
+    t_max: Optional[float]
+    count: int
+
+
+class StreamBitrateEstimate(TypedDict):
+    bitrate: float
+    duration: float
+    total_bytes: int
+
+
 _METADATA_COPY_BASE = ["-map_metadata", "0"]
 _METADATA_COPY_STREAM_MAP: List[Tuple[str, List[str]]] = [
     ("v", ["-map_metadata:s:v", "0:s:v"]),
@@ -879,6 +892,190 @@ def _probe_stream_infos_only(src: str) -> List[StreamInfo]:
     return stream_infos
 
 
+def _safe_packet_float(value: Any) -> Optional[float]:
+    if value is None or value == "N/A":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pick_packet_bounds(
+    packet: Dict[str, Any]
+) -> Tuple[Optional[float], Optional[float]]:
+    pts = _safe_packet_float(packet.get("pts_time"))
+    dts = _safe_packet_float(packet.get("dts_time"))
+    duration = _safe_packet_float(packet.get("duration_time"))
+    start = pts if pts is not None else dts
+    if start is None and duration is not None:
+        # No timestamp but has a duration — treat as [0, duration].
+        return 0.0, duration
+    if start is None:
+        return None, None
+    if duration is None:
+        return start, start
+    return start, start + duration
+
+
+def _compute_stream_bitrate(
+    source_path: str, stream_spec: str, *, stream_index: Optional[int] = None
+) -> Optional[StreamBitrateEstimate]:
+    if not stream_spec:
+        return None
+    if shutil.which("ffprobe") is None:
+        return None
+    try:
+        meta = ffprobe_json(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                source_path,
+            ]
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logging.debug(
+            "ffprobe failed during bitrate meta probe for %s: %s", source_path, exc
+        )
+        return None
+
+    format_duration = None
+    fmt = cast(Dict[str, Any], meta.get("format") or {})
+    format_duration = _safe_packet_float(fmt.get("duration"))
+
+    stream_duration_by_index: Dict[int, Optional[float]] = {}
+    streams = cast(List[Dict[str, Any]], meta.get("streams") or [])
+    for stream in streams:
+        idx = stream.get("index")
+        if isinstance(idx, int):
+            stream_duration_by_index[idx] = _safe_packet_float(stream.get("duration"))
+
+    try:
+        packets_payload = ffprobe_json(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-select_streams",
+                stream_spec,
+                "-show_packets",
+                "-show_entries",
+                "packet=stream_index,pts_time,dts_time,duration_time,size",
+                source_path,
+            ]
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logging.debug(
+            "ffprobe failed during bitrate packet probe for %s (%s): %s",
+            source_path,
+            stream_spec,
+            exc,
+        )
+        return None
+
+    packets = cast(List[Dict[str, Any]], packets_payload.get("packets") or [])
+    if not packets:
+        return None
+
+    grouped: Dict[int, _PacketGroup] = {}
+    for packet in packets:
+        stream_index_val = packet.get("stream_index")
+        packet_stream_index: Optional[int]
+        if isinstance(stream_index_val, str):
+            text = stream_index_val.strip()
+            if not text or text == "N/A":
+                continue
+            try:
+                packet_stream_index = int(text)
+            except ValueError:
+                try:
+                    packet_stream_index = int(float(text))
+                except (TypeError, ValueError):
+                    continue
+        elif isinstance(stream_index_val, (int, float)):
+            packet_stream_index = int(stream_index_val)
+        else:
+            continue
+        entry = grouped.setdefault(
+            packet_stream_index,
+            {"total_bytes": 0, "t_min": None, "t_max": None, "count": 0},
+        )
+        size_field = packet.get("size")
+        if isinstance(size_field, str):
+            if size_field and size_field != "N/A":
+                try:
+                    entry["total_bytes"] += int(size_field)
+                except ValueError:
+                    try:
+                        entry["total_bytes"] += int(float(size_field))
+                    except (TypeError, ValueError):
+                        pass
+        elif isinstance(size_field, (int, float)):
+            entry["total_bytes"] += int(size_field)
+
+        start, end = _pick_packet_bounds(packet)
+        if start is not None:
+            if entry["t_min"] is None or start < entry["t_min"]:
+                entry["t_min"] = start
+        if end is not None:
+            if entry["t_max"] is None or end > entry["t_max"]:
+                entry["t_max"] = end
+        entry["count"] += 1
+
+    def _duration_for_stream(idx: int, data: _PacketGroup) -> Optional[float]:
+        start = data.get("t_min")
+        end = data.get("t_max")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+            span = float(end) - float(start)
+            if span > 0:
+                return span
+        fallback = stream_duration_by_index.get(idx)
+        if fallback and fallback > 0:
+            return float(fallback)
+        if format_duration and format_duration > 0:
+            return float(format_duration)
+        return None
+
+    per_stream_estimates: Dict[int, StreamBitrateEstimate] = {}
+    for idx, data in grouped.items():
+        total_bytes = data.get("total_bytes")
+        if not isinstance(total_bytes, (int, float)) or total_bytes <= 0:
+            continue
+        duration = _duration_for_stream(idx, data)
+        if not duration or duration <= 0:
+            continue
+        per_stream_estimates[idx] = {
+            "bitrate": (float(total_bytes) * 8.0) / float(duration),
+            "duration": float(duration),
+            "total_bytes": int(total_bytes),
+        }
+
+    if not per_stream_estimates:
+        return None
+
+    if stream_index is not None and stream_index in per_stream_estimates:
+        return per_stream_estimates[stream_index]
+
+    if len(per_stream_estimates) == 1:
+        return next(iter(per_stream_estimates.values()))
+
+    total_bitrate = sum(est["bitrate"] for est in per_stream_estimates.values())
+    max_duration = max(est["duration"] for est in per_stream_estimates.values())
+    total_bytes = sum(est["total_bytes"] for est in per_stream_estimates.values())
+    return {
+        "bitrate": total_bitrate,
+        "duration": max_duration,
+        "total_bytes": total_bytes,
+    }
+
+
 def _stream_duration_or(stream: Dict[str, Any], fallback: float) -> float:
     duration_val = _parse_duration_value(stream.get("duration"))
     if duration_val is not None and duration_val > 0:
@@ -886,9 +1083,25 @@ def _stream_duration_or(stream: Dict[str, Any], fallback: float) -> float:
     return float(fallback)
 
 
+class BudgetDebugEntry(TypedDict, total=False):
+    source: str
+    spec: str
+    stype: str
+    bytes: int
+    method: str
+    bitrate: float
+
+
 def _estimate_other_stream_bytes(
-    stream: Dict[str, Any], duration: float, stype: str
-) -> int:
+    stream: Dict[str, Any],
+    duration: float,
+    stype: str,
+    *,
+    source_path: Optional[str] = None,
+    stream_spec: str = "",
+    debug_entries: Optional[List[BudgetDebugEntry]] = None,
+    debug_source: str = "",
+) -> Tuple[int, Optional[BudgetDebugEntry]]:
     size_tag = _stream_tag_int(
         stream,
         "NUMBER_OF_BYTES",
@@ -897,19 +1110,58 @@ def _estimate_other_stream_bytes(
         "FileSize",
         "filesize",
     )
+    bitrate: Optional[float] = None
     if size_tag:
-        return size_tag
-    bitrate = _extract_stream_bitrate(stream)
-    if bitrate:
-        return int((bitrate / 8.0) * duration)
-    if stype == "s":
-        # Approximate text subtitle size at ~1 KiB/s.
-        return int(duration * 1024)
-    if stype == "t":
-        # Assume attachments average around 2 MiB when no better data exists.
-        return 2_000_000
-    # Treat other data streams as small auxiliary payloads.
-    return int(duration * 4000)
+        estimate = size_tag
+        method = "tag-bytes"
+    else:
+        extracted_bitrate = _extract_stream_bitrate(stream)
+        if extracted_bitrate is not None:
+            bitrate = float(extracted_bitrate)
+
+        measurement: Optional[StreamBitrateEstimate] = None
+        if source_path and stream_spec:
+            stream_index_val = stream.get("index")
+            stream_index = (
+                stream_index_val if isinstance(stream_index_val, int) else None
+            )
+            measurement = _compute_stream_bitrate(
+                source_path, stream_spec, stream_index=stream_index
+            )
+
+        if measurement and measurement.get("total_bytes"):
+            estimate = int(measurement["total_bytes"])
+            method = "packet-bytes"
+            bitrate = measurement.get("bitrate") or bitrate
+        elif bitrate is not None:
+            estimate = int((bitrate / 8.0) * duration)
+            method = "bitrate"
+        else:
+            if stype == "s":
+                estimate = int(duration * 1024)
+                method = "subtitle-fallback"
+            elif stype == "t":
+                estimate = 2_000_000
+                method = "attachment-fallback"
+            else:
+                estimate = int(duration * 4000)
+                method = "data-fallback"
+
+    debug_entry: Optional[BudgetDebugEntry] = None
+    if debug_entries is not None:
+        entry: BudgetDebugEntry = {
+            "source": debug_source,
+            "spec": stream_spec,
+            "stype": stype,
+            "bytes": int(estimate),
+            "method": method,
+        }
+        if bitrate is not None:
+            entry["bitrate"] = float(bitrate)
+        debug_entries.append(entry)
+        debug_entry = entry
+
+    return int(estimate), debug_entry
 
 
 def _mkvmerge_args(
@@ -2061,7 +2313,27 @@ def main() -> None:
     video_copy_specs: Dict[str, set[str]] = {}
     total_audio_bytes = 0
     other_stream_bytes = 0
+    audio_budget_debug: List[BudgetDebugEntry] = []
+    other_stream_budget_debug: List[BudgetDebugEntry] = []
     video_entries: List[Dict[str, Any]] = []
+    input_stream_records: Dict[str, List[BudgetDebugEntry]] = {}
+    output_stream_records: Dict[str, List[BudgetDebugEntry]] = {}
+    input_file_sizes: Dict[str, int] = {}
+
+    for src in videos:
+        try:
+            input_file_sizes[src] = os.path.getsize(src)
+        except FileNotFoundError:
+            input_file_sizes[src] = 0
+
+    def _append_record(
+        collection: Dict[str, List[BudgetDebugEntry]],
+        src_path: str,
+        entry: BudgetDebugEntry,
+    ) -> None:
+        copied = cast(BudgetDebugEntry, dict(entry))
+        copied.setdefault("source", os.path.basename(src_path))
+        collection.setdefault(src_path, []).append(copied)
 
     if use_constant_quality:
         logging.info("using constant quality: CRF=%s", args.constant_quality)
@@ -2070,7 +2342,18 @@ def main() -> None:
             sys.exit(1)
         for src in videos:
             duration = per_video_duration.get(src, 0.0)
-            total_audio_bytes += int((audio_bps / 8.0) * float(duration))
+            stream_bytes = int((audio_bps / 8.0) * float(duration))
+            total_audio_bytes += stream_bytes
+            audio_budget_debug.append(
+                {
+                    "source": os.path.basename(src),
+                    "spec": "a:enc",
+                    "stype": "a",
+                    "bytes": stream_bytes,
+                    "method": "constant-quality",
+                    "bitrate": float(audio_bps),
+                }
+            )
     else:
         for src in videos:
             duration = per_video_duration.get(src, 0.0)
@@ -2091,53 +2374,252 @@ def main() -> None:
                 if not isinstance(stream_obj, dict):
                     continue
                 stream: Dict[str, Any] = stream_obj
+                spec_val = info.get("spec")
+                spec_text = spec_val if isinstance(spec_val, str) else ""
                 stream_duration = _stream_duration_or(stream, duration)
                 if stype == "a":
                     audio_found = True
                     bitrate = _extract_stream_bitrate(stream)
+                    audio_measurement: Optional[StreamBitrateEstimate] = None
+                    audio_measured_total: Optional[int] = None
+                    audio_measured_bitrate: Optional[float] = None
+                    if spec_text:
+                        stream_index_val = stream.get("index")
+                        stream_index = (
+                            stream_index_val
+                            if isinstance(stream_index_val, int)
+                            else None
+                        )
+                        audio_measurement = _compute_stream_bitrate(
+                            src,
+                            spec_text,
+                            stream_index=stream_index,
+                        )
+                        if audio_measurement:
+                            total_val = audio_measurement.get("total_bytes")
+                            if isinstance(total_val, (int, float)) and total_val > 0:
+                                audio_measured_total = int(total_val)
+                            bitrate_val = audio_measurement.get("bitrate")
+                            if (
+                                isinstance(bitrate_val, (int, float))
+                                and bitrate_val > 0
+                            ):
+                                audio_measured_bitrate = float(bitrate_val)
+
+                    input_bytes = audio_measured_total
+                    input_method = (
+                        "input-probed"
+                        if audio_measured_total is not None
+                        else "input-default"
+                    )
+                    if input_bytes is None and bitrate is not None:
+                        input_bytes = int((bitrate / 8.0) * stream_duration)
+                        input_method = "input-bitrate"
+                    if input_bytes is None:
+                        input_bytes = int((audio_bps / 8.0) * stream_duration)
+                    audio_input_entry: BudgetDebugEntry = {
+                        "spec": spec_text,
+                        "stype": "a",
+                        "bytes": int(input_bytes),
+                        "method": input_method,
+                    }
+                    if audio_measured_bitrate is not None:
+                        audio_input_entry["bitrate"] = audio_measured_bitrate
+                    elif bitrate is not None:
+                        audio_input_entry["bitrate"] = float(bitrate)
+                    _append_record(input_stream_records, src, audio_input_entry)
+
                     if (
                         info.get("mkv_ok")
                         and bitrate is not None
                         and bitrate > 0
                         and bitrate <= audio_bps
                     ):
-                        spec_val = info.get("spec")
-                        if isinstance(spec_val, str) and spec_val:
-                            audio_copy_specs[src].add(spec_val)
-                        stream_bytes = int((bitrate / 8.0) * stream_duration)
+                        if spec_text:
+                            audio_copy_specs[src].add(spec_text)
+                        if audio_measured_total is not None:
+                            stream_bytes = audio_measured_total
+                            stream_method = "copy-probed"
+                        else:
+                            stream_bytes = int((bitrate / 8.0) * stream_duration)
+                            stream_method = "copy"
+                        audio_copy_entry: BudgetDebugEntry = {
+                            "source": os.path.basename(src),
+                            "spec": spec_text,
+                            "stype": "a",
+                            "bytes": stream_bytes,
+                            "method": stream_method,
+                            "bitrate": float(bitrate),
+                        }
+                        audio_budget_debug.append(audio_copy_entry)
+                        _append_record(output_stream_records, src, audio_copy_entry)
                     else:
                         stream_bytes = int((audio_bps / 8.0) * stream_duration)
+                        audio_reencode_entry: BudgetDebugEntry = {
+                            "source": os.path.basename(src),
+                            "spec": spec_text,
+                            "stype": "a",
+                            "bytes": stream_bytes,
+                            "method": "reencode",
+                            "bitrate": float(audio_bps),
+                        }
+                        audio_budget_debug.append(audio_reencode_entry)
+                        _append_record(output_stream_records, src, audio_reencode_entry)
                     total_audio_bytes += stream_bytes
                 elif stype == "v":
                     if _is_attached_picture_stream(stream):
-                        other_stream_bytes += _estimate_other_stream_bytes(
-                            stream, stream_duration, "t"
+                        estimated, debug_entry = _estimate_other_stream_bytes(
+                            stream,
+                            stream_duration,
+                            "t",
+                            source_path=src,
+                            stream_spec=spec_text,
+                            debug_entries=other_stream_budget_debug,
+                            debug_source=os.path.basename(src),
+                        )
+                        other_stream_bytes += estimated
+                        if debug_entry is not None:
+                            record_entry = debug_entry
+                        else:
+                            record_entry = cast(
+                                BudgetDebugEntry,
+                                {
+                                    "source": os.path.basename(src),
+                                    "spec": spec_text,
+                                    "stype": "t",
+                                    "bytes": estimated,
+                                    "method": "attachment",
+                                },
+                            )
+                        _append_record(output_stream_records, src, record_entry)
+                        input_method = f"input-{record_entry.get('method', 'unknown')}"
+                        attachment_input_entry = cast(
+                            BudgetDebugEntry,
+                            {**record_entry, "method": input_method},
+                        )
+                        _append_record(
+                            input_stream_records, src, attachment_input_entry
                         )
                         continue
-                    spec_val = info.get("spec")
-                    spec_text = spec_val if isinstance(spec_val, str) else ""
+                    video_measurement: Optional[StreamBitrateEstimate] = None
+                    if spec_text:
+                        stream_index_val = stream.get("index")
+                        stream_index = (
+                            stream_index_val
+                            if isinstance(stream_index_val, int)
+                            else None
+                        )
+                        video_measurement = _compute_stream_bitrate(
+                            src,
+                            spec_text,
+                            stream_index=stream_index,
+                        )
+                    video_measured_total: Optional[int] = None
+                    video_measured_bitrate: Optional[float] = None
+                    if video_measurement:
+                        total_val = video_measurement.get("total_bytes")
+                        if isinstance(total_val, (int, float)) and total_val > 0:
+                            video_measured_total = int(total_val)
+                        bitrate_val = video_measurement.get("bitrate")
+                        if isinstance(bitrate_val, (int, float)) and bitrate_val > 0:
+                            video_measured_bitrate = float(bitrate_val)
+                    input_bytes = video_measured_total
+                    input_method = (
+                        "input-probed"
+                        if video_measured_total is not None
+                        else "input-default"
+                    )
+                    metadata_bitrate = _extract_stream_bitrate(stream)
+                    if input_bytes is None and metadata_bitrate is not None:
+                        input_bytes = int((metadata_bitrate / 8.0) * stream_duration)
+                        input_method = "input-bitrate"
+                    if input_bytes is None:
+                        input_bytes = 0
+                    video_input_entry: BudgetDebugEntry = {
+                        "spec": spec_text,
+                        "stype": "v",
+                        "bytes": int(input_bytes),
+                        "method": input_method,
+                    }
+                    if video_measured_bitrate is not None:
+                        video_input_entry["bitrate"] = video_measured_bitrate
+                    elif metadata_bitrate is not None:
+                        video_input_entry["bitrate"] = float(metadata_bitrate)
+                    _append_record(input_stream_records, src, video_input_entry)
                     video_entries.append(
                         {
                             "src": src,
                             "spec": spec_text,
                             "duration": stream_duration,
-                            "bitrate": _extract_stream_bitrate(stream),
+                            "bitrate": metadata_bitrate,
                             "mkv_ok": bool(info.get("mkv_ok")),
+                            "measurement": video_measurement,
+                            "measured_total": video_measured_total,
                         }
                     )
                 else:
-                    other_stream_bytes += _estimate_other_stream_bytes(
+                    estimated, debug_entry = _estimate_other_stream_bytes(
                         stream,
                         stream_duration,
                         stype,
+                        source_path=src,
+                        stream_spec=spec_text,
+                        debug_entries=other_stream_budget_debug,
+                        debug_source=os.path.basename(src),
                     )
+                    other_stream_bytes += estimated
+                    if debug_entry is not None:
+                        record_entry = debug_entry
+                    else:
+                        record_entry = cast(
+                            BudgetDebugEntry,
+                            {
+                                "source": os.path.basename(src),
+                                "spec": spec_text,
+                                "stype": stype,
+                                "bytes": estimated,
+                                "method": "estimate",
+                            },
+                        )
+                    _append_record(output_stream_records, src, record_entry)
+                    other_input_entry = cast(
+                        BudgetDebugEntry,
+                        {
+                            **record_entry,
+                            "method": f"input-{record_entry.get('method', 'unknown')}",
+                        },
+                    )
+                    _append_record(input_stream_records, src, other_input_entry)
             if not audio_found and duration > 0:
-                total_audio_bytes += int((audio_bps / 8.0) * duration)
+                stream_bytes = int((audio_bps / 8.0) * duration)
+                total_audio_bytes += stream_bytes
+                audio_fallback_entry: BudgetDebugEntry = {
+                    "source": os.path.basename(src),
+                    "spec": "a:fallback",
+                    "stype": "a",
+                    "bytes": stream_bytes,
+                    "method": "fallback",
+                    "bitrate": float(audio_bps),
+                }
+                audio_budget_debug.append(audio_fallback_entry)
+                _append_record(output_stream_records, src, audio_fallback_entry)
+                fallback_input_entry: BudgetDebugEntry = {
+                    "spec": "a:fallback",
+                    "stype": "a",
+                    "bytes": stream_bytes,
+                    "method": "input-fallback",
+                    "bitrate": float(audio_bps),
+                }
+                _append_record(input_stream_records, src, fallback_input_entry)
 
     global_video_kbps = 0
     computed_kbps = 0
     video_budget_bytes = 0
     video_copy_bytes = 0
+    reserved = 0
+    base_video_budget = 0
+    final_video_encode_duration = 0.0
+    last_avg_video_bps = 0
     if not use_constant_quality:
         reserved = int(target_bytes * safety_overhead) + 20_000_000
         base_video_budget = (
@@ -2154,14 +2636,49 @@ def main() -> None:
             sys.exit(1)
 
         copy_set: set[Tuple[str, str]] = set()
+        final_video_encode_duration = 0.0
+        last_avg_video_bps = 0
+
+        def _extract_video_entry_metrics(
+            video_entry: Dict[str, Any]
+        ) -> Tuple[Optional[float], Optional[int]]:
+            measured_bitrate: Optional[float] = None
+            measured_total: Optional[int] = None
+            measurement_obj = video_entry.get("measurement")
+            if isinstance(measurement_obj, dict):
+                measured_bitrate_val = measurement_obj.get("bitrate")
+                if (
+                    isinstance(measured_bitrate_val, (int, float))
+                    and measured_bitrate_val > 0
+                ):
+                    measured_bitrate = float(measured_bitrate_val)
+                measured_total_val = measurement_obj.get("total_bytes")
+                if (
+                    isinstance(measured_total_val, (int, float))
+                    and measured_total_val > 0
+                ):
+                    measured_total = int(measured_total_val)
+            direct_total = video_entry.get("measured_total")
+            if isinstance(direct_total, (int, float)) and direct_total > 0:
+                measured_total = int(direct_total)
+            metadata_bitrate: Optional[float] = None
+            bitrate_val = video_entry.get("bitrate")
+            if isinstance(bitrate_val, (int, float)) and bitrate_val > 0:
+                metadata_bitrate = float(bitrate_val)
+            effective_bitrate = (
+                measured_bitrate if measured_bitrate is not None else metadata_bitrate
+            )
+            return effective_bitrate, measured_total
+
         while True:
             video_copy_bytes = 0
             video_encode_duration = 0.0
             for video_entry in video_entries:
                 spec_val = video_entry.get("spec")
                 spec = spec_val if isinstance(spec_val, str) else ""
-                bitrate_val = video_entry.get("bitrate")
-                bitrate = bitrate_val if isinstance(bitrate_val, int) else None
+                effective_bitrate, measured_total = _extract_video_entry_metrics(
+                    video_entry
+                )
                 duration_val = video_entry.get("duration")
                 duration_float = (
                     float(duration_val)
@@ -2169,15 +2686,17 @@ def main() -> None:
                     else 0.0
                 )
                 source_id = video_entry.get("src")
-                if (
-                    isinstance(source_id, str)
-                    and (source_id, spec) in copy_set
-                    and bitrate
-                    and bitrate > 0
-                ):
-                    video_copy_bytes += int((bitrate / 8.0) * duration_float)
+                if isinstance(source_id, str) and (source_id, spec) in copy_set:
+                    if measured_total is not None:
+                        video_copy_bytes += measured_total
+                    elif effective_bitrate is not None:
+                        video_copy_bytes += int(
+                            (effective_bitrate / 8.0) * duration_float
+                        )
                 else:
                     video_encode_duration += duration_float
+
+            final_video_encode_duration = video_encode_duration
 
             video_budget_bytes = base_video_budget - video_copy_bytes
             if video_budget_bytes <= 0 and videos and video_encode_duration > 0:
@@ -2191,6 +2710,7 @@ def main() -> None:
                 break
 
             avg_video_bps = int((video_budget_bytes * 8) / video_encode_duration)
+            last_avg_video_bps = avg_video_bps
             if avg_video_bps < 50_000:
                 logging.error("computed video bitrate unrealistically low")
                 sys.exit(1)
@@ -2215,11 +2735,12 @@ def main() -> None:
                 spec = spec_val if isinstance(spec_val, str) else ""
                 if not spec:
                     continue
-                bitrate_val = video_entry.get("bitrate")
-                bitrate = bitrate_val if isinstance(bitrate_val, int) else None
-                if bitrate is None or bitrate <= 0:
+                effective_bitrate, _measured_total = _extract_video_entry_metrics(
+                    video_entry
+                )
+                if effective_bitrate is None or effective_bitrate <= 0:
                     continue
-                if threshold_bps and bitrate < threshold_bps:
+                if threshold_bps and effective_bitrate < threshold_bps:
                     source_id = video_entry.get("src")
                     if isinstance(source_id, str):
                         candidate_set.add((source_id, spec))
@@ -2228,6 +2749,7 @@ def main() -> None:
             copy_set = candidate_set
 
         video_copy_bytes = 0
+        encode_plan: List[Tuple[Dict[str, Any], float]] = []
         for video_entry in video_entries:
             spec_val = video_entry.get("spec")
             spec = spec_val if isinstance(spec_val, str) else ""
@@ -2236,21 +2758,318 @@ def main() -> None:
                 continue
             copy_key = (source_id, spec)
             if copy_key in copy_set:
-                bitrate_val = video_entry.get("bitrate")
-                bitrate = bitrate_val if isinstance(bitrate_val, int) else None
+                effective_bitrate, measured_total = _extract_video_entry_metrics(
+                    video_entry
+                )
                 duration_val = video_entry.get("duration")
                 duration_float = (
                     float(duration_val)
                     if isinstance(duration_val, (int, float))
                     else 0.0
                 )
-                if bitrate and bitrate > 0:
-                    video_copy_bytes += int((bitrate / 8.0) * duration_float)
+                if measured_total is not None:
+                    planned_bytes = measured_total
+                    video_copy_bytes += measured_total
+                elif effective_bitrate is not None:
+                    planned_bytes = int((effective_bitrate / 8.0) * duration_float)
+                    video_copy_bytes += planned_bytes
+                else:
+                    planned_bytes = 0
                 if spec:
                     video_copy_specs.setdefault(source_id, set()).add(spec)
+                video_copy_entry: BudgetDebugEntry = {
+                    "source": os.path.basename(source_id),
+                    "spec": spec,
+                    "stype": "v",
+                    "bytes": planned_bytes,
+                    "method": "copy",
+                }
+                if effective_bitrate is not None:
+                    video_copy_entry["bitrate"] = float(effective_bitrate)
+                _append_record(output_stream_records, source_id, video_copy_entry)
+            else:
+                duration_val = video_entry.get("duration")
+                duration_float = (
+                    float(duration_val)
+                    if isinstance(duration_val, (int, float))
+                    else 0.0
+                )
+                encode_plan.append((video_entry, duration_float))
+                if spec:
+                    video_copy_specs.setdefault(source_id, set())
         video_budget_bytes = base_video_budget - video_copy_bytes
         if video_budget_bytes < 0:
             video_budget_bytes = 0
+
+        encode_allocations: List[Tuple[str, str, int, float]] = []
+        total_assigned = 0
+        if global_video_kbps > 0 and encode_plan:
+            bits_per_second = global_video_kbps * 1000
+            for video_entry, duration_float in encode_plan:
+                if duration_float <= 0:
+                    continue
+                spec_val = video_entry.get("spec")
+                spec = spec_val if isinstance(spec_val, str) else ""
+                source_id = video_entry.get("src")
+                if not isinstance(source_id, str):
+                    continue
+                planned_bytes = int((bits_per_second / 8.0) * duration_float)
+                encode_allocations.append(
+                    (source_id, spec, planned_bytes, duration_float)
+                )
+                total_assigned += planned_bytes
+            diff = video_budget_bytes - total_assigned
+            if encode_allocations and diff != 0:
+                last_source, last_spec, last_bytes, last_duration = encode_allocations[
+                    -1
+                ]
+                adjusted = max(0, last_bytes + diff)
+                encode_allocations[-1] = (
+                    last_source,
+                    last_spec,
+                    adjusted,
+                    last_duration,
+                )
+        for source_id, spec, planned_bytes, _duration in encode_allocations:
+            video_encode_entry: BudgetDebugEntry = {
+                "source": os.path.basename(source_id),
+                "spec": spec,
+                "stype": "v",
+                "bytes": planned_bytes,
+                "method": "encode",
+                "bitrate": float(global_video_kbps * 1000),
+            }
+            _append_record(output_stream_records, source_id, video_encode_entry)
+
+    def _entry_bytes(entry: BudgetDebugEntry) -> int:
+        raw = entry.get("bytes")
+        if isinstance(raw, (int, float)):
+            return int(raw)
+        return 0
+
+    output_container_share: Dict[str, int] = {src: 0 for src in videos}
+    if videos and not use_constant_quality and reserved > 0:
+        basis_values = [per_video_duration.get(src, 0.0) for src in videos]
+        total_basis = sum(basis_values)
+        shares = [0 for _ in videos]
+        if total_basis > 0:
+            fractions: List[Tuple[float, int]] = []
+            allocated = 0
+            for idx, src in enumerate(videos):
+                share_float = reserved * (basis_values[idx] / total_basis)
+                share_int = int(share_float)
+                shares[idx] = share_int
+                allocated += share_int
+                fractions.append((share_float - share_int, idx))
+            remainder = reserved - allocated
+            for _fraction, idx in sorted(fractions, reverse=True):
+                if remainder <= 0:
+                    break
+                shares[idx] += 1
+                remainder -= 1
+        elif videos:
+            base_share = reserved // len(videos)
+            shares = [base_share for _ in videos]
+            remainder = reserved - base_share * len(videos)
+            idx = 0
+            while remainder > 0 and videos:
+                shares[idx % len(videos)] += 1
+                remainder -= 1
+                idx += 1
+        output_container_share = {
+            videos[idx]: shares[idx] for idx in range(len(videos))
+        }
+
+    if args.verbose and videos:
+        logging.info("stream budgets by file:")
+        order_map = {"v": 0, "a": 1, "s": 2, "d": 3, "t": 4, "container": 5}
+        for src in videos:
+            file_size = input_file_sizes.get(src, 0)
+            display_name = os.path.basename(src)
+            input_entries: List[BudgetDebugEntry] = [
+                cast(BudgetDebugEntry, dict(entry))
+                for entry in input_stream_records.get(src, [])
+            ]
+            output_entries: List[BudgetDebugEntry] = [
+                cast(BudgetDebugEntry, dict(entry))
+                for entry in output_stream_records.get(src, [])
+            ]
+            input_stream_total = sum(_entry_bytes(entry) for entry in input_entries)
+            diff = file_size - input_stream_total
+            if diff < 0 and input_entries:
+                adjust = input_entries[-1]
+                current = _entry_bytes(adjust)
+                adjusted_value = max(0, current + diff)
+                adjust["bytes"] = adjusted_value
+                input_stream_total = sum(_entry_bytes(entry) for entry in input_entries)
+                diff = file_size - input_stream_total
+            container_in_bytes = diff if diff > 0 else 0
+            input_total_bytes = input_stream_total + container_in_bytes
+            output_stream_total = sum(_entry_bytes(entry) for entry in output_entries)
+            container_out_bytes = output_container_share.get(src, 0)
+            target_total = output_stream_total + container_out_bytes
+
+            combined: Dict[Tuple[str, str], Dict[str, List[BudgetDebugEntry]]] = {}
+
+            def _append_combined(kind: str, entry: BudgetDebugEntry) -> None:
+                spec_val = entry.get("spec")
+                spec = spec_val if isinstance(spec_val, str) else ""
+                stype_val = entry.get("stype")
+                stype = stype_val if isinstance(stype_val, str) else "?"
+                key = (stype, spec)
+                bucket = combined.setdefault(key, {"input": [], "output": []})
+                bucket[kind].append(entry)
+
+            for input_entry in input_entries:
+                _append_combined("input", input_entry)
+            for output_entry in output_entries:
+                _append_combined("output", output_entry)
+
+            container_spec = "<container>"
+            container_key = ("container", container_spec)
+            container_bucket = combined.setdefault(
+                container_key, {"input": [], "output": []}
+            )
+            container_bucket["input"].append(
+                cast(
+                    BudgetDebugEntry,
+                    {
+                        "stype": "container",
+                        "spec": container_spec,
+                        "bytes": container_in_bytes,
+                        "method": "input-container",
+                    },
+                )
+            )
+            container_bucket["output"].append(
+                cast(
+                    BudgetDebugEntry,
+                    {
+                        "stype": "container",
+                        "spec": container_spec,
+                        "bytes": container_out_bytes,
+                        "method": "output-container",
+                    },
+                )
+            )
+
+            logging.info(
+                "  stream budget for %s: input=%s bytes; target=%s bytes",
+                display_name,
+                f"{input_total_bytes:,}",
+                f"{target_total:,}",
+            )
+
+            def _log_kind(label: str, records: List[BudgetDebugEntry]) -> None:
+                if not records:
+                    logging.info(
+                        "    %s: %.2f MiB (0 bytes)",
+                        label,
+                        0.0,
+                    )
+                    return
+                for idx, record in enumerate(records, start=1):
+                    prefix = label if len(records) == 1 else f"{label}[{idx}]"
+                    entry_bytes = _entry_bytes(record)
+                    message = (
+                        f"{prefix}: {entry_bytes / float(1024**2):.2f} MiB "
+                        f"({entry_bytes:,} bytes)"
+                    )
+                    method_val = record.get("method")
+                    extras: List[str] = []
+                    if isinstance(method_val, str) and method_val:
+                        extras.append(method_val)
+                    bitrate_val = record.get("bitrate")
+                    if isinstance(bitrate_val, (int, float)) and bitrate_val > 0:
+                        extras.append(f"bitrate={bitrate_val / 1000:.1f} kbps")
+                    if extras:
+                        message += f" [{'; '.join(extras)}]"
+                    logging.info("    %s", message)
+
+            for stype_spec, buckets in sorted(
+                combined.items(),
+                key=lambda item: (
+                    order_map.get(item[0][0], 99),
+                    item[0][0],
+                    item[0][1],
+                ),
+            ):
+                stype, spec = stype_spec
+                if stype == "container":
+                    heading = "container overhead"
+                else:
+                    heading = f"{stype} stream {spec or '<none>'}"
+                logging.info("    %s:", heading)
+                _log_kind("input", buckets.get("input", []))
+                _log_kind("output", buckets.get("output", []))
+
+            logging.info(
+                "    input total  -> %.2f MiB (%s bytes)",
+                input_total_bytes / float(1024**2) if input_total_bytes else 0.0,
+                f"{input_total_bytes:,}",
+            )
+            logging.info(
+                "    output total -> %.2f MiB (%s bytes)",
+                target_total / float(1024**2) if target_total else 0.0,
+                f"{target_total:,}",
+            )
+            diff_bytes = target_total - input_total_bytes
+            logging.info(
+                "    difference   -> %+0.2f MiB (%+s bytes)",
+                diff_bytes / float(1024**2) if diff_bytes else 0.0,
+                f"{diff_bytes:+,}",
+            )
+
+    if args.verbose and videos and not use_constant_quality:
+        logging.info("bitrate calculation steps:")
+        after_assets = target_bytes - asset_bytes
+        after_audio = after_assets - total_audio_bytes
+        after_other = after_audio - other_stream_bytes
+        after_reserved = after_other - reserved
+        after_copies = after_reserved - video_copy_bytes
+        logging.info("  target bytes       : %s", f"{target_bytes:,}")
+        logging.info(
+            "  - asset bytes      : %s -> %s",
+            f"{asset_bytes:,}",
+            f"{after_assets:,}",
+        )
+        logging.info(
+            "  - audio budgets    : %s -> %s",
+            f"{total_audio_bytes:,}",
+            f"{after_audio:,}",
+        )
+        logging.info(
+            "  - other streams    : %s -> %s",
+            f"{other_stream_bytes:,}",
+            f"{after_other:,}",
+        )
+        logging.info(
+            "  - container reserve: %s -> %s",
+            f"{reserved:,}",
+            f"{after_reserved:,}",
+        )
+        logging.info(
+            "  - copied video     : %s -> %s",
+            f"{video_copy_bytes:,}",
+            f"{after_copies:,}",
+        )
+        logging.info(
+            "  video budget bytes : %s",
+            f"{max(0, video_budget_bytes):,}",
+        )
+        logging.info(
+            "  encode duration    : %.2f s",
+            final_video_encode_duration,
+        )
+        logging.info(
+            "  computed avg bps   : %s (%s kbps)",
+            f"{last_avg_video_bps:,}",
+            f"{(last_avg_video_bps // 1000) if last_avg_video_bps else 0:,}",
+        )
+        logging.info(
+            "  encoder target kbps: %s",
+            f"{global_video_kbps:,}",
+        )
 
     logging.info("target bytes: %s", f"{target_bytes:,}")
     logging.info("asset bytes: %s", f"{asset_bytes:,}")
