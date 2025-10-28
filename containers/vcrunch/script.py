@@ -3469,6 +3469,7 @@ def main() -> None:
 
                 if not use_constant_quality and global_video_kbps > 0:
                     overshoot_details: List[Tuple[str, int, int]] = []
+                    stream_measurements: Dict[str, StreamBitrateEstimate] = {}
                     for spec, out_idx in sorted(
                         video_output_indices.items(), key=lambda item: item[1]
                     ):
@@ -3480,6 +3481,8 @@ def main() -> None:
                         measurement = _compute_stream_bitrate(
                             str(encode_output_path), f"v:{out_idx}"
                         )
+                        if measurement:
+                            stream_measurements[spec] = measurement
                         actual_bytes: Optional[int] = None
                         if measurement:
                             total_val = measurement.get("total_bytes")
@@ -3499,16 +3502,39 @@ def main() -> None:
                                 f"{budget:,}",
                             )
                         old_kbps = global_video_kbps
-                        ratios = [
-                            budget / actual
-                            for (_spec, budget, actual) in overshoot_details
-                            if actual > 0
-                        ]
-                        ratio = min(ratios) if ratios else 0.0
-                        if ratio > 0:
-                            new_kbps = max(1, int(old_kbps * ratio))
+                        duration_adjusted_limits_bps: List[int] = []
+                        for spec, budget, _actual in overshoot_details:
+                            measurement = stream_measurements.get(spec)
+                            if not measurement:
+                                continue
+                            duration_val = measurement.get("duration")
+                            if (
+                                isinstance(duration_val, (int, float))
+                                and duration_val > 0
+                            ):
+                                duration = float(duration_val)
+                                max_bps = int((budget * 8) / duration)
+                                if max_bps > 0:
+                                    duration_adjusted_limits_bps.append(max_bps)
+                                durations_map = video_encode_durations.setdefault(
+                                    src, {}
+                                )
+                                durations_map[spec] = duration
+                        if duration_adjusted_limits_bps:
+                            new_limit_bps = min(duration_adjusted_limits_bps)
+                            new_limit_kbps = max(1, new_limit_bps // 1000)
+                            new_kbps = max(1, min(old_kbps - 1, new_limit_kbps))
                         else:
-                            new_kbps = max(1, old_kbps - 1)
+                            ratios = [
+                                budget / actual
+                                for (_spec, budget, actual) in overshoot_details
+                                if actual > 0
+                            ]
+                            ratio = min(ratios) if ratios else 0.0
+                            if ratio > 0:
+                                new_kbps = max(1, int(old_kbps * ratio))
+                            else:
+                                new_kbps = max(1, old_kbps - 1)
                         if new_kbps >= old_kbps:
                             if old_kbps <= 1:
                                 logging.warning(
@@ -3533,7 +3559,9 @@ def main() -> None:
                                     budget_map = video_encode_budgets.setdefault(
                                         src_id, {}
                                     )
-                                    for spec_key, duration in durations_map.items():
+                                    for spec_key, duration in list(
+                                        durations_map.items()
+                                    ):
                                         if duration <= 0:
                                             continue
                                         new_bytes = int(
