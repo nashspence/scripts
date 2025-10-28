@@ -1129,10 +1129,40 @@ def _estimate_other_stream_bytes(
                 source_path, stream_spec, stream_index=stream_index
             )
 
-        if measurement and measurement.get("total_bytes"):
-            estimate = int(measurement["total_bytes"])
-            method = "packet-bytes"
-            bitrate = measurement.get("bitrate") or bitrate
+        if measurement:
+            measured_total_raw = measurement.get("total_bytes")
+            measured_duration = measurement.get("duration")
+            measured_bitrate = measurement.get("bitrate")
+            measured_total = (
+                int(measured_total_raw)
+                if isinstance(measured_total_raw, (int, float))
+                and measured_total_raw > 0
+                else None
+            )
+            duration_bytes: Optional[int] = None
+            if isinstance(measured_bitrate, (int, float)) and isinstance(
+                measured_duration, (int, float)
+            ):
+                approx = int((float(measured_bitrate) / 8.0) * float(measured_duration))
+                if approx > 0:
+                    duration_bytes = approx
+            chosen_candidates = [
+                value for value in (measured_total, duration_bytes) if value is not None
+            ]
+            if chosen_candidates:
+                estimate = max(chosen_candidates)
+                method = "packet-bytes"
+            elif measured_total is not None:
+                estimate = measured_total
+                method = "packet-bytes"
+            if isinstance(measured_bitrate, (int, float)) and measured_bitrate > 0:
+                bitrate = float(measured_bitrate)
+            elif (
+                measured_total is not None
+                and isinstance(measured_duration, (int, float))
+                and measured_duration > 0
+            ):
+                bitrate = (float(measured_total) * 8.0) / float(measured_duration)
         elif bitrate is not None:
             estimate = int((bitrate / 8.0) * duration)
             method = "bitrate"

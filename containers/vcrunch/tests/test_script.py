@@ -265,6 +265,33 @@ def test_estimate_other_stream_bytes_uses_packet_probe(monkeypatch):
     assert entry["method"] == "packet-bytes"
 
 
+def test_estimate_other_stream_bytes_prefers_duration_bytes(monkeypatch):
+    stream = {"codec_type": "data", "index": 3}
+
+    def fake_compute(source_path, spec, *, stream_index=None):
+        assert stream_index == 3
+        return {"bitrate": 32_000.0, "duration": 12.5, "total_bytes": 10_000}
+
+    monkeypatch.setattr(script, "_compute_stream_bitrate", fake_compute)
+
+    debug_entries: list[script.BudgetDebugEntry] = []
+    estimated, entry = script._estimate_other_stream_bytes(
+        stream,
+        12.5,
+        "d",
+        source_path="clip.mkv",
+        stream_spec="d:1",
+        debug_entries=debug_entries,
+        debug_source="clip",
+    )
+
+    expected_bytes = int((32_000.0 / 8.0) * 12.5)
+    assert estimated == expected_bytes
+    assert entry is not None
+    assert entry["bytes"] == expected_bytes
+    assert entry["method"] == "packet-bytes"
+
+
 def test_estimate_other_stream_bytes_defaults_when_probe_missing(monkeypatch):
     stream = {"codec_type": "data"}
     monkeypatch.setattr(script, "_compute_stream_bitrate", lambda *args, **kwargs: None)
