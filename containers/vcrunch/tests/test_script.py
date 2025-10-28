@@ -1863,8 +1863,19 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     assert output_video.exists()
 
     ffmpeg_cmds = [c for c in captured_cmds if c[0] == "ffmpeg"]
-    assert len(ffmpeg_cmds) == 1
-    encode_cmd = ffmpeg_cmds[0]
+    encode_cmd = next(
+        c for c in ffmpeg_cmds if any(tok.endswith(".encoded.mkv") for tok in c)
+    )
+    pass1_cmds = [c for c in ffmpeg_cmds if "-pass" in c and "1" in c]
+    if "-crf:v:0" in encode_cmd:
+        assert not pass1_cmds
+    else:
+        assert len(pass1_cmds) == 1
+        pass1_cmd = pass1_cmds[0]
+        assert "-f" in pass1_cmd and os.devnull in pass1_cmd
+        assert any(arg.startswith("-maxrate:v:0") for arg in encode_cmd)
+        assert any(arg.startswith("-bufsize:v:0") for arg in encode_cmd)
+        assert "-pass" in encode_cmd and "2" in encode_cmd
     assert "-ignore_unknown" in encode_cmd
     assert "-fflags" in encode_cmd
     ff_idx = encode_cmd.index("-fflags")
@@ -2029,7 +2040,10 @@ def test_low_bitrate_audio_stream_copied(monkeypatch, tmp_path):
 
     script.main()
 
-    encode_cmd = next(c for c in captured_cmds if c[0] == "ffmpeg")
+    ffmpeg_cmds = [c for c in captured_cmds if c[0] == "ffmpeg"]
+    encode_cmd = next(
+        c for c in ffmpeg_cmds if any(tok.endswith(".encoded.mkv") for tok in c)
+    )
     assert (
         "-c:a:0" in encode_cmd and encode_cmd[encode_cmd.index("-c:a:0") + 1] == "copy"
     )

@@ -3349,27 +3349,38 @@ def main() -> None:
             main_output_opts += FFMPEG_OUTPUT_FLAGS
             src_video_copy = video_copy_specs.get(src, set())
             src_audio_copy = audio_copy_specs.get(src, set())
-            codec_opts: List[str] = []
+            video_codec_opts: List[str] = []
+            audio_codec_opts: List[str] = []
+            video_two_pass_opts: Dict[int, List[str]] = {}
+            two_pass_specs: List[str] = []
             for spec, out_idx in sorted(
                 video_output_indices.items(), key=lambda item: item[1]
             ):
                 if spec in src_video_copy:
-                    codec_opts += [f"-c:v:{out_idx}", "copy"]
+                    video_codec_opts += [f"-c:v:{out_idx}", "copy"]
                 else:
-                    codec_opts += [f"-c:v:{out_idx}", "libsvtav1"]
+                    opts = [f"-c:v:{out_idx}", "libsvtav1"]
                     if use_constant_quality:
-                        codec_opts += [
+                        opts += [
                             f"-crf:v:{out_idx}",
                             str(args.constant_quality),
                             f"-b:v:{out_idx}",
                             "0",
                         ]
                     else:
-                        codec_opts += [
+                        target_kbps = max(1, int(global_video_kbps))
+                        buf_kbps = max(1, target_kbps * 2)
+                        bitrate_str = f"{target_kbps}k"
+                        bufsize_str = f"{buf_kbps}k"
+                        opts += [
                             f"-b:v:{out_idx}",
-                            f"{global_video_kbps}k",
+                            bitrate_str,
+                            f"-maxrate:v:{out_idx}",
+                            bitrate_str,
+                            f"-bufsize:v:{out_idx}",
+                            bufsize_str,
                         ]
-                    codec_opts += [
+                    opts += [
                         f"-preset:v:{out_idx}",
                         "5",
                         f"-svtav1-params:v:{out_idx}",
@@ -3377,13 +3388,17 @@ def main() -> None:
                         f"-fps_mode:v:{out_idx}",
                         "passthrough",
                     ]
+                    if not use_constant_quality:
+                        video_two_pass_opts[out_idx] = opts.copy()
+                        two_pass_specs.append(spec)
+                    video_codec_opts += opts
             for spec, out_idx in sorted(
                 audio_output_indices.items(), key=lambda item: item[1]
             ):
                 if spec in src_audio_copy:
-                    codec_opts += [f"-c:a:{out_idx}", "copy"]
+                    audio_codec_opts += [f"-c:a:{out_idx}", "copy"]
                 else:
-                    codec_opts += [
+                    audio_codec_opts += [
                         f"-c:a:{out_idx}",
                         "libopus",
                         f"-ar:a:{out_idx}",
@@ -3391,7 +3406,19 @@ def main() -> None:
                         f"-b:a:{out_idx}",
                         f"{audio_kbps}k",
                     ]
-            main_output_opts += codec_opts
+            main_output_opts += video_codec_opts
+            passlog_path: Optional[pathlib.Path] = None
+            needs_two_pass = bool(video_two_pass_opts) and not use_constant_quality
+            if needs_two_pass:
+                passlog_path = streams_root / f"{base_name}.pass"
+                finally_cleanup_files.append(str(passlog_path))
+                main_output_opts += [
+                    "-pass",
+                    "2",
+                    "-passlogfile",
+                    str(passlog_path),
+                ]
+            main_output_opts += audio_codec_opts
             if "s" in main_stream_types:
                 main_output_opts += ["-c:s", "copy"]
             if "t" in main_stream_types:
@@ -3426,11 +3453,37 @@ def main() -> None:
                     extra_opts += ["-c", "copy", "-f", muxer, str(export_path)]
                 encode_outputs.append(extra_opts)
 
+            pass2_cmd = list(encode_cmd)
             for output_opts in encode_outputs:
-                encode_cmd.extend(output_opts)
+                pass2_cmd.extend(output_opts)
 
-            _print_command(encode_cmd)
-            encode_proc = subprocess.run(encode_cmd, env=env)
+            if needs_two_pass and passlog_path is not None:
+                pass1_cmd = list(encode_cmd)
+                pass1_outputs: List[str] = []
+                for spec, out_idx in sorted(
+                    video_output_indices.items(), key=lambda item: item[1]
+                ):
+                    if spec not in two_pass_specs:
+                        continue
+                    pass1_outputs += ["-map", f"0:{spec}"]
+                pass1_outputs += FFMPEG_OUTPUT_FLAGS
+                for out_idx in sorted(video_two_pass_opts):
+                    pass1_outputs.extend(video_two_pass_opts[out_idx])
+                pass1_outputs += ["-an"]
+                pass1_outputs += ["-pass", "1", "-passlogfile", str(passlog_path)]
+                pass1_outputs += ["-f", "null", os.devnull]
+                pass1_cmd.extend(pass1_outputs)
+                _print_command(pass1_cmd)
+                pass1_proc = subprocess.run(pass1_cmd, env=env)
+                if pass1_proc.returncode != 0:
+                    logging.error("encode pass 1 failed for %s", src)
+                    mark_pending(
+                        f"encode pass 1 exited with code {pass1_proc.returncode}"
+                    )
+                    continue
+
+            _print_command(pass2_cmd)
+            encode_proc = subprocess.run(pass2_cmd, env=env)
             if encode_proc.returncode != 0:
                 logging.error("encode failed for %s", src)
                 mark_pending(f"encode exited with code {encode_proc.returncode}")
