@@ -2880,6 +2880,17 @@ def main() -> None:
             videos[idx]: shares[idx] for idx in range(len(videos))
         }
 
+    per_file_target_bytes: Dict[str, int] = {}
+    if not use_constant_quality:
+        for src in videos:
+            stream_entries = output_stream_records.get(src, [])
+            stream_total = sum(_entry_bytes(entry) for entry in stream_entries)
+            container_share = output_container_share.get(src, 0)
+            total_budget = stream_total + max(0, container_share)
+            if total_budget < 0:
+                total_budget = 0
+            per_file_target_bytes[src] = total_budget
+
     if args.verbose and videos:
         logging.info("stream budgets by file:")
         order_map = {"v": 0, "a": 1, "s": 2, "d": 3, "t": 4, "container": 5}
@@ -3135,6 +3146,11 @@ def main() -> None:
         if final_dir and not os.path.exists(final_dir):
             os.makedirs(final_dir, exist_ok=True)
         part_path = final_path + ".part"
+
+        if not use_constant_quality:
+            target_allocation = per_file_target_bytes.get(src)
+            if target_allocation is not None:
+                rec["target_bytes"] = int(target_allocation)
 
         def mark_pending(error: Optional[str] = None) -> None:
             rec["status"] = "pending"
@@ -3707,6 +3723,29 @@ def main() -> None:
                 mark_pending("failed to attach auxiliary outputs")
                 continue
 
+            if not use_constant_quality:
+                budget_bytes = per_file_target_bytes.get(src)
+                if budget_bytes is not None and budget_bytes > 0:
+                    try:
+                        final_size = os.path.getsize(stage_part)
+                    except OSError as exc:
+                        logging.error(
+                            "failed to verify final size for %s: %s", src, exc
+                        )
+                        mark_pending("failed to verify final size")
+                        continue
+                    if final_size > budget_bytes:
+                        logging.error(
+                            "final output exceeds budget for %s: %s > %s bytes",
+                            src,
+                            f"{final_size:,}",
+                            f"{budget_bytes:,}",
+                        )
+                        mark_pending(
+                            f"output exceeds budget ({final_size} > {budget_bytes} bytes)"
+                        )
+                        continue
+
             try:
                 shutil.copy2(stage_part, part_path)
                 _apply_source_timestamps(src, part_path, st)
@@ -3773,6 +3812,34 @@ def main() -> None:
     logging.warning("videos encoded (this run): %d / %d", encoded_count, len(videos))
     if all_videos_done(manifest, args.output_dir):
         logging.warning("all videos complete; manifest retained at %s", manifest_path)
+
+    failures: List[Tuple[str, str]] = []
+    items_obj = manifest.get("items")
+    if isinstance(items_obj, dict):
+        for rec in items_obj.values():
+            if not isinstance(rec, dict):
+                continue
+            status = rec.get("status")
+            error_text = rec.get("error")
+            if status == "done" and not error_text:
+                continue
+            name = rec.get("output") or rec.get("src") or "<unknown>"
+            display_name = name if isinstance(name, str) else str(name)
+            display_name = os.path.basename(display_name) or display_name
+            reason: Optional[str]
+            if isinstance(error_text, str) and error_text:
+                reason = error_text
+            elif isinstance(status, str) and status:
+                reason = status
+            else:
+                reason = "unknown failure"
+            failures.append((display_name, reason))
+
+    if failures:
+        logging.error("the following items did not complete successfully:")
+        for name, reason in failures:
+            logging.error("  %s: %s", name, reason)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
