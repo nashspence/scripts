@@ -1873,9 +1873,11 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
         assert len(pass1_cmds) == 1
         pass1_cmd = pass1_cmds[0]
         assert "-f" in pass1_cmd and os.devnull in pass1_cmd
-        assert any(arg.startswith("-maxrate:v:0") for arg in encode_cmd)
-        assert any(arg.startswith("-bufsize:v:0") for arg in encode_cmd)
+        assert not any(arg.startswith("-maxrate:v:0") for arg in encode_cmd)
+        assert not any(arg.startswith("-bufsize:v:0") for arg in encode_cmd)
         assert "-pass" in encode_cmd and "2" in encode_cmd
+        params_idx = encode_cmd.index("-svtav1-params:v:0")
+        assert "rc=1" in encode_cmd[params_idx + 1]
     assert "-ignore_unknown" in encode_cmd
     assert "-fflags" in encode_cmd
     ff_idx = encode_cmd.index("-fflags")

@@ -3369,22 +3369,19 @@ def main() -> None:
                         ]
                     else:
                         target_kbps = max(1, int(global_video_kbps))
-                        buf_kbps = max(1, target_kbps * 2)
                         bitrate_str = f"{target_kbps}k"
-                        bufsize_str = f"{buf_kbps}k"
                         opts += [
                             f"-b:v:{out_idx}",
                             bitrate_str,
-                            f"-maxrate:v:{out_idx}",
-                            bitrate_str,
-                            f"-bufsize:v:{out_idx}",
-                            bufsize_str,
                         ]
+                    svt_params = [f"lp={args.svt_lp}"]
+                    if not use_constant_quality:
+                        svt_params.append("rc=1")
                     opts += [
                         f"-preset:v:{out_idx}",
                         "5",
                         f"-svtav1-params:v:{out_idx}",
-                        f"lp={args.svt_lp}",
+                        ":".join(svt_params),
                         f"-fps_mode:v:{out_idx}",
                         "passthrough",
                     ]
