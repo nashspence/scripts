@@ -448,10 +448,6 @@ def test_video_copy_budget_uses_measured_bytes(monkeypatch, tmp_path, caplog):
     )
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
     monkeypatch.setattr(
-        script, "_apply_container_metadata", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(script, "_attach_sidecar_files", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
         script, "_apply_source_timestamps", lambda *args, **kwargs: None
     )
 
@@ -1525,7 +1521,7 @@ def test_constant_quality_ignores_fit_short_circuit(monkeypatch, tmp_path):
     assert any(cmd[0] == "ffmpeg" for cmd in captured_cmds)
 
 
-def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
+def test_mkvmerge_sets_creation_date_and_attachments(monkeypatch, tmp_path):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     video = src_dir / "a.mp4"
@@ -1654,46 +1650,34 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
     mkv_cmd = captured_mux_cmds[0]
     assert "--disable-track-statistics-tags" in mkv_cmd
     assert "--timestamps" not in mkv_cmd
-    assert captured_edit_cmds
-    prop_cmd = captured_edit_cmds[0]
-    assert prop_cmd[0] == "mkvpropedit"
-    assert prop_cmd[1].endswith(".part")
-    assert "--edit" in prop_cmd
-    assert "--set" in prop_cmd
-    assert prop_cmd.count("--set") >= 2
-    assert "date=2024-09-28T15:42:11Z" in prop_cmd
-    assert any(arg == "title=Original Title" for arg in prop_cmd)
-    assert "--tags" in prop_cmd
-    tags_index = prop_cmd.index("--tags")
-    assert prop_cmd[tags_index + 1].startswith("global:")
+    assert not captured_edit_cmds
+    assert "--date" in mkv_cmd
+    date_index = mkv_cmd.index("--date")
+    assert mkv_cmd[date_index + 1] == "2024-09-28T15:42:11Z"
+    assert "--title" in mkv_cmd
+    title_index = mkv_cmd.index("--title")
+    assert mkv_cmd[title_index + 1] == "Original Title"
+    assert "--global-tags" in mkv_cmd
+    tags_index = mkv_cmd.index("--global-tags")
+    tags_path = Path(mkv_cmd[tags_index + 1])
+    assert tags_path.name.endswith(".container.tags.xml")
     out_stat = output_video.stat()
     assert pytest.approx(out_stat.st_mtime, rel=0, abs=1) == desired_mtime
     assert created_metadata_files
     metadata_file = created_metadata_files[0]
-    metadata_cmd = next(
-        cmd
-        for cmd in captured_edit_cmds
-        if "--add-attachment" in cmd
-        and str(metadata_file) == cmd[cmd.index("--add-attachment") + 1]
-    )
-    add_index = metadata_cmd.index("--add-attachment")
-    assert "--attachment-name" in metadata_cmd
-    assert (
-        metadata_file.name == metadata_cmd[metadata_cmd.index("--attachment-name") + 1]
-    )
-    assert metadata_cmd.index("--attachment-name") < add_index
-    assert "--attachment-mime-type" in metadata_cmd
-    assert (
-        "application/json"
-        == metadata_cmd[metadata_cmd.index("--attachment-mime-type") + 1]
-    )
-    assert metadata_cmd.index("--attachment-mime-type") < add_index
-    assert "--attachment-description" in metadata_cmd
-    assert (
-        "Pre-re-encode metadata"
-        == metadata_cmd[metadata_cmd.index("--attachment-description") + 1]
-    )
-    assert metadata_cmd.index("--attachment-description") < add_index
+    metadata_attach_indices = [
+        idx
+        for idx, token in enumerate(mkv_cmd)
+        if token == "--attach-file" and mkv_cmd[idx + 1] == str(metadata_file)
+    ]
+    assert metadata_attach_indices
+    attach_index = metadata_attach_indices[0]
+    assert mkv_cmd[attach_index - 6] == "--attachment-name"
+    assert mkv_cmd[attach_index - 5] == metadata_file.name
+    assert mkv_cmd[attach_index - 4] == "--attachment-mime-type"
+    assert mkv_cmd[attach_index - 3] == "application/json"
+    assert mkv_cmd[attach_index - 2] == "--attachment-description"
+    assert mkv_cmd[attach_index - 1] == "Pre-re-encode metadata"
 
 
 def test_dump_streams_data_sidecar_uses_container(monkeypatch, tmp_path):
