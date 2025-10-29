@@ -104,16 +104,6 @@ def test_dump_streams_data_fallback(monkeypatch, tmp_path):
 
     monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
 
-    export_calls = []
-
-    def fake_export_stream(src, output, stream_index, muxer, verbose, *, stream_types):
-        path = Path(output)
-        export_calls.append((path, muxer))
-        if muxer == "matroska":
-            raise RuntimeError("muxer failed")
-        path.write_bytes(b"data")
-
-    monkeypatch.setattr(script, "_export_stream", fake_export_stream)
     monkeypatch.setattr(
         script,
         "_export_attachments",
@@ -142,9 +132,7 @@ def test_dump_streams_data_fallback(monkeypatch, tmp_path):
     assert payload == {"packets": [0.0, 1.0]}
     assert entry.get("packet_timestamps_path") == str(packets_path)
 
-    assert len(export_calls) == 2
-    assert export_calls[0][1] == "matroska"
-    assert export_calls[1][1] == "data"
+    assert Path(entry["path"]).with_suffix(".timing.json").exists()
 
 
 def test_dump_streams_data_fallback_empty_packets(monkeypatch, tmp_path):
@@ -166,13 +154,6 @@ def test_dump_streams_data_fallback_empty_packets(monkeypatch, tmp_path):
 
     monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
 
-    def fake_export_stream(src, output, stream_index, muxer, verbose, *, stream_types):
-        path = Path(output)
-        if muxer == "matroska":
-            raise RuntimeError("muxer failed")
-        path.write_bytes(b"data")
-
-    monkeypatch.setattr(script, "_export_stream", fake_export_stream)
     monkeypatch.setattr(
         script,
         "_export_attachments",
@@ -527,15 +508,6 @@ def test_dump_streams_subtitle_uses_container_data(monkeypatch, tmp_path):
         lambda src, dest_dir, verbose: [],
     )
 
-    calls = []
-
-    def fake_export_stream(src, output, stream_index, muxer, verbose, *, stream_types):
-        path = Path(output)
-        calls.append((path, muxer, tuple(stream_types)))
-        path.write_text("", encoding="utf-8")
-
-    monkeypatch.setattr(script, "_export_stream", fake_export_stream)
-
     result = script._dump_streams_and_metadata("clip.mov", tmp_path, verbose=False)
 
     exports = result["exports"]
@@ -549,11 +521,6 @@ def test_dump_streams_subtitle_uses_container_data(monkeypatch, tmp_path):
     sidecar_path = Path(entry["path"])
     assert sidecar_path.name == "legacy_stream_s2.subtitle.unknown.mov"
     assert not sidecar_path.exists()
-    assert calls
-    recorded_path, recorded_muxer, stream_types = calls[0]
-    assert recorded_muxer == "mov"
-    assert stream_types == ("s",)
-    assert recorded_path.name == "legacy_stream_s2.subtitle.unknown.mov"
 
 
 def test_packet_sidecar_path_prefers_recorded(tmp_path):
@@ -1715,11 +1682,7 @@ def test_dump_streams_data_sidecar_uses_container(monkeypatch, tmp_path):
     assert data_exports[0]["path"].endswith(".mov")
     assert Path(data_exports[0]["path"]).name == "legacy_stream_d0.data.unknown.mov"
 
-    data_cmd = next(
-        cmd for cmd in calls if cmd[0] == "ffmpeg" and cmd[-1].endswith(".mov")
-    )
-    assert "-f" in data_cmd
-    assert data_cmd[data_cmd.index("-f") + 1] == "mov"
+    assert calls == []
 
 
 def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):

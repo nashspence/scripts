@@ -264,45 +264,6 @@ def _lowercase_suffix_str(path_str: str) -> str:
     return str(_lowercase_suffix(pathlib.PurePath(path_str)))
 
 
-def _export_stream(
-    src: str,
-    output: pathlib.Path,
-    stream_index: int,
-    muxer: str,
-    verbose: bool,
-    *,
-    stream_types: Sequence[str],
-) -> None:
-    cmd = [
-        "ffmpeg",
-        "-y",
-    ]
-    if verbose:
-        cmd += ["-stats", "-loglevel", "info"]
-    else:
-        cmd += ["-hide_banner", "-loglevel", "warning"]
-    cmd += FFMPEG_INPUT_FLAGS
-    cmd += [
-        "-i",
-        src,
-        "-map",
-        f"0:{stream_index}",
-    ]
-    cmd += _metadata_copy_args(stream_types)
-    cmd += FFMPEG_OUTPUT_FLAGS
-    cmd += [
-        "-c",
-        "copy",
-        "-f",
-        muxer,
-        str(output),
-    ]
-    _print_command(cmd)
-    proc = subprocess.run(cmd)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed exporting stream {stream_index}")
-
-
 def _export_attachments(
     src: str, dest_dir: pathlib.Path, verbose: bool
 ) -> List[pathlib.Path]:
@@ -619,8 +580,6 @@ def _dump_streams_and_metadata(
         type_counters[letter] = ordinal + 1
         stream_specifiers[raw_index] = f"{letter}:{ordinal}"
 
-    total_data_streams = type_counters.get("d", 0)
-
     for stream in streams:
         try:
             index = int(stream.get("index", -1))
@@ -646,13 +605,18 @@ def _dump_streams_and_metadata(
         target_muxer = muxer
         primary_extension = ext
         if stype == "d":
-            target_muxer = container_format_name or "matroska"
-            primary_extension = _select_extension(
-                data_ext_hint,
-                container_format_name,
-                target_muxer,
-                primary_extension,
-            )
+            target_muxer = container_format_name or "data"
+            if target_muxer == "matroska":
+                target_muxer = "data"
+            if target_muxer == "data":
+                primary_extension = "data"
+            else:
+                primary_extension = _select_extension(
+                    data_ext_hint,
+                    container_format_name,
+                    target_muxer,
+                    primary_extension,
+                )
         elif stype == "s" and not mkv_ok:
             if container_format_name:
                 target_muxer = container_format_name
@@ -665,104 +629,34 @@ def _dump_streams_and_metadata(
             stype, index, stream, primary_extension
         )
         sidecar = dest_dir / sidecar_name
-        try:
-            _export_stream(
-                src,
-                sidecar,
-                index,
-                target_muxer,
-                verbose,
-                stream_types=[stype],
-            )
-            export_entry: StreamExport = {
-                "path": str(sidecar),
-                "stream": stream,
-                "stype": stype,
-                "mkv_ok": mkv_ok,
-                "spec": spec,
-                "muxer": target_muxer,
-            }
-            exports.append(export_entry)
-            try:
-                sidecar.unlink()
-            except FileNotFoundError:
-                pass
-        except RuntimeError as exc:
-            if (
-                stype == "d"
-                and container_format_name
-                and target_muxer == container_format_name
-                and total_data_streams == 1
-            ):
-                logging.info(
-                    "failed to export data stream %s using %s; falling back to raw data: %s",
-                    index,
-                    container_format_name,
-                    exc,
-                )
+        export_entry: StreamExport = {
+            "path": str(sidecar),
+            "stream": stream,
+            "stype": stype,
+            "mkv_ok": mkv_ok,
+            "spec": spec,
+            "muxer": target_muxer,
+        }
+        if stype == "d" and target_muxer == "data":
+            stream_spec = stream_specifiers.get(index)
+            timestamps: Optional[List[float]] = None
+            if stream_spec:
+                timestamps = _collect_packet_timestamps_seconds(src, index, stream_spec)
+            if timestamps is not None:
+                packets_path = sidecar.with_suffix(".timing.json")
                 try:
-                    sidecar.unlink()
-                except FileNotFoundError:
-                    pass
-                fallback_path = dest_dir / _build_stream_attachment_name(
-                    stype, index, stream, "data"
-                )
-                try:
-                    _export_stream(
-                        src,
-                        fallback_path,
-                        index,
-                        "data",
-                        verbose,
-                        stream_types=[stype],
-                    )
-                except RuntimeError as fallback_exc:
+                    with open(packets_path, "w", encoding="utf-8") as fh:
+                        json.dump({"packets": timestamps}, fh, indent=2)
+                        fh.write("\n")
+                except OSError as write_exc:
                     logging.warning(
-                        "failed to export data stream %s as raw data: %s",
+                        "failed to write packet timestamps for stream %s: %s",
                         index,
-                        fallback_exc,
+                        write_exc,
                     )
-                    continue
-
-                packets_path: Optional[pathlib.Path] = None
-                stream_spec = stream_specifiers.get(index)
-                timestamps: Optional[List[float]] = None
-                if stream_spec:
-                    timestamps = _collect_packet_timestamps_seconds(
-                        src, index, stream_spec
-                    )
-                if timestamps is not None:
-                    packets_path = fallback_path.with_suffix(".timing.json")
-                    try:
-                        with open(packets_path, "w", encoding="utf-8") as fh:
-                            json.dump({"packets": timestamps}, fh, indent=2)
-                            fh.write("\n")
-                    except OSError as write_exc:
-                        logging.warning(
-                            "failed to write packet timestamps for stream %s: %s",
-                            index,
-                            write_exc,
-                        )
-                        packets_path = None
-
-                fallback_entry: StreamExport = {
-                    "path": str(fallback_path),
-                    "stream": stream,
-                    "stype": stype,
-                    "mkv_ok": False,
-                    "spec": spec,
-                    "muxer": "data",
-                }
-                if packets_path is not None:
-                    fallback_entry["packet_timestamps_path"] = str(packets_path)
-                exports.append(fallback_entry)
-                try:
-                    fallback_path.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-
-            logging.warning("failed to export stream %s: %s", index, exc)
+                else:
+                    export_entry["packet_timestamps_path"] = str(packets_path)
+        exports.append(export_entry)
 
     return {
         "exports": exports,
@@ -3609,6 +3503,21 @@ def main() -> None:
                         if parsed:
                             creation_date_to_apply = parsed
                             break
+
+            try:
+                before_size = os.path.getsize(selected_output_path)
+            except OSError as exc:
+                logging.info(
+                    "mkv size before mkvmerge for %s: unavailable (%s)",
+                    src,
+                    exc,
+                )
+            else:
+                logging.info(
+                    "mkv size before mkvmerge for %s: %s",
+                    src,
+                    _format_size_for_log(before_size),
+                )
 
             metadata_args: List[str]
             try:
