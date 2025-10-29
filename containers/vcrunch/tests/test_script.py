@@ -1232,7 +1232,8 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
-            output_path = Path(cmd[2])
+            out_index = cmd.index("-o")
+            output_path = Path(cmd[out_index + 1])
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"remuxed")
 
@@ -1424,7 +1425,8 @@ def test_constant_quality_ignores_fit_short_circuit(monkeypatch, tmp_path):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
-            Path(cmd[2]).write_bytes(b"remuxed")
+            out_index = cmd.index("-o")
+            Path(cmd[out_index + 1]).write_bytes(b"remuxed")
 
         return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
@@ -1544,7 +1546,8 @@ def test_mkvmerge_sets_creation_date_and_attachments(monkeypatch, tmp_path):
             return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         if cmd[0] == "mkvmerge":
             captured_mux_cmds.append(cmd)
-            output_path = Path(cmd[2])
+            out_index = cmd.index("-o")
+            output_path = Path(cmd[out_index + 1])
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"remuxed")
             return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
@@ -1618,9 +1621,9 @@ def test_mkvmerge_sets_creation_date_and_attachments(monkeypatch, tmp_path):
     assert "--disable-track-statistics-tags" in mkv_cmd
     assert "--timestamps" not in mkv_cmd
     assert not captured_edit_cmds
-    assert "--date" in mkv_cmd
-    date_index = mkv_cmd.index("--date")
-    assert mkv_cmd[date_index + 1] == "2024-09-28T15:42:11Z"
+    date_tokens = [token for token in mkv_cmd if token.startswith("--date=")]
+    assert date_tokens
+    assert date_tokens[0] == "--date=2024-09-28T15:42:11Z"
     assert "--title" in mkv_cmd
     title_index = mkv_cmd.index("--title")
     assert mkv_cmd[title_index + 1] == "Original Title"
@@ -1731,7 +1734,8 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
-            output_path = Path(cmd[2])
+            out_index = cmd.index("-o")
+            output_path = Path(cmd[out_index + 1])
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"remuxed")
 
@@ -1890,7 +1894,8 @@ def test_low_bitrate_audio_stream_copied(monkeypatch, tmp_path):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
-            Path(cmd[2]).write_bytes(b"remuxed")
+            out_index = cmd.index("-o")
+            Path(cmd[out_index + 1]).write_bytes(b"remuxed")
         return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
@@ -2022,7 +2027,8 @@ def test_low_bitrate_video_stream_copied(monkeypatch, tmp_path):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
-            Path(cmd[2]).write_bytes(b"remuxed")
+            out_index = cmd.index("-o")
+            Path(cmd[out_index + 1]).write_bytes(b"remuxed")
         return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
@@ -2163,7 +2169,8 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
-            output_path = Path(cmd[2])
+            out_index = cmd.index("-o")
+            output_path = Path(cmd[out_index + 1])
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"remuxed")
 
