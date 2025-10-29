@@ -1251,7 +1251,7 @@ def _prepare_container_metadata_args(
         remaining_tags.append((key, stripped))
 
     if creation_date:
-        metadata_args.append(f"--date={creation_date}")
+        metadata_args += ["--date", creation_date]
     if title_value:
         metadata_args += ["--title", title_value]
 
@@ -3540,11 +3540,13 @@ def main() -> None:
 
             mux_cmd = [
                 "mkvmerge",
+                "-o",
+                remux_output,
                 "--disable-track-statistics-tags",
             ]
             mux_cmd += metadata_args
             mux_cmd += attachment_args
-            mux_cmd += ["-o", remux_output, str(selected_output_path)]
+            mux_cmd.append(str(selected_output_path))
             _print_command(mux_cmd)
             mux_proc = subprocess.run(mux_cmd)
             if mux_proc.returncode != 0:
