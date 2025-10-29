@@ -1044,20 +1044,38 @@ def _compute_stream_bitrate(
         return None
 
     per_stream_estimates: Dict[int, StreamBitrateEstimate] = {}
+    per_stream_totals: Dict[int, int] = {}
     for idx, data in grouped.items():
-        total_bytes = data.get("total_bytes")
-        if not isinstance(total_bytes, (int, float)) or total_bytes <= 0:
+        total_bytes_val = data.get("total_bytes")
+        if not isinstance(total_bytes_val, (int, float)) or total_bytes_val <= 0:
             continue
+        total_bytes = int(total_bytes_val)
+        per_stream_totals[idx] = total_bytes
         duration = _duration_for_stream(idx, data)
         if not duration or duration <= 0:
             continue
         per_stream_estimates[idx] = {
             "bitrate": (float(total_bytes) * 8.0) / float(duration),
             "duration": float(duration),
-            "total_bytes": int(total_bytes),
+            "total_bytes": total_bytes,
         }
 
     if not per_stream_estimates:
+        if stream_index is not None:
+            total = per_stream_totals.get(stream_index)
+            if total:
+                return {
+                    "bitrate": float(total) * 8.0,
+                    "duration": 1.0,
+                    "total_bytes": total,
+                }
+        if per_stream_totals:
+            total_bytes = sum(per_stream_totals.values())
+            return {
+                "bitrate": float(total_bytes) * 8.0,
+                "duration": 1.0,
+                "total_bytes": total_bytes,
+            }
         return None
 
     if stream_index is not None and stream_index in per_stream_estimates:
@@ -1229,11 +1247,28 @@ def _attach_sidecar_files(
 ) -> None:
     if not attachments:
         return
+    mkv_file = pathlib.Path(mkv_path)
+
+    def _safe_size() -> Optional[int]:
+        try:
+            return mkv_file.stat().st_size
+        except OSError as exc:
+            logging.debug("failed to stat %s for size logging: %s", mkv_path, exc)
+            return None
+
     for path, description, mime_type in attachments:
         if not path.exists():
             continue
         desc = _clean_attachment_description(description) or path.name
         name = path.name
+
+        before_size = _safe_size()
+        if before_size is not None:
+            logging.info(
+                "mkv size before attaching %s: %s bytes",
+                name or path.name,
+                f"{before_size:,}",
+            )
 
         cmd = ["mkvpropedit", mkv_path]
         if name:
@@ -1248,6 +1283,14 @@ def _attach_sidecar_files(
         if proc.returncode != 0:
             raise RuntimeError(
                 f"mkvpropedit failed to attach {path} with code {proc.returncode}"
+            )
+
+        after_size = _safe_size()
+        if after_size is not None:
+            logging.info(
+                "mkv size after attaching %s: %s bytes",
+                name or path.name,
+                f"{after_size:,}",
             )
 
 
@@ -3263,11 +3306,6 @@ def main() -> None:
                 ],
                 key=lambda item: item["index"],
             )
-            attachment_infos = sorted(
-                [info for info in stream_infos if info["stype"] == "t"],
-                key=lambda item: item["index"],
-            )
-
             rec.pop("error", None)
             rec.update(
                 {
@@ -3336,9 +3374,6 @@ def main() -> None:
                 elif stype == "s" and info.get("mkv_ok"):
                     main_output_opts += ["-map", f"0:{spec}"]
                     _register_main_stream("s")
-                elif stype == "t":
-                    main_output_opts += ["-map", f"0:{spec}"]
-                    _register_main_stream("t")
 
             if "v" not in main_stream_types:
                 logging.error("no video streams mapped for %s", src)
@@ -3394,8 +3429,8 @@ def main() -> None:
             main_output_opts += codec_opts
             if "s" in main_stream_types:
                 main_output_opts += ["-c:s", "copy"]
-            if "t" in main_stream_types:
-                main_output_opts += ["-c:t", "copy"]
+            # Attachments are exported separately and re-attached with mkvpropedit,
+            # so we intentionally exclude them from the main mux here.
             main_output_opts += [
                 "-f",
                 "matroska",
@@ -3520,13 +3555,6 @@ def main() -> None:
                             remux_cmd += ["-map", f"0:{spec_val}"]
                         if subtitle_infos:
                             remux_stream_types.append("s")
-                        for info in attachment_infos:
-                            spec_val = info.get("spec")
-                            if not isinstance(spec_val, str) or not spec_val:
-                                continue
-                            remux_cmd += ["-map", f"0:{spec_val}"]
-                        if attachment_infos:
-                            remux_stream_types.append("t")
                         remux_cmd += _metadata_copy_args(remux_stream_types)
                         remux_cmd += FFMPEG_OUTPUT_FLAGS
                         if mapped_video:
@@ -3535,8 +3563,6 @@ def main() -> None:
                             remux_cmd += ["-c:a", "copy"]
                         if subtitle_infos:
                             remux_cmd += ["-c:s", "copy"]
-                        if attachment_infos:
-                            remux_cmd += ["-c:t", "copy"]
                         remux_cmd += [
                             "-f",
                             "matroska",
