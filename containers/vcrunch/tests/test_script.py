@@ -104,16 +104,6 @@ def test_dump_streams_data_fallback(monkeypatch, tmp_path):
 
     monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
 
-    export_calls = []
-
-    def fake_export_stream(src, output, stream_index, muxer, verbose, *, stream_types):
-        path = Path(output)
-        export_calls.append((path, muxer))
-        if muxer == "matroska":
-            raise RuntimeError("muxer failed")
-        path.write_bytes(b"data")
-
-    monkeypatch.setattr(script, "_export_stream", fake_export_stream)
     monkeypatch.setattr(
         script,
         "_export_attachments",
@@ -142,9 +132,7 @@ def test_dump_streams_data_fallback(monkeypatch, tmp_path):
     assert payload == {"packets": [0.0, 1.0]}
     assert entry.get("packet_timestamps_path") == str(packets_path)
 
-    assert len(export_calls) == 2
-    assert export_calls[0][1] == "matroska"
-    assert export_calls[1][1] == "data"
+    assert Path(entry["path"]).with_suffix(".timing.json").exists()
 
 
 def test_dump_streams_data_fallback_empty_packets(monkeypatch, tmp_path):
@@ -166,13 +154,6 @@ def test_dump_streams_data_fallback_empty_packets(monkeypatch, tmp_path):
 
     monkeypatch.setattr(script, "ffprobe_json", fake_ffprobe_json)
 
-    def fake_export_stream(src, output, stream_index, muxer, verbose, *, stream_types):
-        path = Path(output)
-        if muxer == "matroska":
-            raise RuntimeError("muxer failed")
-        path.write_bytes(b"data")
-
-    monkeypatch.setattr(script, "_export_stream", fake_export_stream)
     monkeypatch.setattr(
         script,
         "_export_attachments",
@@ -448,10 +429,6 @@ def test_video_copy_budget_uses_measured_bytes(monkeypatch, tmp_path, caplog):
     )
     monkeypatch.setattr(script, "is_valid_media", lambda path: True)
     monkeypatch.setattr(
-        script, "_apply_container_metadata", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(script, "_attach_sidecar_files", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
         script, "_apply_source_timestamps", lambda *args, **kwargs: None
     )
 
@@ -531,15 +508,6 @@ def test_dump_streams_subtitle_uses_container_data(monkeypatch, tmp_path):
         lambda src, dest_dir, verbose: [],
     )
 
-    calls = []
-
-    def fake_export_stream(src, output, stream_index, muxer, verbose, *, stream_types):
-        path = Path(output)
-        calls.append((path, muxer, tuple(stream_types)))
-        path.write_text("", encoding="utf-8")
-
-    monkeypatch.setattr(script, "_export_stream", fake_export_stream)
-
     result = script._dump_streams_and_metadata("clip.mov", tmp_path, verbose=False)
 
     exports = result["exports"]
@@ -553,11 +521,6 @@ def test_dump_streams_subtitle_uses_container_data(monkeypatch, tmp_path):
     sidecar_path = Path(entry["path"])
     assert sidecar_path.name == "legacy_stream_s2.subtitle.unknown.mov"
     assert not sidecar_path.exists()
-    assert calls
-    recorded_path, recorded_muxer, stream_types = calls[0]
-    assert recorded_muxer == "mov"
-    assert stream_types == ("s",)
-    assert recorded_path.name == "legacy_stream_s2.subtitle.unknown.mov"
 
 
 def test_packet_sidecar_path_prefers_recorded(tmp_path):
@@ -1269,7 +1232,8 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
-            output_path = Path(cmd[2])
+            out_index = cmd.index("-o")
+            output_path = Path(cmd[out_index + 1])
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"remuxed")
 
@@ -1461,7 +1425,8 @@ def test_constant_quality_ignores_fit_short_circuit(monkeypatch, tmp_path):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
-            Path(cmd[2]).write_bytes(b"remuxed")
+            out_index = cmd.index("-o")
+            Path(cmd[out_index + 1]).write_bytes(b"remuxed")
 
         return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
@@ -1525,7 +1490,7 @@ def test_constant_quality_ignores_fit_short_circuit(monkeypatch, tmp_path):
     assert any(cmd[0] == "ffmpeg" for cmd in captured_cmds)
 
 
-def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
+def test_mkvmerge_sets_creation_date_and_attachments(monkeypatch, tmp_path):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     video = src_dir / "a.mp4"
@@ -1581,7 +1546,8 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
             return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         if cmd[0] == "mkvmerge":
             captured_mux_cmds.append(cmd)
-            output_path = Path(cmd[2])
+            out_index = cmd.index("-o")
+            output_path = Path(cmd[out_index + 1])
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"remuxed")
             return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
@@ -1652,48 +1618,39 @@ def test_mkvpropedit_sets_creation_date(monkeypatch, tmp_path):
     assert output_video.exists()
     assert captured_mux_cmds
     mkv_cmd = captured_mux_cmds[0]
-    assert "--disable-track-statistics-tags" in mkv_cmd
+    assert mkv_cmd[1] == "-o"
+    assert mkv_cmd[3] == "--disable-track-statistics-tags"
     assert "--timestamps" not in mkv_cmd
-    assert captured_edit_cmds
-    prop_cmd = captured_edit_cmds[0]
-    assert prop_cmd[0] == "mkvpropedit"
-    assert prop_cmd[1].endswith(".part")
-    assert "--edit" in prop_cmd
-    assert "--set" in prop_cmd
-    assert prop_cmd.count("--set") >= 2
-    assert "date=2024-09-28T15:42:11Z" in prop_cmd
-    assert any(arg == "title=Original Title" for arg in prop_cmd)
-    assert "--tags" in prop_cmd
-    tags_index = prop_cmd.index("--tags")
-    assert prop_cmd[tags_index + 1].startswith("global:")
+    assert not captured_edit_cmds
+    assert "--date" in mkv_cmd
+    date_index = mkv_cmd.index("--date")
+    assert mkv_cmd[date_index + 1] == "2024-09-28T15:42:11Z"
+    out_index = mkv_cmd.index("-o")
+    assert out_index < date_index
+    assert "--title" in mkv_cmd
+    title_index = mkv_cmd.index("--title")
+    assert mkv_cmd[title_index + 1] == "Original Title"
+    assert "--global-tags" in mkv_cmd
+    tags_index = mkv_cmd.index("--global-tags")
+    tags_path = Path(mkv_cmd[tags_index + 1])
+    assert tags_path.name.endswith(".container.tags.xml")
     out_stat = output_video.stat()
     assert pytest.approx(out_stat.st_mtime, rel=0, abs=1) == desired_mtime
     assert created_metadata_files
     metadata_file = created_metadata_files[0]
-    metadata_cmd = next(
-        cmd
-        for cmd in captured_edit_cmds
-        if "--add-attachment" in cmd
-        and str(metadata_file) == cmd[cmd.index("--add-attachment") + 1]
-    )
-    add_index = metadata_cmd.index("--add-attachment")
-    assert "--attachment-name" in metadata_cmd
-    assert (
-        metadata_file.name == metadata_cmd[metadata_cmd.index("--attachment-name") + 1]
-    )
-    assert metadata_cmd.index("--attachment-name") < add_index
-    assert "--attachment-mime-type" in metadata_cmd
-    assert (
-        "application/json"
-        == metadata_cmd[metadata_cmd.index("--attachment-mime-type") + 1]
-    )
-    assert metadata_cmd.index("--attachment-mime-type") < add_index
-    assert "--attachment-description" in metadata_cmd
-    assert (
-        "Pre-re-encode metadata"
-        == metadata_cmd[metadata_cmd.index("--attachment-description") + 1]
-    )
-    assert metadata_cmd.index("--attachment-description") < add_index
+    metadata_attach_indices = [
+        idx
+        for idx, token in enumerate(mkv_cmd)
+        if token == "--attach-file" and mkv_cmd[idx + 1] == str(metadata_file)
+    ]
+    assert metadata_attach_indices
+    attach_index = metadata_attach_indices[0]
+    assert mkv_cmd[attach_index - 6] == "--attachment-name"
+    assert mkv_cmd[attach_index - 5] == metadata_file.name
+    assert mkv_cmd[attach_index - 4] == "--attachment-mime-type"
+    assert mkv_cmd[attach_index - 3] == "application/json"
+    assert mkv_cmd[attach_index - 2] == "--attachment-description"
+    assert mkv_cmd[attach_index - 1] == "Pre-re-encode metadata"
 
 
 def test_dump_streams_data_sidecar_uses_container(monkeypatch, tmp_path):
@@ -1731,11 +1688,7 @@ def test_dump_streams_data_sidecar_uses_container(monkeypatch, tmp_path):
     assert data_exports[0]["path"].endswith(".mov")
     assert Path(data_exports[0]["path"]).name == "legacy_stream_d0.data.unknown.mov"
 
-    data_cmd = next(
-        cmd for cmd in calls if cmd[0] == "ffmpeg" and cmd[-1].endswith(".mov")
-    )
-    assert "-f" in data_cmd
-    assert data_cmd[data_cmd.index("-f") + 1] == "mov"
+    assert calls == []
 
 
 def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
@@ -1784,7 +1737,8 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
-            output_path = Path(cmd[2])
+            out_index = cmd.index("-o")
+            output_path = Path(cmd[out_index + 1])
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"remuxed")
 
@@ -1943,7 +1897,8 @@ def test_low_bitrate_audio_stream_copied(monkeypatch, tmp_path):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
-            Path(cmd[2]).write_bytes(b"remuxed")
+            out_index = cmd.index("-o")
+            Path(cmd[out_index + 1]).write_bytes(b"remuxed")
         return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
@@ -2075,7 +2030,8 @@ def test_low_bitrate_video_stream_copied(monkeypatch, tmp_path):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
-            Path(cmd[2]).write_bytes(b"remuxed")
+            out_index = cmd.index("-o")
+            Path(cmd[out_index + 1]).write_bytes(b"remuxed")
         return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(script.subprocess, "run", fake_run)
@@ -2216,7 +2172,8 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(b"encoded")
         elif cmd[0] == "mkvmerge":
-            output_path = Path(cmd[2])
+            out_index = cmd.index("-o")
+            output_path = Path(cmd[out_index + 1])
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"remuxed")
 

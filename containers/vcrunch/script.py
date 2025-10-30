@@ -264,45 +264,6 @@ def _lowercase_suffix_str(path_str: str) -> str:
     return str(_lowercase_suffix(pathlib.PurePath(path_str)))
 
 
-def _export_stream(
-    src: str,
-    output: pathlib.Path,
-    stream_index: int,
-    muxer: str,
-    verbose: bool,
-    *,
-    stream_types: Sequence[str],
-) -> None:
-    cmd = [
-        "ffmpeg",
-        "-y",
-    ]
-    if verbose:
-        cmd += ["-stats", "-loglevel", "info"]
-    else:
-        cmd += ["-hide_banner", "-loglevel", "warning"]
-    cmd += FFMPEG_INPUT_FLAGS
-    cmd += [
-        "-i",
-        src,
-        "-map",
-        f"0:{stream_index}",
-    ]
-    cmd += _metadata_copy_args(stream_types)
-    cmd += FFMPEG_OUTPUT_FLAGS
-    cmd += [
-        "-c",
-        "copy",
-        "-f",
-        muxer,
-        str(output),
-    ]
-    _print_command(cmd)
-    proc = subprocess.run(cmd)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed exporting stream {stream_index}")
-
-
 def _export_attachments(
     src: str, dest_dir: pathlib.Path, verbose: bool
 ) -> List[pathlib.Path]:
@@ -619,8 +580,6 @@ def _dump_streams_and_metadata(
         type_counters[letter] = ordinal + 1
         stream_specifiers[raw_index] = f"{letter}:{ordinal}"
 
-    total_data_streams = type_counters.get("d", 0)
-
     for stream in streams:
         try:
             index = int(stream.get("index", -1))
@@ -646,13 +605,18 @@ def _dump_streams_and_metadata(
         target_muxer = muxer
         primary_extension = ext
         if stype == "d":
-            target_muxer = container_format_name or "matroska"
-            primary_extension = _select_extension(
-                data_ext_hint,
-                container_format_name,
-                target_muxer,
-                primary_extension,
-            )
+            target_muxer = container_format_name or "data"
+            if target_muxer == "matroska":
+                target_muxer = "data"
+            if target_muxer == "data":
+                primary_extension = "data"
+            else:
+                primary_extension = _select_extension(
+                    data_ext_hint,
+                    container_format_name,
+                    target_muxer,
+                    primary_extension,
+                )
         elif stype == "s" and not mkv_ok:
             if container_format_name:
                 target_muxer = container_format_name
@@ -665,109 +629,38 @@ def _dump_streams_and_metadata(
             stype, index, stream, primary_extension
         )
         sidecar = dest_dir / sidecar_name
-        try:
-            _export_stream(
-                src,
-                sidecar,
-                index,
-                target_muxer,
-                verbose,
-                stream_types=[stype],
-            )
-            export_entry: StreamExport = {
-                "path": str(sidecar),
-                "stream": stream,
-                "stype": stype,
-                "mkv_ok": mkv_ok,
-                "spec": spec,
-                "muxer": target_muxer,
-            }
-            exports.append(export_entry)
-            try:
-                sidecar.unlink()
-            except FileNotFoundError:
-                pass
-        except RuntimeError as exc:
-            if (
-                stype == "d"
-                and container_format_name
-                and target_muxer == container_format_name
-                and total_data_streams == 1
-            ):
-                logging.info(
-                    "failed to export data stream %s using %s; falling back to raw data: %s",
-                    index,
-                    container_format_name,
-                    exc,
-                )
+        export_entry: StreamExport = {
+            "path": str(sidecar),
+            "stream": stream,
+            "stype": stype,
+            "mkv_ok": mkv_ok,
+            "spec": spec,
+            "muxer": target_muxer,
+        }
+        if stype == "d" and target_muxer == "data":
+            stream_spec = stream_specifiers.get(index)
+            timestamps: Optional[List[float]] = None
+            if stream_spec:
+                timestamps = _collect_packet_timestamps_seconds(src, index, stream_spec)
+            if timestamps is not None:
+                packets_path = sidecar.with_suffix(".timing.json")
                 try:
-                    sidecar.unlink()
-                except FileNotFoundError:
-                    pass
-                fallback_path = dest_dir / _build_stream_attachment_name(
-                    stype, index, stream, "data"
-                )
-                try:
-                    _export_stream(
-                        src,
-                        fallback_path,
-                        index,
-                        "data",
-                        verbose,
-                        stream_types=[stype],
-                    )
-                except RuntimeError as fallback_exc:
+                    with open(packets_path, "w", encoding="utf-8") as fh:
+                        json.dump({"packets": timestamps}, fh, indent=2)
+                        fh.write("\n")
+                except OSError as write_exc:
                     logging.warning(
-                        "failed to export data stream %s as raw data: %s",
+                        "failed to write packet timestamps for stream %s: %s",
                         index,
-                        fallback_exc,
+                        write_exc,
                     )
-                    continue
+                else:
+                    export_entry["packet_timestamps_path"] = str(packets_path)
+        exports.append(export_entry)
 
-                packets_path: Optional[pathlib.Path] = None
-                stream_spec = stream_specifiers.get(index)
-                timestamps: Optional[List[float]] = None
-                if stream_spec:
-                    timestamps = _collect_packet_timestamps_seconds(
-                        src, index, stream_spec
-                    )
-                if timestamps is not None:
-                    packets_path = fallback_path.with_suffix(".timing.json")
-                    try:
-                        with open(packets_path, "w", encoding="utf-8") as fh:
-                            json.dump({"packets": timestamps}, fh, indent=2)
-                            fh.write("\n")
-                    except OSError as write_exc:
-                        logging.warning(
-                            "failed to write packet timestamps for stream %s: %s",
-                            index,
-                            write_exc,
-                        )
-                        packets_path = None
-
-                fallback_entry: StreamExport = {
-                    "path": str(fallback_path),
-                    "stream": stream,
-                    "stype": stype,
-                    "mkv_ok": False,
-                    "spec": spec,
-                    "muxer": "data",
-                }
-                if packets_path is not None:
-                    fallback_entry["packet_timestamps_path"] = str(packets_path)
-                exports.append(fallback_entry)
-                try:
-                    fallback_path.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-
-            logging.warning("failed to export stream %s: %s", index, exc)
-
-    attachments = _export_attachments(src, dest_dir, verbose)
     return {
         "exports": exports,
-        "attachments": attachments,
+        "attachments": [],
         "metadata_path": meta_path,
         "container_tags": container_tags,
         "stream_infos": stream_infos,
@@ -1224,31 +1117,46 @@ def _clean_attachment_description(text: str) -> str:
     return cleaned[:120]
 
 
-def _attach_sidecar_files(
-    mkv_path: str, attachments: Sequence[Tuple[pathlib.Path, str, str]]
-) -> None:
-    if not attachments:
-        return
+def _format_size_for_log(num_bytes: int) -> str:
+    return (
+        f"{num_bytes / float(1024**2):.2f} MiB ({num_bytes:,} bytes)"
+        if num_bytes >= 0
+        else f"{num_bytes:,} bytes"
+    )
+
+
+def _build_attachment_args(
+    attachments: Sequence[Tuple[pathlib.Path, str, str]]
+) -> List[str]:
+    args: List[str] = []
     for path, description, mime_type in attachments:
         if not path.exists():
             continue
         desc = _clean_attachment_description(description) or path.name
         name = path.name
-
-        cmd = ["mkvpropedit", mkv_path]
-        if name:
-            cmd.extend(["--attachment-name", name])
-        if mime_type:
-            cmd.extend(["--attachment-mime-type", mime_type])
-        if desc:
-            cmd.extend(["--attachment-description", desc])
-        cmd.extend(["--add-attachment", str(path)])
-        _print_command(cmd)
-        proc = subprocess.run(cmd)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"mkvpropedit failed to attach {path} with code {proc.returncode}"
+        label = name or desc or str(path)
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            logging.info(
+                "including attachment %s: size unavailable (%s)",
+                label,
+                exc,
             )
+        else:
+            logging.info(
+                "including attachment %s: %s",
+                label,
+                _format_size_for_log(size),
+            )
+        if name:
+            args.extend(["--attachment-name", name])
+        if mime_type:
+            args.extend(["--attachment-mime-type", mime_type])
+        if desc:
+            args.extend(["--attachment-description", desc])
+        args.extend(["--attach-file", str(path)])
+    return args
 
 
 def _apply_birthtime(path: str, birthtime: float) -> None:
@@ -1318,13 +1226,13 @@ def _build_container_tags_xml(entries: List[Tuple[str, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _apply_container_metadata(
-    mkv_path: str,
+def _prepare_container_metadata_args(
+    output_path: str,
     creation_date: Optional[str],
     tags: Dict[str, str],
     cleanup: List[str],
-) -> None:
-    info_updates: List[Tuple[str, str]] = []
+) -> List[str]:
+    metadata_args: List[str] = []
     remaining_tags: List[Tuple[str, str]] = []
 
     title_value = None
@@ -1343,34 +1251,21 @@ def _apply_container_metadata(
         remaining_tags.append((key, stripped))
 
     if creation_date:
-        info_updates.append(("date", creation_date))
+        metadata_args += ["--date", creation_date]
     if title_value:
-        info_updates.append(("title", title_value))
+        metadata_args += ["--title", title_value]
 
-    tags_file: Optional[pathlib.Path] = None
     if remaining_tags:
         xml_text = _build_container_tags_xml(remaining_tags)
-        tags_file = pathlib.Path(mkv_path + ".container.tags.xml")
+        tags_file = pathlib.Path(f"{output_path}.container.tags.xml")
         try:
             tags_file.write_text(xml_text, encoding="utf-8")
         except OSError as exc:
             raise RuntimeError(f"failed to write container tags XML: {exc}") from exc
         cleanup.append(str(tags_file))
+        metadata_args += ["--global-tags", str(tags_file)]
 
-    if not info_updates and tags_file is None:
-        return
-
-    cmd: List[str] = ["mkvpropedit", mkv_path]
-    if info_updates:
-        cmd += ["--edit", "info"]
-        for key, value in info_updates:
-            cmd += ["--set", f"{key}={value}"]
-    if tags_file is not None:
-        cmd += ["--tags", f"global:{tags_file}"]
-    _print_command(cmd)
-    proc = subprocess.run(cmd)
-    if proc.returncode != 0:
-        raise RuntimeError(f"mkvpropedit exited with code {proc.returncode}")
+    return metadata_args
 
 
 class MediaPreset(TypedDict):
@@ -2313,6 +2208,7 @@ def main() -> None:
     video_copy_specs: Dict[str, set[str]] = {}
     total_audio_bytes = 0
     other_stream_bytes = 0
+    attachment_budget_bytes = 0
     audio_budget_debug: List[BudgetDebugEntry] = []
     other_stream_budget_debug: List[BudgetDebugEntry] = []
     video_entries: List[Dict[str, Any]] = []
@@ -2478,6 +2374,7 @@ def main() -> None:
                             debug_source=os.path.basename(src),
                         )
                         other_stream_bytes += estimated
+                        attachment_budget_bytes += estimated
                         if debug_entry is not None:
                             record_entry = debug_entry
                         else:
@@ -2568,6 +2465,8 @@ def main() -> None:
                         debug_source=os.path.basename(src),
                     )
                     other_stream_bytes += estimated
+                    if stype == "t":
+                        attachment_budget_bytes += estimated
                     if debug_entry is not None:
                         record_entry = debug_entry
                     else:
@@ -3073,6 +2972,7 @@ def main() -> None:
 
     logging.info("target bytes: %s", f"{target_bytes:,}")
     logging.info("asset bytes: %s", f"{asset_bytes:,}")
+    logging.info("attachment budget bytes: %s", f"{attachment_budget_bytes:,}")
     if not use_constant_quality:
         logging.info(
             "stream overhead bytes: %s; copied video bytes: %s",
@@ -3221,7 +3121,6 @@ def main() -> None:
                 mark_pending("failed to dump streams")
                 continue
             exports = dumped["exports"]
-            attachments = dumped["attachments"]
             metadata_sidecar = dumped["metadata_path"]
             container_tags = dumped.get("container_tags", {})
 
@@ -3584,15 +3483,6 @@ def main() -> None:
                         )
                     )
 
-            for attachment in attachments:
-                attachment_entries.append(
-                    (
-                        attachment,
-                        f"Container attachment copy ({attachment.name})",
-                        _guess_mime_type(attachment),
-                    )
-                )
-
             if metadata_sidecar is not None:
                 if metadata_sidecar.exists():
                     attachment_entries.append(
@@ -3604,13 +3494,59 @@ def main() -> None:
                     )
                 finally_cleanup_files.append(str(metadata_sidecar))
 
+            creation_date_to_apply = original_creation_date
+            if not creation_date_to_apply:
+                for key_name in ("creation_time", "com.apple.quicktime.creationdate"):
+                    raw_value = container_tags.get(key_name)
+                    if isinstance(raw_value, str):
+                        parsed = _parse_creation_date(raw_value)
+                        if parsed:
+                            creation_date_to_apply = parsed
+                            break
+
+            try:
+                before_size = os.path.getsize(selected_output_path)
+            except OSError as exc:
+                logging.info(
+                    "mkv size before mkvmerge for %s: unavailable (%s)",
+                    src,
+                    exc,
+                )
+            else:
+                logging.info(
+                    "mkv size before mkvmerge for %s: %s",
+                    src,
+                    _format_size_for_log(before_size),
+                )
+
+            metadata_args: List[str]
+            try:
+                metadata_args = _prepare_container_metadata_args(
+                    remux_output,
+                    creation_date_to_apply,
+                    container_tags,
+                    finally_cleanup_files,
+                )
+            except RuntimeError as exc:
+                logging.error(
+                    "failed to prepare container metadata for %s: %s",
+                    src,
+                    exc,
+                )
+                mark_pending("failed to prepare container metadata")
+                continue
+
+            attachment_args = _build_attachment_args(attachment_entries)
+
             mux_cmd = [
                 "mkvmerge",
                 "-o",
                 remux_output,
                 "--disable-track-statistics-tags",
-                str(selected_output_path),
             ]
+            mux_cmd += metadata_args
+            mux_cmd += attachment_args
+            mux_cmd.append(str(selected_output_path))
             _print_command(mux_cmd)
             mux_proc = subprocess.run(mux_cmd)
             if mux_proc.returncode != 0:
@@ -3624,37 +3560,25 @@ def main() -> None:
                 continue
 
             try:
+                mux_size = os.path.getsize(remux_output)
+            except OSError as exc:
+                logging.info(
+                    "mkv size after mkvmerge for %s: unavailable (%s)",
+                    src,
+                    exc,
+                )
+            else:
+                logging.info(
+                    "mkv size after mkvmerge for %s: %s",
+                    src,
+                    _format_size_for_log(mux_size),
+                )
+
+            try:
                 os.replace(remux_output, stage_part)
             except OSError as exc:
                 logging.error("failed to finalize remuxed output for %s: %s", src, exc)
                 mark_pending("failed to finalize remuxed output")
-                continue
-            creation_date_to_apply = original_creation_date
-            if not creation_date_to_apply:
-                for key_name in ("creation_time", "com.apple.quicktime.creationdate"):
-                    raw_value = container_tags.get(key_name)
-                    if isinstance(raw_value, str):
-                        parsed = _parse_creation_date(raw_value)
-                        if parsed:
-                            creation_date_to_apply = parsed
-                            break
-            try:
-                _apply_container_metadata(
-                    stage_part,
-                    creation_date_to_apply,
-                    container_tags,
-                    finally_cleanup_files,
-                )
-            except RuntimeError as exc:
-                logging.error("failed to apply container metadata for %s: %s", src, exc)
-                mark_pending("failed to apply container metadata")
-                continue
-
-            try:
-                _attach_sidecar_files(stage_part, attachment_entries)
-            except RuntimeError as exc:
-                logging.error("failed to attach auxiliary outputs for %s: %s", src, exc)
-                mark_pending("failed to attach auxiliary outputs")
                 continue
 
             try:
