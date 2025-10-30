@@ -2206,6 +2206,8 @@ def main() -> None:
 
     audio_copy_specs: Dict[str, set[str]] = {}
     video_copy_specs: Dict[str, set[str]] = {}
+    video_encode_budgets: Dict[str, Dict[str, int]] = {}
+    video_encode_durations: Dict[str, Dict[str, float]] = {}
     total_audio_bytes = 0
     other_stream_bytes = 0
     attachment_budget_bytes = 0
@@ -2729,7 +2731,10 @@ def main() -> None:
                     adjusted,
                     last_duration,
                 )
-        for source_id, spec, planned_bytes, _duration in encode_allocations:
+        for source_id, spec, planned_bytes, duration in encode_allocations:
+            if spec:
+                video_encode_budgets.setdefault(source_id, {})[spec] = planned_bytes
+                video_encode_durations.setdefault(source_id, {})[spec] = float(duration)
             video_encode_entry: BudgetDebugEntry = {
                 "source": os.path.basename(source_id),
                 "spec": spec,
@@ -3185,173 +3190,306 @@ def main() -> None:
             encode_output_path = streams_root / f"{base_name}.encoded.mkv"
             finally_cleanup_files.append(str(encode_output_path))
 
-            encode_cmd = ["ffmpeg"]
-            if args.verbose:
-                encode_cmd += ["-stats", "-loglevel", "info"]
-            else:
-                encode_cmd += ["-hide_banner", "-loglevel", "warning"]
-            encode_cmd += [
-                "-y",
-                "-ignore_unknown",
-            ]
-            encode_cmd += FFMPEG_INPUT_FLAGS
-            encode_cmd += [
-                "-i",
-                stage_src,
-            ]
-
-            encode_outputs: List[List[str]] = []
-
-            main_stream_types: List[str] = []
-
-            def _register_main_stream(stype: str) -> None:
-                if stype not in main_stream_types:
-                    main_stream_types.append(stype)
-
-            main_output_opts: List[str] = []
-            video_output_indices: Dict[str, int] = {}
-            audio_output_indices: Dict[str, int] = {}
-            video_out_count = 0
-            audio_out_count = 0
-            for info in sorted(stream_infos, key=lambda item: item["index"]):
-                spec_val = info.get("spec")
-                if not isinstance(spec_val, str) or not spec_val:
-                    continue
-                spec = spec_val
-                stype_val = info.get("stype")
-                if not isinstance(stype_val, str):
-                    continue
-                stype = stype_val
-                if stype == "v":
-                    main_output_opts += ["-map", f"0:{spec}"]
-                    video_output_indices[spec] = video_out_count
-                    video_out_count += 1
-                    _register_main_stream("v")
-                elif stype == "a":
-                    main_output_opts += ["-map", f"0:{spec}"]
-                    audio_output_indices[spec] = audio_out_count
-                    audio_out_count += 1
-                    _register_main_stream("a")
-                elif stype == "s" and info.get("mkv_ok"):
-                    main_output_opts += ["-map", f"0:{spec}"]
-                    _register_main_stream("s")
-                elif stype == "t":
-                    main_output_opts += ["-map", f"0:{spec}"]
-                    _register_main_stream("t")
-
-            if "v" not in main_stream_types:
-                logging.error("no video streams mapped for %s", src)
-                mark_pending("no video streams mapped")
-                continue
-
-            main_output_opts += _metadata_copy_args(main_stream_types)
-            main_output_opts += FFMPEG_OUTPUT_FLAGS
-            src_video_copy = video_copy_specs.get(src, set())
-            src_audio_copy = audio_copy_specs.get(src, set())
-            codec_opts: List[str] = []
-            for spec, out_idx in sorted(
-                video_output_indices.items(), key=lambda item: item[1]
-            ):
-                if spec in src_video_copy:
-                    codec_opts += [f"-c:v:{out_idx}", "copy"]
+            encode_failed = False
+            while True:
+                source_video_budgets = video_encode_budgets.get(src, {})
+                encode_cmd = ["ffmpeg"]
+                if args.verbose:
+                    encode_cmd += ["-stats", "-loglevel", "info"]
                 else:
-                    codec_opts += [f"-c:v:{out_idx}", "libsvtav1"]
-                    if use_constant_quality:
+                    encode_cmd += ["-hide_banner", "-loglevel", "warning"]
+                encode_cmd += [
+                    "-y",
+                    "-ignore_unknown",
+                ]
+                encode_cmd += FFMPEG_INPUT_FLAGS
+                encode_cmd += [
+                    "-i",
+                    stage_src,
+                ]
+
+                encode_outputs: List[List[str]] = []
+
+                main_stream_types: List[str] = []
+
+                def _register_main_stream(stype: str) -> None:
+                    if stype not in main_stream_types:
+                        main_stream_types.append(stype)
+
+                main_output_opts: List[str] = []
+                video_output_indices: Dict[str, int] = {}
+                audio_output_indices: Dict[str, int] = {}
+                video_out_count = 0
+                audio_out_count = 0
+                for info in sorted(stream_infos, key=lambda item: item["index"]):
+                    spec_val = info.get("spec")
+                    if not isinstance(spec_val, str) or not spec_val:
+                        continue
+                    spec = spec_val
+                    stype_val = info.get("stype")
+                    if not isinstance(stype_val, str):
+                        continue
+                    stype = stype_val
+                    if stype == "v":
+                        main_output_opts += ["-map", f"0:{spec}"]
+                        video_output_indices[spec] = video_out_count
+                        video_out_count += 1
+                        _register_main_stream("v")
+                    elif stype == "a":
+                        main_output_opts += ["-map", f"0:{spec}"]
+                        audio_output_indices[spec] = audio_out_count
+                        audio_out_count += 1
+                        _register_main_stream("a")
+                    elif stype == "s" and info.get("mkv_ok"):
+                        main_output_opts += ["-map", f"0:{spec}"]
+                        _register_main_stream("s")
+                    elif stype == "t":
+                        main_output_opts += ["-map", f"0:{spec}"]
+                        _register_main_stream("t")
+
+                if "v" not in main_stream_types:
+                    logging.error("no video streams mapped for %s", src)
+                    mark_pending("no video streams mapped")
+                    encode_failed = True
+                    break
+
+                main_output_opts += _metadata_copy_args(main_stream_types)
+                main_output_opts += FFMPEG_OUTPUT_FLAGS
+                src_video_copy = video_copy_specs.get(src, set())
+                src_audio_copy = audio_copy_specs.get(src, set())
+                codec_opts: List[str] = []
+                for spec, out_idx in sorted(
+                    video_output_indices.items(), key=lambda item: item[1]
+                ):
+                    if spec in src_video_copy:
+                        codec_opts += [f"-c:v:{out_idx}", "copy"]
+                    else:
+                        codec_opts += [f"-c:v:{out_idx}", "libsvtav1"]
+                        if use_constant_quality:
+                            codec_opts += [
+                                f"-crf:v:{out_idx}",
+                                str(args.constant_quality),
+                                f"-b:v:{out_idx}",
+                                "0",
+                            ]
+                        else:
+                            codec_opts += [
+                                f"-b:v:{out_idx}",
+                                f"{global_video_kbps}k",
+                            ]
                         codec_opts += [
-                            f"-crf:v:{out_idx}",
-                            str(args.constant_quality),
-                            f"-b:v:{out_idx}",
-                            "0",
+                            f"-preset:v:{out_idx}",
+                            "5",
+                            f"-svtav1-params:v:{out_idx}",
+                            f"lp={args.svt_lp}",
+                            f"-fps_mode:v:{out_idx}",
+                            "passthrough",
                         ]
+                for spec, out_idx in sorted(
+                    audio_output_indices.items(), key=lambda item: item[1]
+                ):
+                    if spec in src_audio_copy:
+                        codec_opts += [f"-c:a:{out_idx}", "copy"]
                     else:
                         codec_opts += [
-                            f"-b:v:{out_idx}",
-                            f"{global_video_kbps}k",
+                            f"-c:a:{out_idx}",
+                            "libopus",
+                            f"-ar:a:{out_idx}",
+                            "48000",
+                            f"-b:a:{out_idx}",
+                            f"{audio_kbps}k",
                         ]
-                    codec_opts += [
-                        f"-preset:v:{out_idx}",
-                        "5",
-                        f"-svtav1-params:v:{out_idx}",
-                        f"lp={args.svt_lp}",
-                        f"-fps_mode:v:{out_idx}",
-                        "passthrough",
-                    ]
-            for spec, out_idx in sorted(
-                audio_output_indices.items(), key=lambda item: item[1]
-            ):
-                if spec in src_audio_copy:
-                    codec_opts += [f"-c:a:{out_idx}", "copy"]
-                else:
-                    codec_opts += [
-                        f"-c:a:{out_idx}",
-                        "libopus",
-                        f"-ar:a:{out_idx}",
-                        "48000",
-                        f"-b:a:{out_idx}",
-                        f"{audio_kbps}k",
-                    ]
-            main_output_opts += codec_opts
-            if "s" in main_stream_types:
-                main_output_opts += ["-c:s", "copy"]
-            if "t" in main_stream_types:
-                main_output_opts += ["-c:t", "copy"]
-            main_output_opts += [
-                "-f",
-                "matroska",
-                str(encode_output_path),
-            ]
-            encode_outputs.append(main_output_opts)
+                main_output_opts += codec_opts
+                if "s" in main_stream_types:
+                    main_output_opts += ["-c:s", "copy"]
+                if "t" in main_stream_types:
+                    main_output_opts += ["-c:t", "copy"]
+                main_output_opts += [
+                    "-f",
+                    "matroska",
+                    str(encode_output_path),
+                ]
+                encode_outputs.append(main_output_opts)
 
-            for export in exports:
-                spec_val = export.get("spec")
-                if not isinstance(spec_val, str) or not spec_val:
-                    continue
-                spec = spec_val
-                export_path = pathlib.Path(export["path"])
-                export_path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    export_path.unlink()
-                except FileNotFoundError:
-                    pass
-                finally_cleanup_files.append(str(export_path))
-                export_stream_types = [export["stype"]]
-                extra_opts: List[str] = ["-map", f"0:{spec}"]
-                extra_opts += _metadata_copy_args(export_stream_types)
-                extra_opts += FFMPEG_OUTPUT_FLAGS
-                muxer = export.get("muxer") or "matroska"
-                if muxer == "data":
-                    extra_opts += ["-c", "copy", "-f", "data", str(export_path)]
-                else:
-                    extra_opts += ["-c", "copy", "-f", muxer, str(export_path)]
-                encode_outputs.append(extra_opts)
+                for export in exports:
+                    spec_val = export.get("spec")
+                    if not isinstance(spec_val, str) or not spec_val:
+                        continue
+                    spec = spec_val
+                    export_path = pathlib.Path(export["path"])
+                    export_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        export_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    finally_cleanup_files.append(str(export_path))
+                    export_stream_types = [export["stype"]]
+                    extra_opts: List[str] = ["-map", f"0:{spec}"]
+                    extra_opts += _metadata_copy_args(export_stream_types)
+                    extra_opts += FFMPEG_OUTPUT_FLAGS
+                    muxer = export.get("muxer") or "matroska"
+                    if muxer == "data":
+                        extra_opts += ["-c", "copy", "-f", "data", str(export_path)]
+                    else:
+                        extra_opts += ["-c", "copy", "-f", muxer, str(export_path)]
+                    encode_outputs.append(extra_opts)
 
-            for output_opts in encode_outputs:
-                encode_cmd.extend(output_opts)
+                for output_opts in encode_outputs:
+                    encode_cmd.extend(output_opts)
 
-            _print_command(encode_cmd)
-            encode_proc = subprocess.run(encode_cmd, env=env)
-            if encode_proc.returncode != 0:
-                logging.error("encode failed for %s", src)
-                mark_pending(f"encode exited with code {encode_proc.returncode}")
-                continue
+                _print_command(encode_cmd)
+                encode_proc = subprocess.run(encode_cmd, env=env)
+                if encode_proc.returncode != 0:
+                    logging.error("encode failed for %s", src)
+                    mark_pending(f"encode exited with code {encode_proc.returncode}")
+                    encode_failed = True
+                    break
 
-            if not encode_output_path.exists():
-                logging.error("expected encoded output missing for %s", src)
-                mark_pending("encoded output missing")
-                continue
+                if not encode_output_path.exists():
+                    logging.error("expected encoded output missing for %s", src)
+                    mark_pending("encoded output missing")
+                    encode_failed = True
+                    break
 
-            missing_exports = False
-            for export in exports:
-                export_path = pathlib.Path(export["path"])
-                if not export_path.exists():
-                    logging.error(
-                        "expected auxiliary export missing for %s stream %s",
-                        src,
-                        export.get("spec"),
-                    )
-                    missing_exports = True
-            if missing_exports:
-                mark_pending("auxiliary export missing")
+                missing_exports = False
+                for export in exports:
+                    export_path = pathlib.Path(export["path"])
+                    if not export_path.exists():
+                        logging.error(
+                            "expected auxiliary export missing for %s stream %s",
+                            src,
+                            export.get("spec"),
+                        )
+                        missing_exports = True
+                if missing_exports:
+                    mark_pending("auxiliary export missing")
+                    encode_failed = True
+                    break
+
+                if not use_constant_quality and global_video_kbps > 0:
+                    overshoot_details: List[Tuple[str, int, int]] = []
+                    stream_measurements: Dict[str, StreamBitrateEstimate] = {}
+                    for spec, out_idx in sorted(
+                        video_output_indices.items(), key=lambda item: item[1]
+                    ):
+                        if spec in src_video_copy:
+                            continue
+                        budget = source_video_budgets.get(spec)
+                        if not budget or budget <= 0:
+                            continue
+                        measurement = _compute_stream_bitrate(
+                            str(encode_output_path), f"v:{out_idx}"
+                        )
+                        if measurement:
+                            stream_measurements[spec] = measurement
+                        actual_bytes: Optional[int] = None
+                        if measurement:
+                            total_val = measurement.get("total_bytes")
+                            if isinstance(total_val, (int, float)):
+                                actual_bytes = int(total_val)
+                        if actual_bytes is None:
+                            continue
+                        if actual_bytes > budget:
+                            overshoot_details.append((spec, budget, actual_bytes))
+                    if overshoot_details:
+                        for spec, budget, actual in overshoot_details:
+                            logging.warning(
+                                "encoded video stream %s for %s exceeded budget (%s > %s bytes)",
+                                spec,
+                                src,
+                                f"{actual:,}",
+                                f"{budget:,}",
+                            )
+                        old_kbps = global_video_kbps
+                        duration_adjusted_limits_bps: List[int] = []
+                        for spec, budget, _actual in overshoot_details:
+                            measurement = stream_measurements.get(spec)
+                            if not measurement:
+                                continue
+                            duration_val = measurement.get("duration")
+                            if (
+                                isinstance(duration_val, (int, float))
+                                and duration_val > 0
+                            ):
+                                duration = float(duration_val)
+                                max_bps = int((budget * 8) / duration)
+                                if max_bps > 0:
+                                    duration_adjusted_limits_bps.append(max_bps)
+                                durations_map = video_encode_durations.setdefault(
+                                    src, {}
+                                )
+                                durations_map[spec] = duration
+                        if duration_adjusted_limits_bps:
+                            new_limit_bps = min(duration_adjusted_limits_bps)
+                            new_limit_kbps = max(1, new_limit_bps // 1000)
+                            new_kbps = max(1, min(old_kbps - 1, new_limit_kbps))
+                        else:
+                            ratios = [
+                                budget / actual
+                                for (_spec, budget, actual) in overshoot_details
+                                if actual > 0
+                            ]
+                            ratio = min(ratios) if ratios else 0.0
+                            if ratio > 0:
+                                new_kbps = max(1, int(old_kbps * ratio))
+                            else:
+                                new_kbps = max(1, old_kbps - 1)
+                        if new_kbps >= old_kbps:
+                            if old_kbps <= 1:
+                                logging.warning(
+                                    "target bitrate already at minimum; cannot reduce further for %s",
+                                    src,
+                                )
+                            else:
+                                new_kbps = old_kbps - 1
+                        if new_kbps < old_kbps:
+                            logging.warning(
+                                "reducing target bitrate from %sk to %sk and retrying encode for %s",
+                                old_kbps,
+                                new_kbps,
+                                src,
+                            )
+                            bits_per_second = new_kbps * 1000
+                            if bits_per_second > 0:
+                                for (
+                                    src_id,
+                                    durations_map,
+                                ) in video_encode_durations.items():
+                                    budget_map = video_encode_budgets.setdefault(
+                                        src_id, {}
+                                    )
+                                    for spec_key, duration in list(
+                                        durations_map.items()
+                                    ):
+                                        if duration <= 0:
+                                            continue
+                                        new_bytes = int(
+                                            (bits_per_second / 8.0) * float(duration)
+                                        )
+                                        if new_bytes <= 0:
+                                            new_bytes = 1
+                                        budget_map[spec_key] = new_bytes
+                            global_video_kbps = new_kbps
+                            try:
+                                encode_output_path.unlink()
+                            except FileNotFoundError:
+                                pass
+                            for export in exports:
+                                export_path = pathlib.Path(export["path"])
+                                try:
+                                    export_path.unlink()
+                                except FileNotFoundError:
+                                    pass
+                            continue
+                        else:
+                            logging.warning(
+                                "keeping encode for %s despite overshoot; unable to reduce bitrate further",
+                                src,
+                            )
+
+                break
+
+            if encode_failed:
                 continue
 
             all_video_mkv_ok = bool(video_infos) and all(
