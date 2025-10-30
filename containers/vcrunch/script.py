@@ -1022,10 +1022,40 @@ def _estimate_other_stream_bytes(
                 source_path, stream_spec, stream_index=stream_index
             )
 
-        if measurement and measurement.get("total_bytes"):
-            estimate = int(measurement["total_bytes"])
-            method = "packet-bytes"
-            bitrate = measurement.get("bitrate") or bitrate
+        if measurement:
+            measured_total_raw = measurement.get("total_bytes")
+            measured_duration = measurement.get("duration")
+            measured_bitrate = measurement.get("bitrate")
+            measured_total = (
+                int(measured_total_raw)
+                if isinstance(measured_total_raw, (int, float))
+                and measured_total_raw > 0
+                else None
+            )
+            duration_bytes: Optional[int] = None
+            if isinstance(measured_bitrate, (int, float)) and isinstance(
+                measured_duration, (int, float)
+            ):
+                approx = int((float(measured_bitrate) / 8.0) * float(measured_duration))
+                if approx > 0:
+                    duration_bytes = approx
+            chosen_candidates = [
+                value for value in (measured_total, duration_bytes) if value is not None
+            ]
+            if chosen_candidates:
+                estimate = max(chosen_candidates)
+                method = "packet-bytes"
+            elif measured_total is not None:
+                estimate = measured_total
+                method = "packet-bytes"
+            if isinstance(measured_bitrate, (int, float)) and measured_bitrate > 0:
+                bitrate = float(measured_bitrate)
+            elif (
+                measured_total is not None
+                and isinstance(measured_duration, (int, float))
+                and measured_duration > 0
+            ):
+                bitrate = (float(measured_total) * 8.0) / float(measured_duration)
         elif bitrate is not None:
             estimate = int((bitrate / 8.0) * duration)
             method = "bitrate"
@@ -2779,6 +2809,17 @@ def main() -> None:
             videos[idx]: shares[idx] for idx in range(len(videos))
         }
 
+    per_file_target_bytes: Dict[str, int] = {}
+    if not use_constant_quality:
+        for src in videos:
+            stream_entries = output_stream_records.get(src, [])
+            stream_total = sum(_entry_bytes(entry) for entry in stream_entries)
+            container_share = output_container_share.get(src, 0)
+            total_budget = stream_total + max(0, container_share)
+            if total_budget < 0:
+                total_budget = 0
+            per_file_target_bytes[src] = total_budget
+
     if args.verbose and videos:
         logging.info("stream budgets by file:")
         order_map = {"v": 0, "a": 1, "s": 2, "d": 3, "t": 4, "container": 5}
@@ -3036,6 +3077,11 @@ def main() -> None:
             os.makedirs(final_dir, exist_ok=True)
         part_path = final_path + ".part"
 
+        if not use_constant_quality:
+            target_allocation = per_file_target_bytes.get(src)
+            if target_allocation is not None:
+                rec["target_bytes"] = int(target_allocation)
+
         def mark_pending(error: Optional[str] = None) -> None:
             rec["status"] = "pending"
             rec.pop("started_at", None)
@@ -3248,41 +3294,53 @@ def main() -> None:
             main_output_opts += FFMPEG_OUTPUT_FLAGS
             src_video_copy = video_copy_specs.get(src, set())
             src_audio_copy = audio_copy_specs.get(src, set())
-            codec_opts: List[str] = []
+            video_codec_opts: List[str] = []
+            audio_codec_opts: List[str] = []
+            video_two_pass_opts: Dict[int, List[str]] = {}
+            two_pass_specs: List[str] = []
             for spec, out_idx in sorted(
                 video_output_indices.items(), key=lambda item: item[1]
             ):
                 if spec in src_video_copy:
-                    codec_opts += [f"-c:v:{out_idx}", "copy"]
+                    video_codec_opts += [f"-c:v:{out_idx}", "copy"]
                 else:
-                    codec_opts += [f"-c:v:{out_idx}", "libsvtav1"]
+                    opts = [f"-c:v:{out_idx}", "libsvtav1"]
                     if use_constant_quality:
-                        codec_opts += [
+                        opts += [
                             f"-crf:v:{out_idx}",
                             str(args.constant_quality),
                             f"-b:v:{out_idx}",
                             "0",
                         ]
                     else:
-                        codec_opts += [
+                        target_kbps = max(1, int(global_video_kbps))
+                        bitrate_str = f"{target_kbps}k"
+                        opts += [
                             f"-b:v:{out_idx}",
-                            f"{global_video_kbps}k",
+                            bitrate_str,
                         ]
-                    codec_opts += [
+                    svt_params = [f"lp={args.svt_lp}"]
+                    if not use_constant_quality:
+                        svt_params.append("rc=1")
+                    opts += [
                         f"-preset:v:{out_idx}",
                         "5",
                         f"-svtav1-params:v:{out_idx}",
-                        f"lp={args.svt_lp}",
+                        ":".join(svt_params),
                         f"-fps_mode:v:{out_idx}",
                         "passthrough",
                     ]
+                    if not use_constant_quality:
+                        video_two_pass_opts[out_idx] = opts.copy()
+                        two_pass_specs.append(spec)
+                    video_codec_opts += opts
             for spec, out_idx in sorted(
                 audio_output_indices.items(), key=lambda item: item[1]
             ):
                 if spec in src_audio_copy:
-                    codec_opts += [f"-c:a:{out_idx}", "copy"]
+                    audio_codec_opts += [f"-c:a:{out_idx}", "copy"]
                 else:
-                    codec_opts += [
+                    audio_codec_opts += [
                         f"-c:a:{out_idx}",
                         "libopus",
                         f"-ar:a:{out_idx}",
@@ -3290,7 +3348,19 @@ def main() -> None:
                         f"-b:a:{out_idx}",
                         f"{audio_kbps}k",
                     ]
-            main_output_opts += codec_opts
+            main_output_opts += video_codec_opts
+            passlog_path: Optional[pathlib.Path] = None
+            needs_two_pass = bool(video_two_pass_opts) and not use_constant_quality
+            if needs_two_pass:
+                passlog_path = streams_root / f"{base_name}.pass"
+                finally_cleanup_files.append(str(passlog_path))
+                main_output_opts += [
+                    "-pass",
+                    "2",
+                    "-passlogfile",
+                    str(passlog_path),
+                ]
+            main_output_opts += audio_codec_opts
             if "s" in main_stream_types:
                 main_output_opts += ["-c:s", "copy"]
             if "t" in main_stream_types:
@@ -3325,11 +3395,37 @@ def main() -> None:
                     extra_opts += ["-c", "copy", "-f", muxer, str(export_path)]
                 encode_outputs.append(extra_opts)
 
+            pass2_cmd = list(encode_cmd)
             for output_opts in encode_outputs:
-                encode_cmd.extend(output_opts)
+                pass2_cmd.extend(output_opts)
 
-            _print_command(encode_cmd)
-            encode_proc = subprocess.run(encode_cmd, env=env)
+            if needs_two_pass and passlog_path is not None:
+                pass1_cmd = list(encode_cmd)
+                pass1_outputs: List[str] = []
+                for spec, out_idx in sorted(
+                    video_output_indices.items(), key=lambda item: item[1]
+                ):
+                    if spec not in two_pass_specs:
+                        continue
+                    pass1_outputs += ["-map", f"0:{spec}"]
+                pass1_outputs += FFMPEG_OUTPUT_FLAGS
+                for out_idx in sorted(video_two_pass_opts):
+                    pass1_outputs.extend(video_two_pass_opts[out_idx])
+                pass1_outputs += ["-an"]
+                pass1_outputs += ["-pass", "1", "-passlogfile", str(passlog_path)]
+                pass1_outputs += ["-f", "null", os.devnull]
+                pass1_cmd.extend(pass1_outputs)
+                _print_command(pass1_cmd)
+                pass1_proc = subprocess.run(pass1_cmd, env=env)
+                if pass1_proc.returncode != 0:
+                    logging.error("encode pass 1 failed for %s", src)
+                    mark_pending(
+                        f"encode pass 1 exited with code {pass1_proc.returncode}"
+                    )
+                    continue
+
+            _print_command(pass2_cmd)
+            encode_proc = subprocess.run(pass2_cmd, env=env)
             if encode_proc.returncode != 0:
                 logging.error("encode failed for %s", src)
                 mark_pending(f"encode exited with code {encode_proc.returncode}")
@@ -3581,6 +3677,29 @@ def main() -> None:
                 mark_pending("failed to finalize remuxed output")
                 continue
 
+            if not use_constant_quality:
+                budget_bytes = per_file_target_bytes.get(src)
+                if budget_bytes is not None and budget_bytes > 0:
+                    try:
+                        final_size = os.path.getsize(stage_part)
+                    except OSError as exc:
+                        logging.error(
+                            "failed to verify final size for %s: %s", src, exc
+                        )
+                        mark_pending("failed to verify final size")
+                        continue
+                    if final_size > budget_bytes:
+                        logging.error(
+                            "final output exceeds budget for %s: %s > %s bytes",
+                            src,
+                            f"{final_size:,}",
+                            f"{budget_bytes:,}",
+                        )
+                        mark_pending(
+                            f"output exceeds budget ({final_size} > {budget_bytes} bytes)"
+                        )
+                        continue
+
             try:
                 shutil.copy2(stage_part, part_path)
                 _apply_source_timestamps(src, part_path, st)
@@ -3647,6 +3766,34 @@ def main() -> None:
     logging.warning("videos encoded (this run): %d / %d", encoded_count, len(videos))
     if all_videos_done(manifest, args.output_dir):
         logging.warning("all videos complete; manifest retained at %s", manifest_path)
+
+    failures: List[Tuple[str, str]] = []
+    items_obj = manifest.get("items")
+    if isinstance(items_obj, dict):
+        for rec in items_obj.values():
+            if not isinstance(rec, dict):
+                continue
+            status = rec.get("status")
+            error_text = rec.get("error")
+            if status == "done" and not error_text:
+                continue
+            name = rec.get("output") or rec.get("src") or "<unknown>"
+            display_name = name if isinstance(name, str) else str(name)
+            display_name = os.path.basename(display_name) or display_name
+            reason: Optional[str]
+            if isinstance(error_text, str) and error_text:
+                reason = error_text
+            elif isinstance(status, str) and status:
+                reason = status
+            else:
+                reason = "unknown failure"
+            failures.append((display_name, reason))
+
+    if failures:
+        logging.error("the following items did not complete successfully:")
+        for name, reason in failures:
+            logging.error("  %s: %s", name, reason)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

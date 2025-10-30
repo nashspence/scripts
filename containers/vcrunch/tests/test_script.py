@@ -246,6 +246,33 @@ def test_estimate_other_stream_bytes_uses_packet_probe(monkeypatch):
     assert entry["method"] == "packet-bytes"
 
 
+def test_estimate_other_stream_bytes_prefers_duration_bytes(monkeypatch):
+    stream = {"codec_type": "data", "index": 3}
+
+    def fake_compute(source_path, spec, *, stream_index=None):
+        assert stream_index == 3
+        return {"bitrate": 32_000.0, "duration": 12.5, "total_bytes": 10_000}
+
+    monkeypatch.setattr(script, "_compute_stream_bitrate", fake_compute)
+
+    debug_entries: list[script.BudgetDebugEntry] = []
+    estimated, entry = script._estimate_other_stream_bytes(
+        stream,
+        12.5,
+        "d",
+        source_path="clip.mkv",
+        stream_spec="d:1",
+        debug_entries=debug_entries,
+        debug_source="clip",
+    )
+
+    expected_bytes = int((32_000.0 / 8.0) * 12.5)
+    assert estimated == expected_bytes
+    assert entry is not None
+    assert entry["bytes"] == expected_bytes
+    assert entry["method"] == "packet-bytes"
+
+
 def test_estimate_other_stream_bytes_defaults_when_probe_missing(monkeypatch):
     stream = {"codec_type": "data"}
     monkeypatch.setattr(script, "_compute_stream_bitrate", lambda *args, **kwargs: None)
@@ -975,6 +1002,169 @@ def test_main_keeps_original_name_when_larger(monkeypatch, tmp_path):
     manifest = json.loads(manifest_path.read_text())
     outputs = [rec["output"] for rec in manifest["items"].values()]
     assert outputs == ["video.mp4"]
+
+
+def test_target_size_budget_overrun(monkeypatch, tmp_path, caplog):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    video = src_dir / "clip.mp4"
+    video.write_bytes(b"z" * (35 * 1024 * 1024))
+    out_dir = tmp_path / "out"
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+
+    argv = [
+        "script.py",
+        "--input",
+        str(src_dir),
+        "--target-size",
+        "30M",
+        "--safety-overhead",
+        "0",
+        "--output-dir",
+        str(out_dir),
+        "--stage-dir",
+        str(stage_dir),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    monkeypatch.setattr(
+        script,
+        "probe_media_info",
+        lambda path: {"is_video": path.endswith(".mp4"), "duration": 10.0},
+    )
+    monkeypatch.setattr(script, "ffprobe_duration", lambda path: 10.0)
+    monkeypatch.setattr(script, "find_start_timecode", lambda path: "00:00:00:00")
+    monkeypatch.setattr(script, "get_container_creation_date", lambda path: None)
+    monkeypatch.setattr(script, "is_valid_media", lambda path: True)
+    monkeypatch.setattr(
+        script, "_apply_container_metadata", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(script, "_attach_sidecar_files", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        script, "_apply_source_timestamps", lambda *args, **kwargs: None
+    )
+
+    base_stream_infos = [
+        {
+            "index": 0,
+            "stream": {"codec_type": "video", "codec_name": "h264", "index": 0},
+            "stype": "v",
+            "mkv_ok": True,
+            "spec": "v:0",
+        },
+        {
+            "index": 1,
+            "stream": {"codec_type": "audio", "codec_name": "aac", "index": 1},
+            "stype": "a",
+            "mkv_ok": True,
+            "spec": "a:0",
+        },
+    ]
+
+    def fake_dump(src, dest, verbose, **kwargs):
+        dest.mkdir(parents=True, exist_ok=True)
+        video_sidecar = dest / "video.stream.h264.mkv"
+        audio_sidecar = dest / "audio.stream.aac.mkv"
+        video_sidecar.write_bytes(b"video")
+        audio_sidecar.write_bytes(b"audio")
+        return {
+            "exports": [
+                {
+                    "path": str(video_sidecar),
+                    "stream": base_stream_infos[0]["stream"],
+                    "stype": "v",
+                    "mkv_ok": True,
+                    "spec": "v:0",
+                },
+                {
+                    "path": str(audio_sidecar),
+                    "stream": base_stream_infos[1]["stream"],
+                    "stype": "a",
+                    "mkv_ok": True,
+                    "spec": "a:0",
+                },
+            ],
+            "attachments": [],
+            "metadata_path": None,
+            "container_tags": {},
+            "stream_infos": base_stream_infos,
+        }
+
+    monkeypatch.setattr(script, "_dump_streams_and_metadata", fake_dump)
+    monkeypatch.setattr(
+        script, "_probe_stream_infos_only", lambda path: base_stream_infos
+    )
+    monkeypatch.setattr(
+        script, "_pick_real_video_stream_index", lambda path: (0, "v:0")
+    )
+
+    def fake_extract(stream):
+        if stream.get("codec_type") == "audio":
+            return 128_000
+        return None
+
+    monkeypatch.setattr(script, "_extract_stream_bitrate", fake_extract)
+
+    def fake_compute(path, spec, *, stream_index=None):
+        if spec == "v:0":
+            return {"bitrate": 2_000_000.0, "duration": 10.0, "total_bytes": 2_500_000}
+        return None
+
+    monkeypatch.setattr(script, "_compute_stream_bitrate", fake_compute)
+
+    caplog.set_level(logging.ERROR)
+
+    captured_cmds: list[list[str]] = []
+
+    def fake_run(cmd, env=None, **kwargs):
+        captured_cmds.append(list(cmd))
+        if cmd and cmd[0] == "ffmpeg":
+            outputs: list[Path] = []
+            for idx, token in enumerate(cmd):
+                if token == "-f" and idx + 2 < len(cmd):
+                    candidate = Path(cmd[idx + 2])
+                    if candidate.name not in {"NUL", "null", "devnull"}:
+                        outputs.append(candidate)
+            if not outputs and cmd:
+                candidate = Path(cmd[-1])
+                if candidate.name not in {"NUL", "null", "devnull"}:
+                    outputs.append(candidate)
+            for output_path in outputs:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(b"encoded")
+        elif cmd and cmd[0] == "mkvmerge":
+            output_path = Path(cmd[2])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"x" * (50 * 1024 * 1024))
+        return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(script.subprocess, "run", fake_run)
+
+    with pytest.raises(SystemExit) as excinfo:
+        script.main()
+
+    assert excinfo.value.code == 1
+    manifest_path = out_dir / script.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    rec = next(iter(manifest["items"].values()))
+    assert rec["status"] == "pending"
+    assert "output exceeds budget" in rec["error"]
+    assert rec["target_bytes"] > 0
+    assert not (out_dir / "clip.mkv").exists()
+    assert any("final output exceeds budget" in rec.message for rec in caplog.records)
+    summary = [
+        rec.message for rec in caplog.records if "did not complete" in rec.message
+    ]
+    assert summary
+    detail = [
+        rec.message for rec in caplog.records if "output exceeds budget" in rec.message
+    ]
+    assert detail
+    assert any(
+        cmd[0] == "ffmpeg" and "clip.encoded.mkv" in " ".join(cmd)
+        for cmd in captured_cmds
+    )
 
 
 def test_collect_all_files(tmp_path):
@@ -1817,8 +2007,21 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     assert output_video.exists()
 
     ffmpeg_cmds = [c for c in captured_cmds if c[0] == "ffmpeg"]
-    assert len(ffmpeg_cmds) == 1
-    encode_cmd = ffmpeg_cmds[0]
+    encode_cmd = next(
+        c for c in ffmpeg_cmds if any(tok.endswith(".encoded.mkv") for tok in c)
+    )
+    pass1_cmds = [c for c in ffmpeg_cmds if "-pass" in c and "1" in c]
+    if "-crf:v:0" in encode_cmd:
+        assert not pass1_cmds
+    else:
+        assert len(pass1_cmds) == 1
+        pass1_cmd = pass1_cmds[0]
+        assert "-f" in pass1_cmd and os.devnull in pass1_cmd
+        assert not any(arg.startswith("-maxrate:v:0") for arg in encode_cmd)
+        assert not any(arg.startswith("-bufsize:v:0") for arg in encode_cmd)
+        assert "-pass" in encode_cmd and "2" in encode_cmd
+        params_idx = encode_cmd.index("-svtav1-params:v:0")
+        assert "rc=1" in encode_cmd[params_idx + 1]
     assert "-ignore_unknown" in encode_cmd
     assert "-fflags" in encode_cmd
     ff_idx = encode_cmd.index("-fflags")
@@ -1984,7 +2187,10 @@ def test_low_bitrate_audio_stream_copied(monkeypatch, tmp_path):
 
     script.main()
 
-    encode_cmd = next(c for c in captured_cmds if c[0] == "ffmpeg")
+    ffmpeg_cmds = [c for c in captured_cmds if c[0] == "ffmpeg"]
+    encode_cmd = next(
+        c for c in ffmpeg_cmds if any(tok.endswith(".encoded.mkv") for tok in c)
+    )
     assert (
         "-c:a:0" in encode_cmd and encode_cmd[encode_cmd.index("-c:a:0") + 1] == "copy"
     )
