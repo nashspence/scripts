@@ -13,6 +13,7 @@
 * And I pass --svt-lp "<lp>"
 * And I run vcrunch
 * And vcrunch remuxes the encoded video with mkvmerge
+* And mkvmerge reports version "95.0"
 * Then vcrunch creates an AV1 file in "<out>"
 * And the file name ends with "<suffix>.mkv"
 * And "<manifest>" records "<src>" as done

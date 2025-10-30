@@ -1618,15 +1618,15 @@ def test_mkvmerge_sets_creation_date_and_attachments(monkeypatch, tmp_path):
     assert output_video.exists()
     assert captured_mux_cmds
     mkv_cmd = captured_mux_cmds[0]
-    assert mkv_cmd[1] == "--disable-track-statistics-tags"
-    assert "--disable-track-statistics-tags" in mkv_cmd
+    assert mkv_cmd[1] == "-o"
+    assert mkv_cmd[3] == "--disable-track-statistics-tags"
     assert "--timestamps" not in mkv_cmd
     assert not captured_edit_cmds
     assert "--date" in mkv_cmd
     date_index = mkv_cmd.index("--date")
     assert mkv_cmd[date_index + 1] == "2024-09-28T15:42:11Z"
     out_index = mkv_cmd.index("-o")
-    assert out_index > date_index
+    assert out_index < date_index
     assert "--title" in mkv_cmd
     title_index = mkv_cmd.index("--title")
     assert mkv_cmd[title_index + 1] == "Original Title"

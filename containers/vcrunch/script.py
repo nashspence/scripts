@@ -3540,11 +3540,13 @@ def main() -> None:
 
             mux_cmd = [
                 "mkvmerge",
+                "-o",
+                remux_output,
                 "--disable-track-statistics-tags",
             ]
             mux_cmd += metadata_args
             mux_cmd += attachment_args
-            mux_cmd += ["-o", remux_output, str(selected_output_path)]
+            mux_cmd.append(str(selected_output_path))
             _print_command(mux_cmd)
             mux_proc = subprocess.run(mux_cmd)
             if mux_proc.returncode != 0:
