@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import json
 import logging
-import mimetypes
 import os
 import pathlib
 import platform
@@ -13,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import zipfile
 from datetime import datetime, timezone
 from fractions import Fraction
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TypedDict, TypeVar, cast
@@ -24,6 +24,8 @@ MANIFEST_NAME = ".job.json"
 MAX_SVT_KBPS = 100_000
 DEFAULT_TARGET_SIZE = "23.30G"
 DEFAULT_SAFETY_OVERHEAD = 0.012
+
+CONTAINER_METADATA_ARCHIVE_NAME = "container-metadata.json"
 
 FFMPEG_INPUT_FLAGS = ["-fflags", "+genpts"]
 FFMPEG_OUTPUT_FLAGS = [
@@ -197,6 +199,103 @@ def _build_stream_attachment_name(
     identifier = _build_stream_identifier(stype, index, stream)
     normalized_ext = _normalize_extension(extension)
     return f"legacy_stream_{identifier}.{normalized_ext}"
+
+
+def _stream_language_code(stream: Dict[str, Any]) -> str:
+    tags = stream.get("tags")
+    if isinstance(tags, dict):
+        for key in ("language", "LANGUAGE", "lang"):
+            value = tags.get(key)
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned:
+                    return _normalize_component(cleaned, "und")
+    return "und"
+
+
+def _export_track_number(export: StreamExport) -> Optional[int]:
+    spec_val = export.get("spec")
+    if isinstance(spec_val, str):
+        match = re.search(r":(\d+)$", spec_val)
+        if match:
+            try:
+                return int(match.group(1)) + 1
+            except ValueError:
+                pass
+    stream = export.get("stream")
+    if isinstance(stream, dict):
+        raw_index = stream.get("index")
+        idx: Optional[int]
+        if isinstance(raw_index, int):
+            idx = raw_index
+        elif isinstance(raw_index, float):
+            idx = int(raw_index)
+        elif isinstance(raw_index, str):
+            text = raw_index.strip()
+            if not text:
+                return None
+            try:
+                idx = int(text)
+            except ValueError:
+                return None
+        else:
+            return None
+        if idx >= 0:
+            return idx + 1
+    return None
+
+
+def _format_track_label(track_number: Optional[int]) -> str:
+    if track_number is None:
+        return "track"
+    return f"track{track_number:02d}"
+
+
+def _codec_label(stream: Dict[str, Any], fallback: str) -> str:
+    codec_name = stream.get("codec_name")
+    codec_tag = stream.get("codec_tag_string")
+    return _normalize_component(codec_name or codec_tag, fallback)
+
+
+def _build_stream_sidecar_name(
+    final_stem: str, export: StreamExport, extension: str
+) -> str:
+    stream = export["stream"]
+    stype = export["stype"]
+    track_label = _format_track_label(_export_track_number(export))
+    ext = extension if extension.startswith(".") else f".{extension}"
+    if stype == "s":
+        lang = _stream_language_code(stream) or "und"
+        parts = [final_stem, track_label, lang]
+    else:
+        codec = _codec_label(stream, "data")
+        parts = [final_stem, track_label, codec]
+    return ".".join(parts) + ext
+
+
+def _build_packet_sidecar_name(final_stem: str, export: StreamExport) -> str:
+    stream = export["stream"]
+    stype = export["stype"]
+    track_label = _format_track_label(_export_track_number(export))
+    parts = [final_stem, track_label]
+    if stype == "s":
+        parts.append(_stream_language_code(stream) or "und")
+        parts.append("subtitle")
+    else:
+        parts.append("data")
+    parts.append("timestamps")
+    return ".".join(parts) + ".json"
+
+
+def _build_data_archive_name(export: StreamExport, extension: str) -> str:
+    stream = export["stream"]
+    track_label = _format_track_label(_export_track_number(export))
+    codec = _codec_label(stream, "data")
+    ext = extension.lstrip(".")
+    base = ".".join(part for part in (track_label, codec) if part)
+    if ext:
+        return f"{base}.{ext}"
+    return base
 
 
 def _stream_language(stream: Dict[str, Any]) -> str:
@@ -1102,61 +1201,12 @@ def _packet_sidecar_path(
     return None
 
 
-def _guess_mime_type(path: pathlib.Path) -> str:
-    mime, _ = mimetypes.guess_type(path.name)
-    if mime:
-        return mime
-    return "application/octet-stream"
-
-
-def _clean_attachment_description(text: str) -> str:
-    cleaned = re.sub(r"\s+", " ", text.strip())
-    cleaned = cleaned.replace(":", ";")
-    if not cleaned:
-        return "attachment"
-    return cleaned[:120]
-
-
 def _format_size_for_log(num_bytes: int) -> str:
     return (
         f"{num_bytes / float(1024**2):.2f} MiB ({num_bytes:,} bytes)"
         if num_bytes >= 0
         else f"{num_bytes:,} bytes"
     )
-
-
-def _build_attachment_args(
-    attachments: Sequence[Tuple[pathlib.Path, str, str]]
-) -> List[str]:
-    args: List[str] = []
-    for path, description, mime_type in attachments:
-        if not path.exists():
-            continue
-        desc = _clean_attachment_description(description) or path.name
-        name = path.name
-        label = name or desc or str(path)
-        try:
-            size = path.stat().st_size
-        except OSError as exc:
-            logging.info(
-                "including attachment %s: size unavailable (%s)",
-                label,
-                exc,
-            )
-        else:
-            logging.info(
-                "including attachment %s: %s",
-                label,
-                _format_size_for_log(size),
-            )
-        if name:
-            args.extend(["--attachment-name", name])
-        if mime_type:
-            args.extend(["--attachment-mime-type", mime_type])
-        if desc:
-            args.extend(["--attachment-description", desc])
-        args.extend(["--attach-file", str(path)])
-    return args
 
 
 def _apply_birthtime(path: str, birthtime: float) -> None:
@@ -3457,40 +3507,41 @@ def main() -> None:
                             selected_output_path = remux_source_path
                             metadata["used_original"] = True
 
-            attachment_entries: List[Tuple[pathlib.Path, str, str]] = []
+            final_output_path_obj = pathlib.Path(final_path)
+            final_parent_path = final_output_path_obj.parent
+            final_stem = final_output_path_obj.stem
+
+            sidecar_copy_plans: List[Tuple[pathlib.Path, pathlib.Path]] = []
+            data_archive_entries: List[Tuple[pathlib.Path, str]] = []
+
             for export in exports:
                 export_path = pathlib.Path(export["path"])
-                stream = export.get("stream", {})
-                codec_hint = cast(
-                    str,
-                    (
-                        stream.get("codec_name")
-                        or stream.get("codec_tag_string")
-                        or "unknown"
-                    ),
-                )
-                description = f"{export['stype'].upper()} stream export ({codec_hint})"
-                attachment_entries.append(
-                    (export_path, description, _guess_mime_type(export_path))
-                )
+                extension = export_path.suffix or ""
+                if (
+                    export.get("stype") == "d"
+                    and export.get("muxer")
+                    and export.get("muxer") != "data"
+                ):
+                    arcname = _build_data_archive_name(export, extension)
+                    data_archive_entries.append((export_path, arcname))
+                else:
+                    sidecar_name = _build_stream_sidecar_name(
+                        final_stem, export, extension
+                    )
+                    sidecar_copy_plans.append(
+                        (export_path, final_parent_path / sidecar_name)
+                    )
                 packet_sidecar = _packet_sidecar_path(export, export_path)
                 if packet_sidecar is not None and packet_sidecar.exists():
-                    attachment_entries.append(
-                        (
-                            packet_sidecar,
-                            f"{export['stype'].upper()} stream packet timestamps",
-                            "application/json",
-                        )
+                    packet_name = _build_packet_sidecar_name(final_stem, export)
+                    sidecar_copy_plans.append(
+                        (packet_sidecar, final_parent_path / packet_name)
                     )
 
             if metadata_sidecar is not None:
                 if metadata_sidecar.exists():
-                    attachment_entries.append(
-                        (
-                            metadata_sidecar,
-                            "Pre-re-encode metadata",
-                            "application/json",
-                        )
+                    data_archive_entries.append(
+                        (metadata_sidecar, CONTAINER_METADATA_ARCHIVE_NAME)
                     )
                 finally_cleanup_files.append(str(metadata_sidecar))
 
@@ -3536,8 +3587,6 @@ def main() -> None:
                 mark_pending("failed to prepare container metadata")
                 continue
 
-            attachment_args = _build_attachment_args(attachment_entries)
-
             mux_cmd = [
                 "mkvmerge",
                 "-o",
@@ -3545,7 +3594,6 @@ def main() -> None:
                 "--disable-track-statistics-tags",
             ]
             mux_cmd += metadata_args
-            mux_cmd += attachment_args
             mux_cmd.append(str(selected_output_path))
             _print_command(mux_cmd)
             mux_proc = subprocess.run(mux_cmd)
@@ -3590,6 +3638,44 @@ def main() -> None:
                 continue
 
             os.replace(part_path, final_path)
+
+            try:
+                for src_path, dest_path in sidecar_copy_plans:
+                    if not src_path.exists():
+                        logging.warning(
+                            "expected sidecar source missing for %s: %s",
+                            src,
+                            src_path,
+                        )
+                        continue
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_path, dest_path)
+                zip_dest = final_parent_path / f"{final_stem}.data-streams.zip"
+                if data_archive_entries:
+                    zip_dest.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        zip_dest.unlink()
+                    except FileNotFoundError:
+                        pass
+                    with zipfile.ZipFile(
+                        zip_dest, "w", compression=zipfile.ZIP_DEFLATED
+                    ) as zip_file:
+                        for src_path, arcname in data_archive_entries:
+                            if not src_path.exists():
+                                logging.warning(
+                                    "expected data export missing for %s: %s",
+                                    src,
+                                    src_path,
+                                )
+                                continue
+                            zip_file.write(src_path, arcname)
+                else:
+                    if zip_dest.exists():
+                        zip_dest.unlink()
+            except Exception as exc:
+                logging.error("failed to create sidecar exports for %s: %s", src, exc)
+                mark_pending("failed to create sidecar exports")
+                continue
 
             rec.update({"status": "done", "finished_at": now_utc_iso()})
             manifest["items"][key] = rec

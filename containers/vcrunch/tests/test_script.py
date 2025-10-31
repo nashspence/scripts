@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import types
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -1535,6 +1536,7 @@ def test_mkvmerge_sets_creation_date_and_attachments(monkeypatch, tmp_path):
     captured_mux_cmds: list[list[str]] = []
     captured_edit_cmds: list[list[str]] = []
     created_metadata_files: list[Path] = []
+    created_metadata_contents: list[str] = []
 
     def fake_run(cmd, env=None, **kwargs):
         if cmd[0] == "ffmpeg":
@@ -1567,6 +1569,7 @@ def test_mkvmerge_sets_creation_date_and_attachments(monkeypatch, tmp_path):
         metadata_path = dest / "legacy_metadata.json"
         metadata_path.write_text("{}\n", encoding="utf-8")
         created_metadata_files.append(metadata_path)
+        created_metadata_contents.append("{}\n")
         return {
             "exports": [
                 {
@@ -1637,20 +1640,14 @@ def test_mkvmerge_sets_creation_date_and_attachments(monkeypatch, tmp_path):
     out_stat = output_video.stat()
     assert pytest.approx(out_stat.st_mtime, rel=0, abs=1) == desired_mtime
     assert created_metadata_files
-    metadata_file = created_metadata_files[0]
-    metadata_attach_indices = [
-        idx
-        for idx, token in enumerate(mkv_cmd)
-        if token == "--attach-file" and mkv_cmd[idx + 1] == str(metadata_file)
-    ]
-    assert metadata_attach_indices
-    attach_index = metadata_attach_indices[0]
-    assert mkv_cmd[attach_index - 6] == "--attachment-name"
-    assert mkv_cmd[attach_index - 5] == metadata_file.name
-    assert mkv_cmd[attach_index - 4] == "--attachment-mime-type"
-    assert mkv_cmd[attach_index - 3] == "application/json"
-    assert mkv_cmd[attach_index - 2] == "--attachment-description"
-    assert mkv_cmd[attach_index - 1] == "Pre-re-encode metadata"
+    assert "--attach-file" not in mkv_cmd
+    data_zip = out_dir / "a.data-streams.zip"
+    assert data_zip.exists()
+    assert created_metadata_contents
+    with zipfile.ZipFile(data_zip, "r") as zf:
+        assert script.CONTAINER_METADATA_ARCHIVE_NAME in zf.namelist()
+        metadata_payload = zf.read(script.CONTAINER_METADATA_ARCHIVE_NAME)
+    assert metadata_payload.decode("utf-8") == created_metadata_contents[0]
 
 
 def test_dump_streams_data_sidecar_uses_container(monkeypatch, tmp_path):
