@@ -16,8 +16,8 @@ from typing import Optional
 
 import pytest
 
-_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "script.py"
-_SPEC = importlib.util.spec_from_file_location("script", _SCRIPT_PATH)
+_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "vcrunch.py"
+_SPEC = importlib.util.spec_from_file_location("vcrunch", _SCRIPT_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 script = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(script)
@@ -326,7 +326,7 @@ def test_video_copy_budget_uses_measured_bytes(monkeypatch, tmp_path, caplog):
     stage_dir.mkdir()
 
     argv = [
-        "script.py",
+        "vcrunch.py",
         "--input",
         str(src_dir),
         "--target-size",
@@ -1131,7 +1131,7 @@ def test_copy_if_fits(monkeypatch, tmp_path):
     (src_dir / "b.txt").write_text("b")
     out_dir = tmp_path / "out"
     argv = [
-        "script.py",
+        "vcrunch.py",
         "--input",
         str(src_dir),
         "--target-size",
@@ -1170,7 +1170,7 @@ def test_move_if_fits(monkeypatch, tmp_path):
     video.write_text("a")
     out_dir = tmp_path / "out"
     argv = [
-        "script.py",
+        "vcrunch.py",
         "--input",
         str(src_dir),
         "--target-size",
@@ -1202,7 +1202,7 @@ def test_constant_quality_groups_and_command(monkeypatch, tmp_path):
     stage_dir.mkdir()
 
     argv = [
-        "script.py",
+        "vcrunch.py",
         "--input",
         str(src_dir),
         "--target-size",
@@ -1398,7 +1398,7 @@ def test_constant_quality_ignores_fit_short_circuit(monkeypatch, tmp_path):
     stage_dir.mkdir()
 
     argv = [
-        "script.py",
+        "vcrunch.py",
         "--input",
         str(src_dir),
         "--target-size",
@@ -1506,7 +1506,7 @@ def test_mkvmerge_sets_creation_date_and_attachments(monkeypatch, tmp_path):
     stage_dir.mkdir()
 
     argv = [
-        "script.py",
+        "vcrunch.py",
         "--input",
         str(src_dir),
         "--target-size",
@@ -1705,7 +1705,7 @@ def test_mov_with_data_stream_outputs_mkv(monkeypatch, tmp_path):
     stage_dir.mkdir()
 
     argv = [
-        "script.py",
+        "vcrunch.py",
         "--input",
         str(src_dir),
         "--target-size",
@@ -1872,7 +1872,7 @@ def test_low_bitrate_audio_stream_copied(monkeypatch, tmp_path):
     stage_dir.mkdir()
 
     argv = [
-        "script.py",
+        "vcrunch.py",
         "--input",
         str(src_dir),
         "--target-size",
@@ -2005,7 +2005,7 @@ def test_low_bitrate_video_stream_copied(monkeypatch, tmp_path):
     stage_dir.mkdir()
 
     argv = [
-        "script.py",
+        "vcrunch.py",
         "--input",
         str(src_dir),
         "--target-size",
@@ -2145,7 +2145,7 @@ def test_sidecar_files_are_renamed(monkeypatch, tmp_path):
     stage_dir.mkdir()
 
     argv = [
-        "script.py",
+        "vcrunch.py",
         "--input",
         str(src_dir),
         "--target-size",

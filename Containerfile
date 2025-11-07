@@ -22,5 +22,5 @@ COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 
 WORKDIR /app
-COPY script.py /app/vcrunch
+COPY vcrunch.py /app/vcrunch
 ENTRYPOINT ["python", "/app/vcrunch"]

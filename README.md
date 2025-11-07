@@ -5,7 +5,7 @@ vcrunch is a containerised utility for remuxing and compressing video sources in
 ## Repository layout
 
 - `Containerfile` – build definition for the runtime image.
-- `script.py` – main entrypoint for the tool.
+- `vcrunch.py` – main entrypoint for the tool.
 - `spec.md` – Gauge specification describing expected behaviour.
 - `tests/` – unit tests for the script.
 
