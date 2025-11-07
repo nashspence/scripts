@@ -2,6 +2,7 @@
 
 # mypy: ignore-errors
 
+import importlib.util
 import io
 import json
 import logging
@@ -15,8 +16,11 @@ from typing import Optional
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-import containers.vcrunch.script as script  # noqa: E402
+_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "script.py"
+_SPEC = importlib.util.spec_from_file_location("script", _SCRIPT_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+script = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(script)
 
 
 def test_parse_size():
