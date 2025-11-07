@@ -1,33 +1,26 @@
 # syntax=docker/dockerfile:1.7
 ARG TARGETPLATFORM
-ARG VERSION
-ARG VCS_REF
-ARG VCS_URL
+ARG VERSION=dev
+ARG VCS_REF=unknown
+ARG VCS_URL=https://example.invalid
 
 FROM --platform=$TARGETPLATFORM mwader/static-ffmpeg:latest AS ffmpeg
-
 FROM --platform=$TARGETPLATFORM python:3.12-alpine
 
 LABEL org.opencontainers.image.source="${VCS_URL}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.version="${VERSION}"
 
-# Alpine packages (no apt). exiftool is Perl-based.
-RUN apk add --no-cache \
-      coreutils \
-      tzdata \
-      perl \
-      exiftool \
-      mediainfo
+# Add edge/community repo only for mkvtoolnix 95.0, then install
+RUN set -eux; \
+    echo "https://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories; \
+    apk add --no-cache coreutils curl tar xz mkvtoolnix; \
+    mkvmerge --version
 
-# Bring in statically-built ffmpeg/ffprobe from mwader stage
+# Bring in static ffmpeg/ffprobe
 COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 
-# Python deps
-RUN pip install --no-cache-dir python-dateutil
-
 WORKDIR /app
-COPY script.py /app/guess_date.py
-
-ENTRYPOINT ["python", "/app/guess_date.py"]
+COPY vcrunch.py /app/vcrunch
+ENTRYPOINT ["python", "/app/vcrunch"]
