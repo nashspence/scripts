@@ -33,3 +33,14 @@ Build and run the container image locally to exercise the full workflow:
 podman build -t vcrunch .
 podman run --rm -v "$PWD:/workspace" vcrunch --help
 ```
+
+## Release
+
+Cut a semantic version tag to publish a new container image to GitHub Container Registry:
+
+```bash
+git tag -a v1.2.3 -m "v1.2.3"
+git push origin v1.2.3
+```
+
+The release workflow builds multi-architecture images and pushes them to `ghcr.io/nashspence/vcrunch` with the tag name, `latest`, and the Git commit SHA.
