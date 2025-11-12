@@ -3,8 +3,6 @@
 ARG VERSION=dev
 ARG VCS_REF=unknown
 ARG VCS_URL=https://example.invalid
-ARG TARGETPLATFORM
-
 FROM --platform=$TARGETPLATFORM mwader/static-ffmpeg:latest AS ffmpeg
 FROM --platform=$TARGETPLATFORM python:3.12-alpine
 
