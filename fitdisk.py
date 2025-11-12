@@ -151,7 +151,7 @@ def bundle_directories(
     if not groups:
         return []
 
-    tmp_base = os.path.join(output_dir, ".fittodisk_tmp")
+    tmp_base = os.path.join(output_dir, ".fitdisk_tmp")
     if os.path.exists(tmp_base):
         shutil.rmtree(tmp_base)
     os.makedirs(tmp_base, exist_ok=True)

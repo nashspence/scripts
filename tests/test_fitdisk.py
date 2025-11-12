@@ -1,16 +1,19 @@
-import sys
+import importlib.util
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-import containers.fittodisk.script as script  # noqa: E402
+_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "fitdisk.py"
+_SPEC = importlib.util.spec_from_file_location("fitdisk", _SCRIPT_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+fitdisk = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(fitdisk)
 
 
 def test_parse_size() -> None:
-    assert script.parse_size("1") == 1
-    assert script.parse_size("1k") == 1024
-    assert script.parse_size("1.5m") == int(1.5 * 1024**2)
-    assert script.parse_size("2g") == 2 * 1024**3
-    assert script.parse_size("3t") == 3 * 1024**4
+    assert fitdisk.parse_size("1") == 1
+    assert fitdisk.parse_size("1k") == 1024
+    assert fitdisk.parse_size("1.5m") == int(1.5 * 1024**2)
+    assert fitdisk.parse_size("2g") == 2 * 1024**3
+    assert fitdisk.parse_size("3t") == 3 * 1024**4
 
 
 def _make_file(path: Path, size: int) -> None:
@@ -32,7 +35,7 @@ def test_bundle_directories_copy(tmp_path: Path) -> None:
         _make_file(src / name, size)
     _make_file(src / ".job.json", 512)
 
-    created = script.bundle_directories(str(src), str(out), 4096)
+    created = fitdisk.bundle_directories(str(src), str(out), 4096)
     assert created == ["01", "02"]
 
     first_dir = out / "01"
@@ -60,7 +63,7 @@ def test_bundle_directories_move(tmp_path: Path) -> None:
     _make_file(src / "clip1.mkv", 1024)
     _make_file(src / "clip2.mkv", 1024)
 
-    created = script.bundle_directories(str(src), str(out), 1500, move=True)
+    created = fitdisk.bundle_directories(str(src), str(out), 1500, move=True)
     assert created == ["01", "02"]
 
     assert not any(src.iterdir())

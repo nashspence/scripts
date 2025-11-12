@@ -24,25 +24,12 @@ repos:
     hooks:
       - id: flake8
         args: [--max-line-length=88, --extend-ignore=E501]
-  - repo: https://github.com/scop/pre-commit-shfmt
-    rev: v3.8.0-1
-    hooks:
-      - id: shfmt
-        args: [-i, '4', -ci, -sr, -bn]
-  - repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: v0.10.0.1
-    hooks:
-      - id: shellcheck
-        args: [--shell=sh, --external-sources, --check-sourced, --enable=all, --severity=warning]
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.10.0
     hooks:
       - id: mypy
         args: [--namespace-packages, --strict]
         additional_dependencies:
-          - types-Pillow
-          - types-python-dateutil
-          - pycdlib
           - pytest>=8
   - repo: local
     hooks:
