@@ -1114,7 +1114,7 @@ def main(argv: list[str] | None = None) -> int:
     raw_args = sys.argv[1:] if argv is None else argv
 
     parser = argparse.ArgumentParser(
-        prog="guess_date",
+        prog="when",
         description="Determine the most likely creation date for a media file.",
     )
     parser.add_argument(
