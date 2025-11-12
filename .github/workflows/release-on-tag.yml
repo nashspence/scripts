@@ -1,0 +1,44 @@
+name: release-on-tag
+
+on:
+  push:
+    tags:
+      - '*.*.*'
+    tags-ignore:
+      - '*-*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare distribution
+        run: |
+          set -euo pipefail
+          mkdir -p dist/on-mount-agent
+          cp install.sh dist/on-mount-agent/
+          cp -R launch-agents dist/on-mount-agent/
+          cp README.md dist/on-mount-agent/
+          chmod +x dist/on-mount-agent/install.sh
+
+      - name: Create archive
+        id: archive
+        run: |
+          set -euo pipefail
+          cd dist
+          ARCHIVE="on-mount-agent-macos-${GITHUB_REF_NAME}.zip"
+          ditto -c -k --sequesterRsrc --keepParent on-mount-agent "$ARCHIVE"
+          echo "archive=$PWD/$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.archive.outputs.archive }}
+          name: on-mount-agent ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}

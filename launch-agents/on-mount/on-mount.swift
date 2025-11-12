@@ -2,14 +2,31 @@ import AppKit
 import Foundation
 
 let marker = ".com.nashspence.scripts.on-mount.id"
-let onmountDir = FileManager.default.homeDirectoryForCurrentUser.path + "/git/osx-on-mount"
+
+let triggersDir: String = {
+    let env = ProcessInfo.processInfo.environment
+    if let override = env["ON_MOUNT_TRIGGERS_DIR"], !override.isEmpty {
+        return override
+    }
+
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    let url = home
+        .appendingPathComponent("Library")
+        .appendingPathComponent("Application Support")
+        .appendingPathComponent("on-mount-agent")
+        .appendingPathComponent("triggers")
+    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url.path
+}()
 
 @inline(__always) func log(_ s: String) {
     FileHandle.standardOutput.write((s + "\n").data(using: .utf8)!)
 }
+
 @inline(__always) func warn(_ s: String) {
     FileHandle.standardError.write(("[WARN] " + s + "\n").data(using: .utf8)!)
 }
+
 @inline(__always) func shQuote(_ s: String) -> String {
     "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
@@ -25,7 +42,8 @@ func maybeRun(for volumeURL: URL) {
         !name.isEmpty
     else { return }
 
-    let prog = URL(fileURLWithPath: onmountDir).appendingPathComponent(name).path
+    let scriptURL = URL(fileURLWithPath: triggersDir).appendingPathComponent(name)
+    let prog = scriptURL.path
     guard FileManager.default.isExecutableFile(atPath: prog) else {
         warn("Executable not found: \(prog)")
         return
@@ -34,11 +52,12 @@ func maybeRun(for volumeURL: URL) {
     log("Mount: \(volumeURL.path) → \(prog)")
 
     let script = """
-    tell application "Terminal"
+    tell application \"Terminal\"
       activate
-      do script "exec \(shQuote(prog)) \(shQuote(volumeURL.path))"
+      do script \"exec \(shQuote(prog)) \(shQuote(volumeURL.path))\"
     end tell
     """
+
     if let asObj = NSAppleScript(source: script) {
         var err: NSDictionary?
         _ = asObj.executeAndReturnError(&err)
@@ -48,7 +67,6 @@ func maybeRun(for volumeURL: URL) {
     }
 }
 
-// --- Top-level startup code (requires NO -parse-as-library) ---
 let nc = NSWorkspace.shared.notificationCenter
 var token: NSObjectProtocol?
 token = nc.addObserver(forName: NSWorkspace.didMountNotification,
@@ -63,5 +81,5 @@ token = nc.addObserver(forName: NSWorkspace.didMountNotification,
     }
 }
 
-log("on-mount listener started (pid \(getpid()))")
+log("on-mount listener started (pid \(getpid())) — triggers directory: \(triggersDir)")
 RunLoop.main.run()
