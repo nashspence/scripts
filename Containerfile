@@ -1,11 +1,19 @@
+# syntax=docker/dockerfile:1.7
+
+ARG VERSION=dev
+ARG VCS_REF=unknown
+ARG VCS_URL=https://example.invalid
+
 FROM python:3.12-alpine
-ARG VERSION
-ARG VCS_REF
-ARG VCS_URL
+
 LABEL org.opencontainers.image.source="${VCS_URL}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.version="${VERSION}"
-RUN apk add --no-cache cdrkit coreutils
+
+RUN set -eux; \
+    apk add --no-cache cdrkit coreutils; \
+    genisoimage --version
+
 WORKDIR /app
-COPY script.py /app/mkiso
+COPY mkiso.py /app/mkiso
 ENTRYPOINT ["python", "/app/mkiso"]
