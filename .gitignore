@@ -2,5 +2,7 @@
 /.pytest_cache
 /.gauge
 /logs
+__pycache__/
+manifest.json
 node_modules/
 .DS_Store
