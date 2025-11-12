@@ -1,6 +1,2 @@
-/.mypy_cache
-/.pytest_cache
-/.gauge
-/logs
-node_modules/
 .DS_Store
+dist/

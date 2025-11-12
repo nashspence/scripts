@@ -1,35 +1,29 @@
 #!/bin/sh
-# podman-machine-agent — socket-activated; starts VM, holds while connected,
-# stops if last client disconnects
+# use-machine-agent — socket-activated Podman machine lifecycle manager.
 
 set -eu
 [ "${DEBUG:-}" ] && set -x
 
-# --- PATH (homebrew first), then system -----------------------------------
 PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
-# --- deps ------------------------------------------------------------------
 command -v podman >/dev/null 2>&1 || { printf '%s\n' 'podman not found' >&2; exit 127; }
 
-# --- Config (globals needed by traps) -------------------------------------
-MACHINE=${MACHINE:-com.nashspence.scripts}
-
-# Guard against REPO_DIR being unset under `set -u`
-_repo_root=${REPO_DIR:-$HOME}
-
-STATE_DIR=${STATE_DIR:-${_repo_root}/osx/launch-agents/podman-machine/data}
-HOLDS_DIR=${HOLDS_DIR:-$STATE_DIR/holds}
+MACHINE=${USE_MACHINE_NAME:-${MACHINE:-com.nashspence.use-machine}}
+DEFAULT_INSTALL_ROOT="$HOME/Library/Application Support/use-machine"
+INSTALL_ROOT=${INSTALL_ROOT:-$DEFAULT_INSTALL_ROOT}
+STATE_DIR=${STATE_DIR:-${INSTALL_ROOT}/state}
+HOLDS_DIR=${HOLDS_DIR:-${STATE_DIR}/holds}
 
 STOP_GRACE_SECS=${STOP_GRACE_SECS:-1}
-QUIESCE_MS=${QUIESCE_MS:-1500}      # watch briefly for back-to-back clients
+QUIESCE_MS=${QUIESCE_MS:-1500}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-90}
 
 mkdir -p "$STATE_DIR"
-exec 3>>"$STATE_DIR/agent.log"
+exec 3>>"$STATE_DIR/use-machine-agent.log"
 
 log() {
-  printf '%s podman-machine-agent[%s]: %s\n' "$(date '+%F %T')" "$$" "$*" >&3
+  printf '%s use-machine-agent[%s]: %s\n' "$(date '+%F %T')" "$$" "$*" >&3
 }
 
 gc_holds() {
@@ -64,11 +58,9 @@ wait_podman_ready() {
   done
 }
 
-# --- Main ------------------------------------------------------------------
 mkdir -p "$HOLDS_DIR"
 gc_holds
 
-# Register a hold file (global path so traps can see it after `main` returns)
 HOLD_FILE="$HOLDS_DIR/$$"
 printf '%s\n' "$$" > "$HOLD_FILE"
 
@@ -81,11 +73,9 @@ log "connection accepted; ensuring machine '$MACHINE' is running"
 podman machine start "$MACHINE" >/dev/null 2>&1 || true
 wait_podman_ready || true
 
-# Notify the client that the machine is ready, then block until it disconnects
 printf 'ready\n'
 cat >/dev/null || true
 
-# Client disconnected — debounce, then quiesce-watch for a short window
 cleanup_hold
 [ "$STOP_GRACE_SECS" -gt 0 ] && sleep "$STOP_GRACE_SECS"
 
