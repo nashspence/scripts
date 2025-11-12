@@ -6,9 +6,20 @@
 * When I pass --src-dir "<src>"
 * And I pass --out-dir "<out>"
 * And I pass --out-file "<name>.iso"
+* And I pass --label "<label>"
 * And I run mkiso
 * Then mkiso writes the ISO to "<out>/<name>.iso"
+* And mkiso sets the volume label to "<label>"
 * And mkiso prints "<name>.iso"
+
+## Scenario: auto-named output
+* Given a directory "<src>" containing files
+* And an output directory "<out>"
+* When I pass --src-dir "<src>"
+* And I pass --out-dir "<out>"
+* And I run mkiso
+* Then mkiso writes the ISO to "<out>/<timestamp>.iso"
+* And mkiso prints "<timestamp>.iso"
 
 ## Scenario: verbose logging
 * Given a directory "<src>" containing files
@@ -16,19 +27,8 @@
 * When I pass --src-dir "<src>"
 * And I pass --out-dir "<out>"
 * And I pass --out-file "<name>.iso"
-* And I pass --media-type "<media>"
 * And I pass --verbose
 * And I run mkiso
-* Then mkiso writes the ISO to "<out>/<name>.iso"
-* And mkiso prints "<name>.iso"
-
-## Scenario: custom media type
-* Given a directory "<src>" containing files
-* And an output directory "<out>"
-* When I pass --src-dir "<src>"
-* And I pass --out-dir "<out>"
-* And I pass --out-file "<name>.iso"
-* And I pass --media-type "<media>"
-* And I run mkiso
-* Then mkiso writes the ISO to "<out>/<name>.iso"
+* Then mkiso logs progress to stderr
+* And mkiso writes the ISO to "<out>/<name>.iso"
 * And mkiso prints "<name>.iso"
