@@ -1,0 +1,35 @@
+name: release-on-tag
+
+on:
+  push:
+    tags:
+      - '*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build release archive
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME}"
+          work="dist/use-machine-${version}"
+          mkdir -p "${work}"
+          cp -R bin "${work}/"
+          cp install.sh "${work}/"
+          cp -R osx "${work}/"
+          cp README.md "${work}/"
+          tar -czf "dist/use-machine-${version}-macos.tar.gz" -C dist "use-machine-${version}"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/use-machine-${{ github.ref_name }}-macos.tar.gz
+          generate_release_notes: true
