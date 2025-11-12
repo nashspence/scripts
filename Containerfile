@@ -4,13 +4,16 @@ ARG VERSION
 ARG VCS_REF
 ARG VCS_URL
 
+FROM --platform=$TARGETPLATFORM mwader/static-ffmpeg:latest AS ffmpeg
 FROM --platform=$TARGETPLATFORM python:3.12-alpine
 
 LABEL org.opencontainers.image.source="${VCS_URL}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.version="${VERSION}"
 
-RUN apk add --no-cache coreutils
+RUN apk add --no-cache libarchive-tools coreutils font-dejavu mkvtoolnix
+COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 WORKDIR /app
-COPY script.py /app/fittodisk
-ENTRYPOINT ["python", "/app/fittodisk"]
+COPY qcut.py /app/qcut.py
+ENTRYPOINT ["python", "/app/qcut.py"]

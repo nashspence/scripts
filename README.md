@@ -1,6 +1,20 @@
-# Scripts
+# qcut
 
-Utility scripts for cross-platform workflows.
+`qcut` automatically assembles highlight reels from a directory of source videos. It mirrors the behaviour of the original shell workflow: probe durations, plan clip lengths, encode each segment with SVT-AV1, and append them into a final Matroska file with timestamp overlays.
+
+## Usage
+
+Build the container image and run it against a directory of source clips:
+
+```bash
+podman build -t qcut .
+podman run --rm \
+  -v "$PWD/in:/in:ro" \
+  -v "$PWD/out:/out" \
+  qcut --src-dir /in --autoedit-dir /out --svt-lp 6
+```
+
+Adjust the `--target`, `--min`, `--max`, and `--svt-*` options to suit your edit plan. The container will persist its resumable manifest inside the output directory.
 
 ## Development
 
@@ -11,10 +25,7 @@ pre-commit install --install-hooks
 pre-commit run --files <files>
 ```
 
-Hooks cover formatting, linting, strict type checks with `mypy`, and Gauge spec validation.
-The Gauge CLI is installed automatically via pre-commit.
-
-Run tests:
+Run unit tests:
 
 ```bash
 pytest
