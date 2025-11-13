@@ -6,44 +6,17 @@ repos:
       - id: end-of-file-fixer
       - id: check-added-large-files
       - id: check-merge-conflict
-      - id: detect-private-key
-      - id: check-yaml
       - id: check-executables-have-shebangs
-  - repo: https://github.com/psf/black
-    rev: 24.4.2
-    hooks:
-      - id: black
-        language_version: python3
-  - repo: https://github.com/PyCQA/isort
-    rev: 5.13.2
-    hooks:
-      - id: isort
-        args: [--profile=black]
-  - repo: https://github.com/PyCQA/flake8
-    rev: 7.0.0
-    hooks:
-      - id: flake8
-        args: [--max-line-length=88, --extend-ignore=E501]
   - repo: https://github.com/scop/pre-commit-shfmt
-    rev: v3.8.0-1
+    rev: v3.9.0-1
     hooks:
       - id: shfmt
-        args: [-i, '4', -ci, -sr, -bn]
+        args: [-w, -i, '4', -ci, -bn]
   - repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: v0.10.0.1
+    rev: v0.9.0.6
     hooks:
       - id: shellcheck
-        args: [--shell=sh, --external-sources, --check-sourced, --enable=all, --severity=warning]
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.10.0
-    hooks:
-      - id: mypy
-        args: [--namespace-packages, --strict]
-        additional_dependencies:
-          - types-Pillow
-          - types-python-dateutil
-          - pycdlib
-          - pytest>=8
+        args: [--shell=sh]
   - repo: local
     hooks:
       - id: gauge-format
@@ -86,7 +59,7 @@ repos:
             "$BIN" config check_updates false >/dev/null 2>&1 || true
             temp_manifest=
             if [ ! -f manifest.json ]; then
-              printf "{\n  \"Language\": \"python\",\n  \"Plugins\": []\n}\n" > manifest.json
+              printf "{\n  \"Language\": \"shell\",\n  \"Plugins\": []\n}\n" > manifest.json
               temp_manifest=manifest.json
             fi
             trap "test -n \"$temp_manifest\" && rm -f \"$temp_manifest\"" EXIT

@@ -1,15 +1,10 @@
 #!/bin/sh
 
-# Adjust PATH using the repository directory provided in PODMAN_SCRIPTS_DIR.
-if [ -z "${PODMAN_SCRIPTS_DIR:-}" ]; then
-    return 0 2>/dev/null || exit 0
-fi
-
-PATH="${PODMAN_SCRIPTS_DIR}/bin:${PATH}"
-export PATH
-
 warn() { printf '%s\n' "$*" >&2; }
-die()  { warn "$@"; exit 1; }
+die() {
+    warn "$@"
+    exit 1
+}
 
 abort() {
     code=${1:-1}
@@ -20,10 +15,15 @@ abort() {
 }
 
 onfail() {
-    handler=$1; shift
-    [ "x$1" = "x--" ] || { warn "usage: onfail handler -- cmd ..."; return 2; }
+    handler=$1
     shift
-    "$@"; rc=$?
+    [ "$1" = "--" ] || {
+        warn "usage: onfail handler -- cmd ..."
+        return 2
+    }
+    shift
+    "$@"
+    rc=$?
     [ "$rc" -eq 0 ] || "$handler" "$rc" "$@"
     return "$rc"
 }
@@ -35,7 +35,7 @@ retry() {
         [ -t 0 ] || return "$s"
         printf 'Failed (exit %d). Retry? [y/N] ' "$s" >&2
         IFS= read -r yn || return "$s"
-        case $yn in [Yy]*) ;; *) return "$s";; esac
+        case $yn in [Yy]*) ;; *) return "$s" ;; esac
     done
 }
 
@@ -49,8 +49,15 @@ mark() {
         done)
             [ -n "$2" ] || return 2
             m=$2
-            case $m in */*) d=${m%/*}; [ -d "$d" ] || mkdir -p "$d";; esac
-            ( umask 077; : > "$m" ) || :
+            case $m in */*)
+                d=${m%/*}
+                [ -d "$d" ] || mkdir -p "$d"
+                ;;
+            esac
+            (
+                umask 077
+                : >"$m"
+            ) || :
             ;;
         *) return 2 ;;
     esac
