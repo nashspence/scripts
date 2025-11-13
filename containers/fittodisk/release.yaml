@@ -1,5 +1,0 @@
-# single source of truth for this service
-image: docker.io/nashspence/scripts-fittodisk
-version: v0.1.0
-labels:
-  org.opencontainers.image.title: fittodisk
